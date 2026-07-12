@@ -557,6 +557,12 @@ class FoundationTests(unittest.TestCase):
             (("ci", "allow_skipped"), "true"),
             (("ci", "allow_neutral"), 1),
             (("ci", "zero_checks"), "Not-valid"),
+            (("multisprint",), "a" * 65),
+            (("repositories", 0, "name"), "a" * 65),
+            (("agents", "builder"), "a" * 65),
+            (("ci", "zero_checks"), "a" * 65),
+            (("repositories", 0, "branch"), "main\x00hidden"),
+            (("repositories", 0, "remote"), "origin\x00hidden"),
         ]
         for path, value in cases:
             with self.subTest(path=path, value=value):
@@ -862,13 +868,36 @@ class FoundationTests(unittest.TestCase):
         """Status rejects invalid roots without creating runtime paths or worktree files."""
         non_git = self.fixture.base / "status-non-git"
         non_git.mkdir()
-        for root in (self.root / "missing", non_git, self.root / "docs"):
+        bare = self.fixture.base / "status-bare.git"
+        git(self.fixture.base, "init", "--bare", str(bare))
+        for root in (self.root / "missing", non_git, self.root / "docs", bare):
             with self.subTest(root=root):
                 code, stdout, stderr = self.invoke(["status", "--root", str(root), "--json"])
                 self.assertEqual(code, 2)
                 self.assertEqual(stdout, "")
                 self.assertTrue(stderr)
-                self.assertFalse((root / "info").exists())
+                if root != bare:
+                    self.assertFalse((root / "info").exists())
+
+    def test_status_allows_user_dirty_worktrees(self) -> None:
+        """Status reports no-run state without applying run cleanliness preflight."""
+        (self.root / "user-dirty.txt").write_text("user work\n", encoding="utf-8")
+        code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 0, stderr)
+        self.assertFalse(json.loads(stdout)["run_exists"])
+
+    def test_missing_config_uses_missing_required_file_reason(self) -> None:
+        """Absent required configuration is distinct from malformed configuration."""
+        (self.root / "sprint_config.json").unlink()
+        for arguments in (
+            ["run", "--root", str(self.root), "--server-url", "opaque"],
+            ["status", "--root", str(self.root), "--json"],
+        ):
+            with self.subTest(command=arguments[0]):
+                code, _, stderr = self.invoke(arguments)
+                self.assertEqual(code, 2)
+                self.assertIn("missing_required_file", stderr)
+        self.assertFalse((self.root / "info").exists())
 
     def test_missing_root_agents_file_fails_without_runtime_artifacts(self) -> None:
         """Run preflight requires the root instructions file before mutation."""
@@ -1221,7 +1250,15 @@ class FoundationTests(unittest.TestCase):
         self.assertNotIn("synthetic-secret", diagnostic)
         self.assertIn("[REDACTED]", diagnostic)
 
-        for value in ("password: synthetic-secret", "token=synthetic-secret", "https://example.invalid/#token=synthetic-secret"):
+        for value in (
+            "password: synthetic-secret",
+            "token=synthetic-secret",
+            "https://example.invalid/#token=synthetic-secret",
+            "ghp_" + "A" * 36,
+            "github_pat_" + "A" * 20,
+            "sk-" + "A" * 20,
+            "AKIA" + "A" * 16,
+        ):
             with self.subTest(value=value):
                 event = transition_event(new_state(load_config(self.root)), "run.started", "initializing", {"previous_state": None, "note": value})
                 with self.assertRaises(ControllerError) as context:
@@ -1775,7 +1812,7 @@ class FoundationTests(unittest.TestCase):
                 ignore=shutil.ignore_patterns(".git", ".venv", "build", "dist", "*.egg-info", "__pycache__", "opencode_sprint_loop.lua"),
             )
             result = subprocess.run(
-                [sys.executable, "-m", "build"],
+                [sys.executable, "-m", "build", "--no-isolation"],
                 cwd=source,
                 text=True,
                 stdout=subprocess.PIPE,
@@ -2001,6 +2038,21 @@ class FoundationTests(unittest.TestCase):
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
         self.assertEqual(code, 4, stderr)
         self.assertEqual(json.loads(paths.lock_metadata.read_text(encoding="utf-8"))["schema_version"], 1)
+
+    def test_tracked_lock_metadata_is_never_replaced(self) -> None:
+        """A user-tracked lock.json cannot be claimed as stale controller metadata."""
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        paths.lock_metadata.parent.mkdir(parents=True)
+        paths.lock_metadata.write_text("tracked user content\n", encoding="utf-8")
+        git(self.root, "add", str(paths.lock_metadata.relative_to(self.root)))
+        git(self.root, "commit", "-m", "Track unrelated lock metadata")
+        before = paths.lock_metadata.read_bytes()
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 2)
+        self.assertIn("inconsistent_persistence", stderr)
+        self.assertEqual(paths.lock_metadata.read_bytes(), before)
+        self.assertEqual(git(self.root, "status", "--porcelain=v2"), "")
 
     def test_ignored_stale_lock_metadata_cannot_hide_extra_directories(self) -> None:
         """The stale-lock exception rejects ignored controller trees with any extra content."""
@@ -2285,6 +2337,15 @@ class FoundationTests(unittest.TestCase):
                 for key in path[:-1]:
                     target = target[key]  # type: ignore[index]
                 target[path[-1]] = value  # type: ignore[index]
+                with self.assertRaises(ControllerError) as context:
+                    validate_state(state)
+                self.assertEqual(context.exception.code, "corrupt_state")
+        for state_name in ("stopped", "failed", "finished"):
+            with self.subTest(terminal_state=state_name):
+                state = new_state(config)
+                state["state"] = state_name
+                if state_name != "finished":
+                    state["reason"] = {"code": "test", "message": "test", "details": {}}
                 with self.assertRaises(ControllerError) as context:
                     validate_state(state)
                 self.assertEqual(context.exception.code, "corrupt_state")

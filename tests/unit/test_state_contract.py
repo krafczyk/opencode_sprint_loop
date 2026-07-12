@@ -40,6 +40,5 @@ class StateContractTests(unittest.TestCase):
         error = ControllerError("corrupt_state", "fixture")
         self.assertEqual(error.code, "corrupt_state")
 
-
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

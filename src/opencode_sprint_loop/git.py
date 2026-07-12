@@ -62,6 +62,15 @@ def inspect_worktree(root: Path, *, expected_root: Path, error_code: str) -> Git
     return GitRepository(expected_root, git_dir, head)
 
 
+def is_tracked_path(root: Path, path: Path) -> bool:
+    """Return whether one contained path is tracked without modifying the index."""
+    try:
+        relative = path.relative_to(root).as_posix()
+    except ValueError as error:
+        raise ControllerError("internal_error", f"Path is outside the sprint root: {path}") from error
+    return bool(_run(root, "ls-files", "--error-unmatch", "--", relative, allow_failure=True).strip())
+
+
 def _ensure_clean(repository: GitRepository, code: str, label: str, *, allowed_untracked: set[str] | None = None) -> None:
     """Fail when porcelain v2 reports any tracked or untracked change."""
     status = _run(

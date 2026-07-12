@@ -212,8 +212,8 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
         raise ControllerError("corrupt_state", "Sprint 1 control fields must be null")
     if data["terminal_result"] is not None:
         raise ControllerError("corrupt_state", "Sprint 1 terminal_result must be null")
-    if data["state"] in {"blocked", "failed"} and process["active"]:
-        raise ControllerError("corrupt_state", "Blocked and failed Sprint 1 states must be inactive")
+    if data["state"] in TERMINAL_STATES | {"blocked"} and process["active"]:
+        raise ControllerError("corrupt_state", "Blocked and terminal Sprint 1 states must be inactive")
     validate_safe_data(data, code="corrupt_state", label="State")
     return data
 

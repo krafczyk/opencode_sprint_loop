@@ -14,7 +14,7 @@ from typing import NoReturn, Sequence
 from . import __version__
 from .config import SprintConfig, load_config
 from .errors import ControllerError
-from .git import validate_preflight, validate_root
+from .git import is_tracked_path, validate_preflight, validate_root
 from .locking import advisory_lock
 from .paths import RuntimePaths, canonical_root, ensure_runtime_paths_safe, runtime_paths
 from .safeio import open_directory
@@ -82,6 +82,15 @@ def _existing_run(paths: RuntimePaths, config: SprintConfig) -> None:
         raise ControllerError("run_already_exists", "A persisted Sprint 1 run already exists; resume policy is not implemented")
     if state_exists or events_exists:
         raise ControllerError("inconsistent_persistence", "Incomplete existing state or event artifacts require manual inspection")
+
+
+def _reject_tracked_lock_metadata(root: Path, paths: RuntimePaths) -> None:
+    """Refuse to replace lock metadata that belongs to the sprint repository history."""
+    if paths.lock_metadata.exists() and is_tracked_path(root, paths.lock_metadata):
+        raise ControllerError(
+            "inconsistent_persistence",
+            f"Tracked lock metadata cannot be replaced: {paths.lock_metadata}. Remove it from repository history before running",
+        )
 
 
 def _write_lock_metadata(path: Path, state: dict[str, object]) -> None:
@@ -160,6 +169,7 @@ def _run(root_value: str, server_url: str) -> int:
     root, config, paths, run_lock, persistence_lock = _load_root_config(root_value)
     with advisory_lock(persistence_lock, exclusive=False):
         _existing_run(paths, config)
+    _reject_tracked_lock_metadata(root, paths)
     allowed = {paths.lock_metadata.relative_to(root).as_posix()} if paths.lock_metadata.exists() else set()
     validate_preflight(root, config, require_clean=True, allowed_root_untracked=allowed)
     with advisory_lock(run_lock, exclusive=True, blocking=False):
@@ -170,6 +180,7 @@ def _run(root_value: str, server_url: str) -> int:
             if post_lock_run_lock != run_lock or post_lock_persistence_lock != persistence_lock:
                 raise ControllerError("internal_error", "Controller lock location changed during preflight")
             _existing_run(paths, config)
+            _reject_tracked_lock_metadata(root, paths)
             allowed = {paths.lock_metadata.relative_to(root).as_posix()} if paths.lock_metadata.exists() else set()
             validate_preflight(root, config, require_clean=True, allowed_root_untracked=allowed)
             # The first transition includes metadata creation under one exclusive

@@ -174,7 +174,7 @@ python3 -m unittest discover -s tests -v
 python3 -m compileall -q src
 python3 -m ruff check src tests
 python3 -m mypy
-python3 -m build
+python3 -m build --no-isolation
 git diff --check
 ```
 
@@ -185,7 +185,7 @@ The tests create temporary local Git repositories and submodules. They do not re
 Build and install a wheel in a clean environment, then run the demonstration against a real temporary Git repository and initialized submodule:
 
 ```bash
-python3 -m build
+python3 -m build --no-isolation
 python3 -m venv /tmp/sprint-loop-demo-venv
 /tmp/sprint-loop-demo-venv/bin/python -m pip install --no-deps dist/opencode_sprint_loop-0.1.0-py3-none-any.whl
 /tmp/sprint-loop-demo-venv/bin/python scripts/demo_sprint1.py --executable /tmp/sprint-loop-demo-venv/bin/sprint-loop

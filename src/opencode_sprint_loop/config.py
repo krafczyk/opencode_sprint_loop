@@ -98,7 +98,7 @@ def load_config(root: Path) -> SprintConfig:
         finally:
             os.close(directory)
     except FileNotFoundError:
-        raise ControllerError("invalid_config", f"sprint_config.json must be a regular file: {config_path}")
+        raise ControllerError("missing_required_file", f"Missing required sprint_config.json: {config_path}")
     except OSError as error:
         raise ControllerError("invalid_config", f"sprint_config.json must be a regular file: {config_path}") from error
     if "schema_version" not in data:
