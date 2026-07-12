@@ -74,8 +74,15 @@ def _identifier(value: Any, field: str) -> str:
 
 
 def load_config(root: Path) -> SprintConfig:
-    """Load and fully validate `sprint_config.json` below a canonical root."""
-    data = load_json_object(root / "sprint_config.json", code="invalid_config")
+    """Load immutable Sprint 1 configuration or raise ``ControllerError`` without mutation."""
+    config_path = root / "sprint_config.json"
+    if config_path.is_symlink() or not config_path.is_file():
+        raise ControllerError("invalid_config", f"sprint_config.json must be a regular file: {config_path}")
+    data = load_json_object(config_path, code="invalid_config")
+    if "schema_version" not in data:
+        raise ControllerError("invalid_config", "Missing field in sprint_config.json: schema_version")
+    if not isinstance(data["schema_version"], int) or isinstance(data["schema_version"], bool) or data["schema_version"] != 1:
+        raise ControllerError("unsupported_config_schema", "schema_version must equal integer 1")
     _expect_keys(
         data,
         {
@@ -84,8 +91,6 @@ def load_config(root: Path) -> SprintConfig:
         },
         "sprint_config.json",
     )
-    if not isinstance(data["schema_version"], int) or isinstance(data["schema_version"], bool) or data["schema_version"] != 1:
-        raise ControllerError("unsupported_config_schema", "schema_version must equal integer 1")
     multisprint = _identifier(data["multisprint"], "multisprint")
     sprint = _positive_int(data["sprint"], "sprint")
 
@@ -128,7 +133,11 @@ def load_config(root: Path) -> SprintConfig:
     agents = {role: _identifier(agents_data[role], f"agents.{role}") for role in role_keys}
     for name in agents.values():
         agent_file = root / ".opencode" / "agents" / f"{name}.md"
-        if not agent_file.is_file():
+        try:
+            local_agent = agent_file.resolve().relative_to(root)
+        except ValueError:
+            local_agent = None
+        if agent_file.is_symlink() or not agent_file.is_file() or local_agent is None:
             raise ControllerError("invalid_agent_definition", f"Missing agent definition: {agent_file}")
 
     models_data = data["models"]

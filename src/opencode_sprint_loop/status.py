@@ -55,7 +55,10 @@ def project_status(root: Path, config: SprintConfig, paths: RuntimePaths, run_lo
         "run_id": state["run_id"],
         "sprint": {"multisprint": state["multisprint"], "index": state["sprint"]},
         "state": state["state"],
-        "reason": state["reason"],
+        "reason": None if state["reason"] is None else {
+            "code": state["reason"]["code"],
+            "message": state["reason"]["message"],
+        },
         "active": {"role": None, "invocation_id": None, "session_id": None},
         "commits": state["commits"],
         "audit": {
@@ -66,7 +69,13 @@ def project_status(root: Path, config: SprintConfig, paths: RuntimePaths, run_lo
         },
         "ci": {"status": state["ci"]["status"], "attempt": state["ci"]["attempt"], "commit_sha": state["ci"]["commit_sha"]},
         "counters": state["counters"],
-        "checklist": state["checklist"],
+        "checklist": {
+            "satisfied": state["checklist"]["satisfied"],
+            "partial": state["checklist"]["partial"],
+            "unsatisfied": state["checklist"]["unsatisfied"],
+            "not_evaluated": state["checklist"]["not_evaluated"],
+            "assessed_at": state["checklist"]["assessed_at"],
+        },
         "last_event": {"sequence": event["sequence"], "type": event["type"], "timestamp": event["timestamp"]},
         "updated_at": state["updated_at"],
     }

@@ -41,8 +41,12 @@ def process_start_identity(pid: int) -> str | None:
     """Return an opaque Linux boot/process start identity when available."""
     try:
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
-        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
-        return f"{boot_id}:{fields[21]}"
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        _, separator, fields_after_name = stat.rpartition(")")
+        if not separator:
+            return None
+        # Field 22 is process start time; fields after the name begin at field 3.
+        return f"{boot_id}:{fields_after_name.split()[19]}"
     except (FileNotFoundError, IndexError, OSError):
         return None
 
@@ -93,8 +97,8 @@ _REQUIRED = {
 
 
 def _exact_fields(data: Any, fields: set[str], label: str) -> dict[str, Any]:
-    """Require a schema-version-one object to have exactly its documented fields."""
-    if not isinstance(data, dict) or set(data) != fields:
+    """Require stable schema-version-one fields while allowing future additions."""
+    if not isinstance(data, dict) or fields - set(data):
         raise ControllerError("corrupt_state", f"State {label} fields are invalid")
     return data
 
@@ -125,19 +129,21 @@ def _validate_reason(reason: Any) -> None:
 
 def validate_state(data: dict[str, Any]) -> dict[str, Any]:
     """Validate persisted state before it influences controller decisions."""
-    _exact_fields(data, _REQUIRED, "top-level")
+    if not isinstance(data, dict) or "schema_version" not in data:
+        raise ControllerError("corrupt_state", "State is missing schema_version")
     if not isinstance(data["schema_version"], int) or isinstance(data["schema_version"], bool) or data["schema_version"] != 1:
         raise ControllerError("unsupported_state_schema", "Unsupported state schema version")
+    _exact_fields(data, _REQUIRED, "top-level")
     try:
         uuid.UUID(data["run_id"])
     except (ValueError, TypeError, AttributeError) as error:
         raise ControllerError("corrupt_state", "State run_id is not a UUID") from error
     if not isinstance(data["state"], str) or data["state"] not in STATE_NAMES:
         raise ControllerError("corrupt_state", f"Unknown workflow state: {data['state']!r}")
-    if data["state"] in {"blocked", "failed", "stopped"}:
+    if data["state"] in {"blocked", "failed", "stopped"} and data["reason"] is None:
+        raise ControllerError("corrupt_state", "Blocked, failed, and stopped states require a reason")
+    if data["reason"] is not None:
         _validate_reason(data["reason"])
-    elif data["reason"] is not None:
-        raise ControllerError("corrupt_state", "State reason must be null outside blocked, failed, and stopped states")
     _nonnegative_int(data["last_event_sequence"], "last_event_sequence")
     if not isinstance(data["multisprint"], str) or not data["multisprint"] or not isinstance(data["sprint"], int) or isinstance(data["sprint"], bool) or data["sprint"] <= 0:
         raise ControllerError("corrupt_state", "State sprint identity is invalid")
@@ -149,9 +155,9 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
     if process["process_start"] is not None and (not isinstance(process["process_start"], str) or not process["process_start"]):
         raise ControllerError("corrupt_state", "State process_start is invalid")
     server = _exact_fields(data["server"], {"url", "version"}, "server")
-    if server["url"] is not None or server["version"] is not None:
-        raise ControllerError("corrupt_state", "Sprint 1 server fields must be null")
-    if data["active_invocation"] is not None:
+    _nullable_string(server["url"], "server.url")
+    _nullable_string(server["version"], "server.version")
+    if data["active_invocation"] is not None and not isinstance(data["active_invocation"], dict):
         raise ControllerError("corrupt_state", "Sprint 1 active_invocation must be null")
 
     commits = _exact_fields(data["commits"], {"local", "pushed"}, "commits")
@@ -168,9 +174,9 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
     _nullable_string(audit["remaining_effort"], "audit.remaining_effort")
 
     ci = _exact_fields(data["ci"], {"attempt", "commit_sha", "status", "checks"}, "ci")
-    if _nonnegative_int(ci["attempt"], "ci.attempt") < 0 or not isinstance(ci["checks"], list) or ci["checks"]:
+    if _nonnegative_int(ci["attempt"], "ci.attempt") < 0 or not isinstance(ci["checks"], list):
         raise ControllerError("corrupt_state", "State CI fields are invalid")
-    if ci["status"] != "not_started" or ci["commit_sha"] is not None:
+    if not isinstance(ci["status"], str) or ci["commit_sha"] is not None and not isinstance(ci["commit_sha"], str):
         raise ControllerError("corrupt_state", "State CI metadata is invalid")
 
     counters = _exact_fields(data["counters"], {"implementation_cycles", "ci_fix_attempts"}, "counters")
@@ -178,7 +184,7 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
     _nonnegative_int(counters["ci_fix_attempts"], "counters.ci_fix_attempts")
 
     checklist = _exact_fields(data["checklist"], {"satisfied", "partial", "unsatisfied", "not_evaluated", "assessed_at", "items"}, "checklist")
-    if not isinstance(checklist["items"], list) or checklist["items"]:
+    if not isinstance(checklist["items"], list):
         raise ControllerError("corrupt_state", "State checklist items are invalid")
     for field in ("satisfied", "partial", "unsatisfied", "not_evaluated"):
         _nonnegative_int(checklist[field], f"checklist.{field}")
@@ -186,8 +192,11 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
         _timestamp(checklist["assessed_at"], "checklist.assessed_at")
 
     control = _exact_fields(data["control"], {"requested", "requested_at", "resume_state"}, "control")
-    if any(value is not None for value in control.values()):
-        raise ControllerError("corrupt_state", "Sprint 1 control fields must be null")
+    _nullable_string(control["requested"], "control.requested")
+    if control["requested_at"] is not None:
+        _timestamp(control["requested_at"], "control.requested_at")
+    if control["resume_state"] is not None and control["resume_state"] not in STATE_NAMES:
+        raise ControllerError("corrupt_state", "State control resume_state is invalid")
     if data["state"] not in TERMINAL_STATES and data["terminal_result"] is not None:
         raise ControllerError("corrupt_state", "State terminal_result must be null for non-terminal states")
     if data["terminal_result"] is not None and not isinstance(data["terminal_result"], dict):
@@ -201,7 +210,7 @@ def load_state(path: Path) -> dict[str, Any]:
 
 
 def write_state_atomic(path: Path, state: dict[str, Any]) -> None:
-    """Atomically replace state after complete validation and durable flushing."""
+    """Atomically replace state or raise ``ControllerError`` without truncating prior state."""
     validate_state(state)
     try:
         serialized = dump_json(state)

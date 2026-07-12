@@ -34,7 +34,7 @@ python3 -m venv .venv
 For development:
 
 ```bash
-python3 -m pip install -e '.[dev]'
+python3 -m pip install --constraint requirements-dev.lock -e '.[dev]'
 python3 -m opencode_sprint_loop.cli --help
 ```
 
@@ -156,7 +156,9 @@ info/<multisprint>/<sprint>/
 
 The event log records `run.started`, `state.entered`, and `run.blocked`; state ends at `blocked` with reason code `execution_not_implemented`. Sprint 1 does not create checkpoint commits, so these controller-owned runtime files remain uncommitted until Sprint 4 introduces checkpoint commits.
 
-Use `status --json` for integrations. It emits one JSON object and writes diagnostics only to standard error. Its stable top-level fields are `schema_version`, `controller_version`, `sprint_root`, `run_exists`, `process_running`, `run_id`, `sprint`, `state`, `reason`, `active`, `commits`, `audit`, `ci`, `counters`, `checklist`, `last_event`, and `updated_at`.
+Use `status --json` for integrations. It emits one JSON object and writes diagnostics only to standard error. Its stable top-level fields are `schema_version`, `controller_version`, `sprint_root`, `run_exists`, `process_running`, `run_id`, `sprint`, `state`, `reason`, `active`, `commits`, `audit`, `ci`, `counters`, `checklist`, `last_event`, and `updated_at`. The complete V1 Sprint 1 JSON schema is defined in [the status contract](docs/controller-v1/1/sprint_spec.md#12-status-json-contract).
+
+`sprint` contains `multisprint` and `index`; `reason` contains safe `code` and `message`; `active` contains `role`, `invocation_id`, and `session_id`; `last_event` contains `sequence`, `type`, and `timestamp`. `commits` has `local` and `pushed` maps. `audit`, `ci`, `counters`, and `checklist` contain the corresponding fields shown in the linked contract. No-run status sets every run-specific object to `null`.
 
 When no run exists, `run_exists` is `false`, `process_running` is `false`, and every run-specific field from `run_id` through `updated_at` is `null`. No-run status does not create worktree or runtime files. For a placeholder run, `active` is an object containing null `role`, `invocation_id`, and `session_id` fields; `last_event` identifies the final `run.blocked` record.
 
@@ -165,7 +167,7 @@ When no run exists, `run_exists` is `false`, `process_running` is `false`, and e
 Run the default offline test suite:
 
 ```bash
-python3 -m pip install -e '.[dev]'
+python3 -m pip install --constraint requirements-dev.lock -e '.[dev]'
 python3 -m unittest discover -s tests -v
 python3 -m compileall -q src
 python3 -m ruff check src tests

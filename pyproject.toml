@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Durable controller for OpenCode development sprints"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "opencode_sprint_loop contributors" }]
 dependencies = []
 

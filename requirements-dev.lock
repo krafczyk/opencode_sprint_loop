@@ -1,0 +1,8 @@
+build==1.2.2.post1
+mypy==1.16.1
+mypy_extensions==1.1.0
+packaging==26.2
+pathspec==1.1.1
+pyproject_hooks==1.2.0
+ruff==0.12.1
+typing_extensions==4.16.0

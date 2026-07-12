@@ -12,7 +12,7 @@ from .errors import ControllerError
 
 @contextmanager
 def advisory_lock(path: Path, *, exclusive: bool, blocking: bool = True) -> Iterator[None]:
-    """Hold a Linux advisory lock, creating only its non-worktree lock file."""
+    """Hold a Linux advisory lock or raise ``ControllerError``; creates only its lock file."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = path.open("a+", encoding="utf-8")

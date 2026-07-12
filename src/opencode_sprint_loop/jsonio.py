@@ -14,15 +14,19 @@ MAX_JSON_BYTES = 1024 * 1024
 def load_json_object(path: Path, *, code: str) -> dict[str, Any]:
     """Load one bounded UTF-8 JSON object while rejecting duplicate keys."""
     try:
-        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if handle.seek(0, 2) > MAX_JSON_BYTES:
+                raise ControllerError(code, f"JSON input exceeds 1 MiB: {path}")
+            handle.seek(0)
+            raw = handle.read(MAX_JSON_BYTES + 1)
     except FileNotFoundError as error:
         raise ControllerError("missing_required_file", f"Required file is missing: {path}") from error
     except OSError as error:
         raise ControllerError(code, f"Cannot inspect JSON input: {path}") from error
-    if size > MAX_JSON_BYTES:
+    if len(raw) > MAX_JSON_BYTES:
         raise ControllerError(code, f"JSON input exceeds 1 MiB: {path}")
     try:
-        text = path.read_text(encoding="utf-8")
+        text = raw.decode("utf-8")
     except UnicodeDecodeError as error:
         raise ControllerError(code, f"JSON input is not UTF-8: {path}") from error
     except OSError as error:

@@ -98,7 +98,7 @@ def load_events(path: Path) -> list[dict[str, Any]]:
 
 
 def append_event(path: Path, event: dict[str, Any]) -> None:
-    """Durably append one validated event without rewriting earlier bytes."""
+    """Durably append one event or raise ``ControllerError`` without rewriting history."""
     validate_event(event, code="persistence_failed")
     try:
         serialized = json.dumps(event, sort_keys=True, ensure_ascii=True).encode("utf-8") + b"\n"
@@ -107,6 +107,7 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
     if len(serialized) > MAX_JSON_BYTES:
         raise ControllerError("persistence_failed", "Event exceeds 1 MiB")
     try:
+        created = not path.exists()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("ab") as handle:
             written = handle.write(serialized)
@@ -114,6 +115,12 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
                 raise ControllerError("persistence_failed", "Short write while appending event")
             handle.flush()
             os.fsync(handle.fileno())
+        if created:
+            directory_descriptor = os.open(path.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
     except OSError as error:
         raise ControllerError("persistence_failed", f"Could not append event: {path}") from error
 

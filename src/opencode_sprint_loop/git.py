@@ -98,7 +98,7 @@ def _ensure_submodule(root: GitRepository, config: SprintConfig) -> GitRepositor
         raise ControllerError("invalid_submodule", f"Managed repository is not a tracked gitlink: {config.repository.path}")
     gitlink_sha = fields[1]
     modules = root.root / ".gitmodules"
-    if not modules.is_file():
+    if modules.is_symlink() or not modules.is_file():
         raise ControllerError("invalid_submodule", f"Missing .gitmodules for managed repository: {config.repository.path}")
     registered = _run(
         root.root,
@@ -132,8 +132,9 @@ def validate_root(root: Path) -> GitRepository:
 
 
 def validate_preflight(root: Path, config: SprintConfig, *, require_clean: bool, allowed_root_untracked: set[str] | None = None) -> GitRepository:
-    """Validate all read-only Sprint 1 repository assumptions."""
-    if not (root / "AGENTS.md").is_file():
+    """Validate read-only repository assumptions or raise ``ControllerError`` without mutation."""
+    agents_path = root / "AGENTS.md"
+    if agents_path.is_symlink() or not agents_path.is_file():
         raise ControllerError("missing_required_file", f"Missing root AGENTS.md: {root / 'AGENTS.md'}")
     sprint = validate_root(root)
     _ensure_no_operation(sprint, "Sprint repository")

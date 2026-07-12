@@ -89,7 +89,7 @@ def _write_lock_metadata(path: Path, state: dict[str, object]) -> None:
         raise ControllerError("persistence_failed", f"Could not persist lock metadata: {path}") from error
 
 
-def _persist_best_effort_failure(paths: RuntimePaths, config: SprintConfig) -> None:
+def _persist_best_effort_failure(paths: RuntimePaths, config: SprintConfig, persistence_lock: Path) -> None:
     """Record a safe failed transition only when the current durable pair is consistent."""
     if not paths.state.exists() or not paths.events.exists():
         return
@@ -101,6 +101,7 @@ def _persist_best_effort_failure(paths: RuntimePaths, config: SprintConfig) -> N
             state,
             paths.events,
             paths.state,
+            persistence_lock,
             "failed",
             reason={
                 "code": "internal_error",
@@ -123,34 +124,38 @@ def _run(root_value: str, server_url: str) -> int:
     allowed = {paths.lock_metadata.relative_to(root).as_posix()} if paths.lock_metadata.exists() else set()
     validate_preflight(root, config, require_clean=True, allowed_root_untracked=allowed)
     with advisory_lock(run_lock, exclusive=True, blocking=False):
-        with advisory_lock(persistence_lock, exclusive=True):
-            try:
-                # Reload after ownership so a concurrent clean configuration change
-                # cannot direct this run to stale runtime paths or repository data.
-                root, config, paths, post_lock_run_lock, post_lock_persistence_lock = _load_root_config(root_value)
-                if post_lock_run_lock != run_lock or post_lock_persistence_lock != persistence_lock:
-                    raise ControllerError("internal_error", "Controller lock location changed during preflight")
-                _existing_run(paths, config)
-                allowed = {paths.lock_metadata.relative_to(root).as_posix()} if paths.lock_metadata.exists() else set()
-                validate_preflight(root, config, require_clean=True, allowed_root_untracked=allowed)
+        try:
+            # Reload after ownership so a concurrent clean configuration change
+            # cannot direct this run to stale runtime paths or repository data.
+            root, config, paths, post_lock_run_lock, post_lock_persistence_lock = _load_root_config(root_value)
+            if post_lock_run_lock != run_lock or post_lock_persistence_lock != persistence_lock:
+                raise ControllerError("internal_error", "Controller lock location changed during preflight")
+            _existing_run(paths, config)
+            allowed = {paths.lock_metadata.relative_to(root).as_posix()} if paths.lock_metadata.exists() else set()
+            validate_preflight(root, config, require_clean=True, allowed_root_untracked=allowed)
+            # The first transition includes metadata creation under one exclusive
+            # persistence lock so status sees either no run or a complete state.
+            with advisory_lock(persistence_lock, exclusive=True):
                 state = new_state(config)
                 _write_lock_metadata(paths.lock_metadata, state)
-                persist_initial(state, paths.events, paths.state)
-                transition(state, paths.events, paths.state, "validating")
-                transition(
-                    state,
-                    paths.events,
-                    paths.state,
-                    "blocked",
-                    reason={
-                        "code": "execution_not_implemented",
-                        "message": "Sprint execution begins in a later implementation sprint.",
-                        "details": {},
-                    },
-                )
-            except Exception:
-                _persist_best_effort_failure(paths, config)
-                raise
+                state = persist_initial(state, paths.events, paths.state, persistence_lock, lock_held=True)
+            state = transition(state, paths.events, paths.state, persistence_lock, "validating")
+            state = transition(
+                state,
+                paths.events,
+                paths.state,
+                persistence_lock,
+                "blocked",
+                reason={
+                    "code": "execution_not_implemented",
+                    "message": "Sprint execution begins in a later implementation sprint.",
+                    "details": {},
+                },
+            )
+        except Exception:
+            _persist_best_effort_failure(paths, config, persistence_lock)
+            raise
+    sys.stderr.write("execution_not_implemented: Sprint execution begins in a later implementation sprint.\n")
     return 4
 
 
