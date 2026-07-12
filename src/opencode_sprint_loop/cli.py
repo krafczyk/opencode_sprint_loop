@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import socket
 import sys
 from pathlib import Path
@@ -80,14 +81,37 @@ def _write_lock_metadata(path: Path, state: dict[str, object]) -> None:
         "hostname": socket.gethostname(),
         "started_at": state["created_at"],
     }
-    temporary = path.with_suffix(".tmp")
+    temporary_name: str | None = None
+    directory: int | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        temporary_name = f".lock-{secrets.token_hex(16)}.tmp"
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory,
+        )
+        try:
+            payload = (json.dumps(metadata, sort_keys=True) + "\n").encode("utf-8")
+            if os.write(descriptor, payload) != len(payload):
+                raise OSError("Short write while persisting lock metadata")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary_name, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
     except OSError as error:
-        temporary.unlink(missing_ok=True)
         raise ControllerError("persistence_failed", f"Could not persist lock metadata: {path}") from error
+    finally:
+        if temporary_name is not None and directory is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+        if directory is not None:
+            os.close(directory)
 
 
 def _persist_best_effort_failure(paths: RuntimePaths, config: SprintConfig, persistence_lock: Path) -> None:

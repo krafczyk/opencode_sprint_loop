@@ -11,7 +11,7 @@ from typing import Any
 
 from .errors import ControllerError
 from .jsonio import MAX_JSON_BYTES
-from .state import STATE_NAMES, utc_now
+from .state import RFC3339_UTC, STATE_NAMES, utc_now
 
 EVENT_TYPES = frozenset({
     "run.started", "state.entered", "server.validated", "agent.started", "agent.completed",
@@ -36,12 +36,14 @@ def validate_event(event: dict[str, Any], *, code: str = "corrupt_event_log") ->
         uuid.UUID(event["run_id"])
     except (ValueError, TypeError, AttributeError) as error:
         raise ControllerError(code, "Event run_id is invalid") from error
-    if not isinstance(event["timestamp"], str) or not event["timestamp"].endswith("Z"):
+    if not isinstance(event["timestamp"], str) or not RFC3339_UTC.fullmatch(event["timestamp"]):
         raise ControllerError(code, "Event timestamp is invalid")
     try:
-        datetime.fromisoformat(event["timestamp"].removesuffix("Z") + "+00:00")
+        parsed = datetime.fromisoformat(event["timestamp"].removesuffix("Z") + "+00:00")
     except ValueError as error:
         raise ControllerError(code, "Event timestamp is invalid") from error
+    if parsed.tzinfo is None:
+        raise ControllerError(code, "Event timestamp is invalid")
     if not isinstance(event["type"], str) or event["type"] not in EVENT_TYPES:
         raise ControllerError(code, "Event type is invalid")
     if not isinstance(event["state"], str) or event["state"] not in STATE_NAMES:
@@ -115,12 +117,23 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
             raise ControllerError("persistence_failed", f"Event log must not be a symlink: {path}")
         created = not path.exists()
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("ab") as handle:
-            written = handle.write(serialized)
-            if written != len(serialized):
-                raise ControllerError("persistence_failed", "Short write while appending event")
-            handle.flush()
-            os.fsync(handle.fileno())
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory,
+            )
+            try:
+                written = os.write(descriptor, serialized)
+                if written != len(serialized):
+                    raise ControllerError("persistence_failed", "Short write while appending event")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(directory)
         if created:
             directory_descriptor = os.open(path.parent, os.O_DIRECTORY)
             try:

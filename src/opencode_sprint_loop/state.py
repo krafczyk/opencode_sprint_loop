@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
 import socket
-import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +20,7 @@ STATE_NAMES = frozenset({
     "stopped", "failed", "finished",
 })
 TERMINAL_STATES = frozenset({"stopped", "failed", "finished"})
+RFC3339_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
 def utc_now() -> str:
@@ -29,12 +30,14 @@ def utc_now() -> str:
 
 def _timestamp(value: Any, field: str) -> None:
     """Validate one timezone-aware RFC 3339 timestamp."""
-    if not isinstance(value, str) or not value.endswith("Z"):
+    if not isinstance(value, str) or not RFC3339_UTC.fullmatch(value):
         raise ControllerError("corrupt_state", f"State {field} is not an RFC 3339 UTC timestamp")
     try:
-        datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+        parsed = datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
     except ValueError as error:
         raise ControllerError("corrupt_state", f"State {field} is not an RFC 3339 UTC timestamp") from error
+    if parsed.tzinfo != UTC:
+        raise ControllerError("corrupt_state", f"State {field} is not an RFC 3339 UTC timestamp")
 
 
 def process_start_identity(pid: int) -> str | None:
@@ -221,23 +224,36 @@ def serialize_state(state: dict[str, Any]) -> str:
 def write_state_atomic(path: Path, state: dict[str, Any]) -> None:
     """Atomically replace state or raise ``ControllerError`` without truncating prior state."""
     serialized = serialize_state(state)
-    temporary: Path | None = None
+    temporary_name: str | None = None
+    directory: int | None = None
     try:
+        if os.path.lexists(path) and path.is_symlink():
+            raise ControllerError("persistence_failed", f"State file must not be a symlink: {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=path.parent)
-        temporary = Path(temporary_name)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            os.fchmod(handle.fileno(), 0o600)
-            handle.write(serialized)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory_descriptor = os.open(path.parent, os.O_DIRECTORY)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        temporary_name = f".state-{uuid.uuid4().hex}.tmp"
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory,
+        )
         try:
-            os.fsync(directory_descriptor)
+            payload = serialized.encode("utf-8")
+            if os.write(descriptor, payload) != len(payload):
+                raise OSError("Short write while persisting state")
+            os.fsync(descriptor)
         finally:
-            os.close(directory_descriptor)
+            os.close(descriptor)
+        os.replace(temporary_name, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
     except OSError as error:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
         raise ControllerError("persistence_failed", f"Could not persist state: {path}") from error
+    finally:
+        if temporary_name is not None and directory is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+        if directory is not None:
+            os.close(directory)

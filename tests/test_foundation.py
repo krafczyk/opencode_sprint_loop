@@ -8,6 +8,7 @@ import io
 import json
 import multiprocessing
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,44 @@ def hold_lock(path: str, ready: multiprocessing.synchronize.Event) -> None:
     with advisory_lock(Path(path), exclusive=True):
         ready.set()
         __import__("time").sleep(1)
+
+
+def invoke_in_child(
+    arguments: list[str], started: multiprocessing.synchronize.Event, results: multiprocessing.queues.Queue[tuple[int, str, str]]
+) -> None:
+    """Invoke the CLI in a separate process and return captured streams."""
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    started.set()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        code = main(arguments)
+    results.put((code, stdout.getvalue(), stderr.getvalue()))
+
+
+def pause_transition_in_child(
+    state: dict[str, Any], events_path: Path, state_path: Path, persistence_lock: Path,
+    state_write_started: multiprocessing.synchronize.Event,
+    release_state_write: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue[str | None],
+) -> None:
+    """Pause a transition after event sync to exercise concurrent status safely."""
+    from opencode_sprint_loop import transitions
+
+    real_write_state = transitions.write_state_atomic
+
+    def pause_before_state_replace(path: Path, replacement: dict[str, Any]) -> None:
+        state_write_started.set()
+        if not release_state_write.wait(timeout=10):
+            raise RuntimeError("timed out waiting to complete transition")
+        real_write_state(path, replacement)
+
+    try:
+        with patch("opencode_sprint_loop.transitions.write_state_atomic", side_effect=pause_before_state_replace):
+            transition(state, events_path, state_path, persistence_lock, "validating")
+    except Exception as error:
+        results.put(repr(error))
+    else:
+        results.put(None)
 
 
 def git(path: Path, *arguments: str) -> str:
@@ -71,52 +110,6 @@ def repository_snapshot(path: Path) -> dict[str, object]:
         "status": git(path, "status", "--porcelain=v2", "--untracked-files=all"),
         "index": index.read_bytes(),
     }
-
-
-class ShortWriteHandle:
-    """Wrap a binary file handle while reporting a deliberately short write."""
-
-    def __init__(self, handle: Any) -> None:
-        self.handle = handle
-
-    def __enter__(self) -> "ShortWriteHandle":
-        self.handle.__enter__()
-        return self
-
-    def __exit__(self, *arguments: object) -> object:
-        return self.handle.__exit__(*arguments)
-
-    def write(self, data: bytes) -> int:
-        return self.handle.write(data[:-1])
-
-    def flush(self) -> None:
-        self.handle.flush()
-
-    def fileno(self) -> int:
-        return self.handle.fileno()
-
-
-class FailingWriteHandle:
-    """Wrap a text file handle and fail before any state payload is written."""
-
-    def __init__(self, handle: Any) -> None:
-        self.handle = handle
-
-    def __enter__(self) -> "FailingWriteHandle":
-        self.handle.__enter__()
-        return self
-
-    def __exit__(self, *arguments: object) -> object:
-        return self.handle.__exit__(*arguments)
-
-    def write(self, _: str) -> int:
-        raise OSError("injected write failure")
-
-    def flush(self) -> None:
-        self.handle.flush()
-
-    def fileno(self) -> int:
-        return self.handle.fileno()
 
 
 def write_config(root: Path, *, schema_version: int = 1) -> None:
@@ -554,6 +547,21 @@ class FoundationTests(unittest.TestCase):
                     expected = "dirty_sprint_repository" if repository_name == "sprint" else "dirty_managed_repository"
                     self.assert_preflight_preserves_snapshot(fixture, expected)
 
+    def test_ignored_untracked_files_are_rejected_and_preserved(self) -> None:
+        """Ignored user files remain preflight blockers in both managed worktrees."""
+        for repository_name in ("sprint", "managed"):
+            with self.subTest(repository=repository_name):
+                fixture, _ = self.variant()
+                repository = fixture.root if repository_name == "sprint" else fixture.managed
+                exclude = Path(git(repository, "rev-parse", "--git-path", "info/exclude"))
+                if not exclude.is_absolute():
+                    exclude = repository / exclude
+                with exclude.open("a", encoding="utf-8") as handle:
+                    handle.write("ignored.txt\n")
+                (repository / "ignored.txt").write_text("user work\n", encoding="utf-8")
+                expected = "dirty_sprint_repository" if repository_name == "sprint" else "dirty_managed_repository"
+                self.assert_preflight_preserves_snapshot(fixture, expected)
+
     def test_managed_branch_and_remote_failures_preserve_git_snapshots(self) -> None:
         """Managed branch, detached-head, and remote failures do not alter either repository."""
         variants = (
@@ -745,13 +753,13 @@ class FoundationTests(unittest.TestCase):
         state = load_state(paths.state)
         before = paths.events.read_bytes()
         event = transition_event(state, "state.entered", "blocked", {"previous_state": "blocked"})
-        original_open = Path.open
 
-        def short_open(path: Path, *arguments: object, **keywords: object) -> Any:
-            handle = original_open(path, *arguments, **keywords)
-            return ShortWriteHandle(handle) if path == paths.events else handle
+        real_write = os.write
 
-        with patch("opencode_sprint_loop.events.Path.open", autospec=True, side_effect=short_open):
+        def short_write(descriptor: int, data: bytes) -> int:
+            return real_write(descriptor, data[:-1])
+
+        with patch("opencode_sprint_loop.events.os.write", side_effect=short_write):
             with self.assertRaises(ControllerError) as context:
                 append_event(paths.events, event)
         self.assertEqual(context.exception.code, "persistence_failed")
@@ -823,18 +831,20 @@ class FoundationTests(unittest.TestCase):
         replacement["state"] = "blocked"
         replacement["reason"] = {"code": "test", "message": "test", "details": {}}
 
-        with patch("opencode_sprint_loop.state.tempfile.mkstemp", side_effect=OSError("injected")):
+        real_open = os.open
+
+        def fail_temporary_open(path: str | bytes | os.PathLike[str] | os.PathLike[bytes], *arguments: object, **keywords: object) -> int:
+            if isinstance(path, str) and path.startswith(".state-"):
+                raise OSError("injected")
+            return real_open(path, *arguments, **keywords)  # type: ignore[arg-type]
+
+        with patch("opencode_sprint_loop.state.os.open", side_effect=fail_temporary_open):
             with self.assertRaises(ControllerError) as context:
                 write_state_atomic(paths.state, replacement)
         self.assertEqual(context.exception.code, "persistence_failed")
         self.assertEqual(load_state(paths.state)["state"], "initializing")
 
-        real_fdopen = os.fdopen
-
-        def fail_write(descriptor: int, *arguments: object, **keywords: object) -> FailingWriteHandle:
-            return FailingWriteHandle(real_fdopen(descriptor, *arguments, **keywords))
-
-        with patch("opencode_sprint_loop.state.os.fdopen", side_effect=fail_write):
+        with patch("opencode_sprint_loop.state.os.write", side_effect=OSError("injected")):
             with self.assertRaises(ControllerError) as context:
                 write_state_atomic(paths.state, replacement)
         self.assertEqual(context.exception.code, "persistence_failed")
@@ -1048,6 +1058,54 @@ class FoundationTests(unittest.TestCase):
                 self.assertIn("inconsistent_persistence", stderr)
                 self.assertEqual(list(outside.iterdir()), [])
 
+    def test_fifo_runtime_artifacts_are_rejected_without_blocking(self) -> None:
+        """Status uses metadata checks and never opens non-regular runtime artifacts."""
+        for label, artifact_name in (("state", "state"), ("events", "events"), ("lock", "lock_metadata")):
+            with self.subTest(artifact=label):
+                fixture, root = self.variant()
+                paths = runtime_paths(root, "foundation", 1)
+                paths.info_dir.mkdir(parents=True)
+                os.mkfifo(getattr(paths, artifact_name))
+                context = multiprocessing.get_context("fork")
+                started = context.Event()
+                results = context.Queue()
+                process = context.Process(
+                    target=invoke_in_child,
+                    args=(["status", "--root", str(root), "--json"], started, results),
+                )
+                process.start()
+                try:
+                    self.assertTrue(started.wait(timeout=5))
+                    process.join(timeout=5)
+                    self.assertFalse(process.is_alive(), "status blocked on a FIFO runtime artifact")
+                    code, stdout, stderr = results.get(timeout=1)
+                    self.assertEqual(code, 2)
+                    self.assertEqual(stdout, "")
+                    self.assertIn("inconsistent_persistence", stderr)
+                finally:
+                    if process.is_alive():
+                        process.terminate()
+                        process.join(timeout=5)
+                    results.close()
+
+    def test_lock_metadata_temporary_symlink_is_not_followed(self) -> None:
+        """Lock metadata replacement refuses a preexisting temporary-file symlink."""
+        from opencode_sprint_loop.cli import _write_lock_metadata
+
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        paths.info_dir.mkdir(parents=True)
+        outside = self.fixture.base / "outside-lock-metadata"
+        outside.write_text("outside remains unchanged\n", encoding="utf-8")
+        temporary = paths.info_dir / ".lock-fixed.tmp"
+        temporary.symlink_to(outside)
+        with patch("opencode_sprint_loop.cli.secrets.token_hex", return_value="fixed"):
+            with self.assertRaises(ControllerError) as context:
+                _write_lock_metadata(paths.lock_metadata, new_state(config))
+        self.assertEqual(context.exception.code, "persistence_failed")
+        self.assertEqual(outside.read_text(encoding="utf-8"), "outside remains unchanged\n")
+        self.assertFalse(paths.lock_metadata.exists())
+
     def test_source_distribution_includes_controller_documents(self) -> None:
         """The packaging manifest carries authoritative documentation in the source archive."""
         if importlib.util.find_spec("setuptools") is None:
@@ -1138,6 +1196,104 @@ class FoundationTests(unittest.TestCase):
         metadata = json.loads(paths.lock_metadata.read_text(encoding="utf-8"))
         self.assertEqual(metadata["schema_version"], 1)
 
+    def test_post_lock_revalidation_rejects_a_run_created_by_a_racing_process(self) -> None:
+        """A run that passed initial preflight cannot overwrite a later completed run."""
+        from opencode_sprint_loop import cli
+
+        context = multiprocessing.get_context("fork")
+        waiting_for_ownership = context.Event()
+        release_ownership = context.Event()
+        results = context.Queue()
+        parent_pid = os.getpid()
+        original_lock = cli.advisory_lock
+
+        @contextlib.contextmanager
+        def delay_child_ownership(path: Path, **kwargs: object) -> Any:
+            if os.getpid() != parent_pid and path.name == "run.lock":
+                waiting_for_ownership.set()
+                if not release_ownership.wait(timeout=10):
+                    raise RuntimeError("timed out waiting to continue ownership race")
+            with original_lock(path, **kwargs):
+                yield
+
+        with patch("opencode_sprint_loop.cli.advisory_lock", side_effect=delay_child_ownership):
+            started = context.Event()
+            process = context.Process(
+                target=invoke_in_child,
+                args=(["run", "--root", str(self.root), "--server-url", "opaque"], started, results),
+            )
+            process.start()
+            try:
+                self.assertTrue(started.wait(timeout=5))
+                self.assertTrue(waiting_for_ownership.wait(timeout=5))
+                code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+                self.assertEqual(code, 4, stderr)
+                paths = runtime_paths(self.root, "foundation", 1)
+                before_state = paths.state.read_bytes()
+                before_events = paths.events.read_bytes()
+                release_ownership.set()
+                process.join(timeout=5)
+                self.assertFalse(process.is_alive())
+                child_code, _, child_stderr = results.get(timeout=1)
+                self.assertEqual(child_code, 2)
+                self.assertIn("run_already_exists", child_stderr)
+                self.assertEqual(paths.state.read_bytes(), before_state)
+                self.assertEqual(paths.events.read_bytes(), before_events)
+            finally:
+                release_ownership.set()
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=5)
+                results.close()
+
+    def test_status_waits_for_a_complete_normal_transition(self) -> None:
+        """Status cannot expose the event-ahead snapshot during a locked transition."""
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
+        initial = persist_initial(new_state(config), paths.events, paths.state, persistence_lock)
+        context = multiprocessing.get_context("fork")
+        state_write_started = context.Event()
+        release_state_write = context.Event()
+        transition_results = context.Queue()
+        transition_process = context.Process(
+            target=pause_transition_in_child,
+            args=(
+                initial, paths.events, paths.state, persistence_lock, state_write_started,
+                release_state_write, transition_results,
+            ),
+        )
+        transition_process.start()
+        self.assertTrue(state_write_started.wait(timeout=5))
+        status_started = context.Event()
+        status_results = context.Queue()
+        status_process = context.Process(
+            target=invoke_in_child,
+            args=(["status", "--root", str(self.root), "--json"], status_started, status_results),
+        )
+        status_process.start()
+        try:
+            self.assertTrue(status_started.wait(timeout=5))
+            with self.assertRaises(queue.Empty):
+                status_results.get(timeout=0.25)
+            release_state_write.set()
+            transition_process.join(timeout=5)
+            self.assertFalse(transition_process.is_alive())
+            self.assertIsNone(transition_results.get(timeout=1))
+            status_process.join(timeout=5)
+            self.assertFalse(status_process.is_alive())
+            code, stdout, stderr = status_results.get(timeout=1)
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(json.loads(stdout)["state"], "validating")
+        finally:
+            release_state_write.set()
+            for process in (transition_process, status_process):
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=5)
+            transition_results.close()
+            status_results.close()
+
     def test_status_rejects_state_for_different_sprint(self) -> None:
         """Persisted state cannot be projected for a different configured sprint."""
         self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
@@ -1169,6 +1325,22 @@ class FoundationTests(unittest.TestCase):
                 with self.assertRaises(ControllerError) as context:
                     validate_state(state)
                 self.assertEqual(context.exception.code, "corrupt_state")
+
+    def test_date_only_timestamps_are_rejected_for_state_and_events(self) -> None:
+        """Date-only values cannot be accepted where RFC 3339 UTC timestamps are required."""
+        config = load_config(self.root)
+        for field in ("created_at", "updated_at"):
+            with self.subTest(state_field=field):
+                state = new_state(config)
+                state[field] = "2026-01-01"
+                with self.assertRaises(ControllerError) as context:
+                    validate_state(state)
+                self.assertEqual(context.exception.code, "corrupt_state")
+        event = transition_event(new_state(config), "run.started", "initializing", {"previous_state": None})
+        event["timestamp"] = "2026-01-01"
+        with self.assertRaises(ControllerError) as context:
+            append_event(self.root / "info" / "events.jsonl", event)
+        self.assertEqual(context.exception.code, "persistence_failed")
 
     def test_state_accepts_additive_schema_version_one_fields(self) -> None:
         """Later Sprint 1-compatible fields do not invalidate the stable state schema."""

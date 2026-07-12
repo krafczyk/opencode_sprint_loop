@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -27,10 +30,10 @@ def git(root: Path, *arguments: str) -> None:
     run(["git", *arguments], cwd=root)
 
 
-def write_config(root: Path) -> None:
+def write_config(root: Path, *, schema_version: int = 1) -> None:
     """Write the complete valid Sprint 1 configuration fixture."""
     config = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "multisprint": "demo",
         "sprint": 1,
         "repositories": [{"name": "managed", "path": "repositories/managed", "branch": "main", "remote": "origin"}],
@@ -90,8 +93,35 @@ def create_fixture(base: Path) -> Path:
     return root
 
 
+@contextlib.contextmanager
+def hold_run_lock(root: Path) -> object:
+    """Hold the controller's ownership lock for the lock-rejection demonstration."""
+    lock_path = root / ".git" / "opencode-sprint-loop" / "run.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def create_named_fixture(base: Path, name: str) -> Path:
+    """Create an isolated fixture variant without changing the primary demo."""
+    fixture_base = base / name
+    fixture_base.mkdir()
+    return create_fixture(fixture_base)
+
+
+def require_no_runtime_artifacts(root: Path) -> None:
+    """Fail the demonstration if an invalid run created controller runtime paths."""
+    if (root / "info").exists():
+        raise SystemExit(f"Invalid run unexpectedly created runtime artifacts: {root / 'info'}")
+
+
 def main() -> int:
-    """Run the repeatable Sprint 1 demonstration against one temporary repository."""
+    """Run the repeatable Sprint 1 demonstration against isolated temporary fixtures."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--executable", default="sprint-loop")
     parser.add_argument("--keep", type=Path)
@@ -111,6 +141,32 @@ def main() -> int:
     run([arguments.executable, "--version"])
     run([arguments.executable, "status", "--root", str(root)])
     run([arguments.executable, "status", "--root", str(root), "--json"])
+
+    lock_root = create_named_fixture(base, "lock-rejection")
+    print(f"\nLock rejection fixture: {lock_root}")
+    with hold_run_lock(lock_root):
+        run([arguments.executable, "run", "--root", str(lock_root), "--server-url", "opaque-demo-url"], expected=2)
+        run([arguments.executable, "status", "--root", str(lock_root), "--json"])
+    require_no_runtime_artifacts(lock_root)
+
+    dirty_root = create_named_fixture(base, "dirty-managed")
+    dirty_managed = dirty_root / "repositories" / "managed"
+    (dirty_managed / "user-work.txt").write_text("uncommitted user work\n", encoding="utf-8")
+    print(f"\nDirty managed no-mutation fixture: {dirty_root}")
+    git(dirty_managed, "status", "--short")
+    run([arguments.executable, "run", "--root", str(dirty_root), "--server-url", "opaque-demo-url"], expected=2)
+    git(dirty_managed, "status", "--short")
+    require_no_runtime_artifacts(dirty_root)
+
+    schema_root = create_named_fixture(base, "unknown-schema")
+    write_config(schema_root, schema_version=2)
+    print(f"\nUnknown schema no-mutation fixture: {schema_root}")
+    git(schema_root, "status", "--short")
+    run([arguments.executable, "run", "--root", str(schema_root), "--server-url", "opaque-demo-url"], expected=2)
+    git(schema_root, "status", "--short")
+    require_no_runtime_artifacts(schema_root)
+
+    print("No OpenCode server or GitHub credentials were used.")
     git(root, "submodule", "status")
     git(root, "status", "--short")
     git(root / "repositories" / "managed", "status", "--short")

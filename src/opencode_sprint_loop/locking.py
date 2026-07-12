@@ -20,7 +20,17 @@ def advisory_lock(path: Path, *, exclusive: bool, blocking: bool = True) -> Iter
         raise ControllerError("persistence_failed", f"Lock file must not be a symlink: {path}")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        handle = path.open("a+", encoding="utf-8")
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory,
+            )
+        finally:
+            os.close(directory)
+        handle = os.fdopen(descriptor, "a+", encoding="utf-8")
     except OSError as error:
         raise ControllerError("persistence_failed", f"Cannot create lock file: {path}") from error
     flags = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH

@@ -325,8 +325,8 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S1-TEST-017** Add CLI tests proving invalid runs create no runtime paths.
 - [x] **S1-TEST-018** Add a complete valid-run test asserting all three events and final state.
 - [x] **S1-TEST-018A** Add a test proving any existing persisted run is rejected before worktree cleanliness and remains unchanged.
-- [ ] **S1-TEST-018B** Add a two-process race test proving post-lock revalidation prevents a second run from writing.
-- [ ] **S1-TEST-018C** Add a concurrent status test proving the persistence lock prevents transient event/state inconsistency during a normal transition.
+- [x] **S1-TEST-018B** Add a two-process race test proving post-lock revalidation prevents a second run from writing.
+- [x] **S1-TEST-018C** Add a concurrent status test proving the persistence lock prevents transient event/state inconsistency during a normal transition.
 - [ ] **S1-TEST-018C1** Add a concurrent no-run/first-transition status test proving status observes either a complete no-run view or a complete initialized-run view.
 - [x] **S1-TEST-018D** Add event short-write and partial-final-line tests with no automatic truncation.
 - [x] **S1-TEST-018E** Test that the opaque server URL is neither parsed, logged, nor persisted.

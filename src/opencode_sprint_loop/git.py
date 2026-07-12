@@ -63,7 +63,14 @@ def inspect_worktree(root: Path, *, expected_root: Path, error_code: str) -> Git
 
 def _ensure_clean(repository: GitRepository, code: str, label: str, *, allowed_untracked: set[str] | None = None) -> None:
     """Fail when porcelain v2 reports any tracked or untracked change."""
-    status = _run(repository.root, "status", "--porcelain=v2", "-z", "--untracked-files=all")
+    status = _run(
+        repository.root,
+        "status",
+        "--porcelain=v2",
+        "-z",
+        "--untracked-files=all",
+        "--ignored=matching",
+    )
     records = [record for record in status.split("\0") if record]
     disallowed = []
     for record in records:
