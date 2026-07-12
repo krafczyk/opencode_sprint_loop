@@ -1,0 +1,3 @@
+[submodule "opencode_sprint_loop.lua"]
+	path = opencode_sprint_loop.lua
+	url = git@github.com:krafczyk/opencode_sprint_loop.lua
