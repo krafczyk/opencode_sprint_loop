@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import socket
+import stat
 import sys
 from pathlib import Path
 from typing import NoReturn, Sequence
@@ -15,7 +16,7 @@ from . import __version__
 from .config import SprintConfig, load_config
 from .errors import ControllerError
 from .git import is_tracked_path, validate_preflight, validate_root
-from .locking import advisory_lock
+from .locking import advisory_lock, ownership_lock
 from .paths import RuntimePaths, canonical_root, ensure_runtime_paths_safe, runtime_paths
 from .safeio import open_directory
 from .security import redact_diagnostic
@@ -78,10 +79,18 @@ def _existing_run(paths: RuntimePaths, config: SprintConfig) -> None:
     if state_exists and events_exists:
         state, _ = validate_persistence(paths, config)
         if state is None:
-            raise ControllerError("inconsistent_persistence", "State and event log changed during validation")
-        raise ControllerError("run_already_exists", "A persisted Sprint 1 run already exists; resume policy is not implemented")
+            raise ControllerError(
+                "inconsistent_persistence", "State and event log changed during validation"
+            )
+        raise ControllerError(
+            "run_already_exists",
+            "A persisted Sprint 1 run already exists; resume policy is not implemented",
+        )
     if state_exists or events_exists:
-        raise ControllerError("inconsistent_persistence", "Incomplete existing state or event artifacts require manual inspection")
+        raise ControllerError(
+            "inconsistent_persistence",
+            "Incomplete existing state or event artifacts require manual inspection",
+        )
 
 
 def _reject_tracked_lock_metadata(root: Path, paths: RuntimePaths) -> None:
@@ -93,8 +102,8 @@ def _reject_tracked_lock_metadata(root: Path, paths: RuntimePaths) -> None:
         )
 
 
-def _write_lock_metadata(path: Path, state: dict[str, object]) -> None:
-    """Write descriptive lock metadata after ownership and preflight succeed."""
+def _write_lock_metadata(root: Path, path: Path, state: dict[str, object]) -> None:
+    """Install descriptive lock metadata without overwriting a tracked race."""
     metadata = {
         "schema_version": 1,
         "run_id": state["run_id"],
@@ -104,6 +113,7 @@ def _write_lock_metadata(path: Path, state: dict[str, object]) -> None:
         "started_at": state["created_at"],
     }
     temporary_name: str | None = None
+    stale_name: str | None = None
     directory: int | None = None
     try:
         directory = open_directory(path.parent, create=True)
@@ -121,21 +131,75 @@ def _write_lock_metadata(path: Path, state: dict[str, object]) -> None:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        os.replace(temporary_name, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        try:
+            existing = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1:
+                raise ControllerError(
+                    "persistence_failed", f"Lock metadata must be an unlinked regular file: {path}"
+                )
+            if is_tracked_path(root, path):
+                raise ControllerError(
+                    "inconsistent_persistence",
+                    f"Tracked lock metadata cannot be replaced: {path}. Remove it from repository history before running",
+                )
+            stale_name = f".stale-lock-{secrets.token_hex(16)}.tmp"
+            os.link(
+                path.name,
+                stale_name,
+                src_dir_fd=directory,
+                dst_dir_fd=directory,
+                follow_symlinks=False,
+            )
+            os.unlink(path.name, dir_fd=directory)
+        # A Git index entry appearing after the initial preflight is still
+        # detected after removing stale metadata. The final link never replaces
+        # an entry created by another process.
+        if is_tracked_path(root, path):
+            if stale_name is not None:
+                os.link(stale_name, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+                os.unlink(stale_name, dir_fd=directory)
+                stale_name = None
+            raise ControllerError(
+                "inconsistent_persistence",
+                f"Tracked lock metadata cannot be replaced: {path}. Remove it from repository history before running",
+            )
+        try:
+            os.link(temporary_name, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        except FileExistsError as error:
+            raise ControllerError(
+                "persistence_failed", f"Lock metadata changed during persistence: {path}"
+            ) from error
+        os.unlink(temporary_name, dir_fd=directory)
+        temporary_name = None
+        if stale_name is not None:
+            os.unlink(stale_name, dir_fd=directory)
+            stale_name = None
         os.fsync(directory)
     except OSError as error:
-        raise ControllerError("persistence_failed", f"Could not persist lock metadata: {path}") from error
+        raise ControllerError(
+            "persistence_failed", f"Could not persist lock metadata: {path}"
+        ) from error
     finally:
         if temporary_name is not None and directory is not None:
             try:
                 os.unlink(temporary_name, dir_fd=directory)
             except FileNotFoundError:
                 pass
+        if stale_name is not None and directory is not None:
+            try:
+                os.unlink(stale_name, dir_fd=directory)
+            except FileNotFoundError:
+                pass
         if directory is not None:
             os.close(directory)
 
 
-def _persist_best_effort_failure(paths: RuntimePaths, config: SprintConfig, persistence_lock: Path) -> None:
+def _persist_best_effort_failure(
+    paths: RuntimePaths, config: SprintConfig, persistence_lock: Path
+) -> None:
     """Record a safe failed transition only when the current durable pair is consistent."""
     if not paths.state.exists() or not paths.events.exists():
         return
@@ -167,29 +231,52 @@ def _run(root_value: str, server_url: str) -> int:
     if not server_url:
         raise ControllerError("invalid_arguments", "--server-url must be non-empty")
     root, config, paths, run_lock, persistence_lock = _load_root_config(root_value)
-    with advisory_lock(persistence_lock, exclusive=False):
-        _existing_run(paths, config)
+    # Initial validation must not create controller metadata. A concurrent run
+    # is rechecked under both locks after this read-only pass.
+    _existing_run(paths, config)
     _reject_tracked_lock_metadata(root, paths)
-    allowed = {paths.lock_metadata.relative_to(root).as_posix()} if paths.lock_metadata.exists() else set()
+    allowed = (
+        {paths.lock_metadata.relative_to(root).as_posix()}
+        if paths.lock_metadata.exists()
+        else set()
+    )
     validate_preflight(root, config, require_clean=True, allowed_root_untracked=allowed)
-    with advisory_lock(run_lock, exclusive=True, blocking=False):
+    with ownership_lock(run_lock, blocking=False) as ownership:
         try:
             # Reload after ownership so a concurrent clean configuration change
             # cannot direct this run to stale runtime paths or repository data.
-            root, config, paths, post_lock_run_lock, post_lock_persistence_lock = _load_root_config(root_value)
+            root, config, paths, post_lock_run_lock, post_lock_persistence_lock = _load_root_config(
+                root_value
+            )
             if post_lock_run_lock != run_lock or post_lock_persistence_lock != persistence_lock:
-                raise ControllerError("internal_error", "Controller lock location changed during preflight")
-            _existing_run(paths, config)
-            _reject_tracked_lock_metadata(root, paths)
-            allowed = {paths.lock_metadata.relative_to(root).as_posix()} if paths.lock_metadata.exists() else set()
-            validate_preflight(root, config, require_clean=True, allowed_root_untracked=allowed)
-            # The first transition includes metadata creation under one exclusive
-            # persistence lock so status sees either no run or a complete state.
-            with advisory_lock(persistence_lock, exclusive=True):
+                raise ControllerError(
+                    "internal_error", "Controller lock location changed during preflight"
+                )
+            ownership.ensure_current()
+            # The first transition includes the post-lock revalidation and
+            # metadata creation under one exclusive persistence lock so status
+            # sees either no run or a complete initialized run.
+            with advisory_lock(persistence_lock, exclusive=True) as persistence:
+                ownership.ensure_current()
+                persistence.ensure_current()
+                _existing_run(paths, config)
+                _reject_tracked_lock_metadata(root, paths)
+                allowed = (
+                    {paths.lock_metadata.relative_to(root).as_posix()}
+                    if paths.lock_metadata.exists()
+                    else set()
+                )
+                validate_preflight(root, config, require_clean=True, allowed_root_untracked=allowed)
+                ownership.ensure_current()
+                persistence.ensure_current()
                 state = new_state(config)
-                _write_lock_metadata(paths.lock_metadata, state)
-                state = persist_initial(state, paths.events, paths.state, persistence_lock, lock_held=True)
+                _write_lock_metadata(root, paths.lock_metadata, state)
+                state = persist_initial(
+                    state, paths.events, paths.state, persistence_lock, lock_held=True
+                )
+            ownership.ensure_current()
             state = transition(state, paths.events, paths.state, persistence_lock, "validating")
+            ownership.ensure_current()
             state = transition(
                 state,
                 paths.events,
@@ -205,7 +292,9 @@ def _run(root_value: str, server_url: str) -> int:
         except BaseException:
             _persist_best_effort_failure(paths, config, persistence_lock)
             raise
-    sys.stderr.write("execution_not_implemented: Sprint execution begins in a later implementation sprint.\n")
+    sys.stderr.write(
+        "execution_not_implemented: Sprint execution begins in a later implementation sprint.\n"
+    )
     return 4
 
 
@@ -235,14 +324,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Reserved controls still validate their root and configuration before
         # reporting that their Sprint 1 coordination semantics are unavailable.
         _load_root_config(arguments.root)
-        raise ControllerError("feature_not_implemented", f"{arguments.command} is not implemented in Sprint 1")
+        raise ControllerError(
+            "feature_not_implemented", f"{arguments.command} is not implemented in Sprint 1"
+        )
     except ControllerError as error:
         sys.stderr.write(f"{error.code}: {redact_diagnostic(error.message)}\n")
         return 2
     except SystemExit:
         raise
     except Exception:
-        sys.stderr.write("internal_error: Unexpected controller failure; inspect local controller logs and retry\n")
+        sys.stderr.write(
+            "internal_error: Unexpected controller failure; inspect local controller logs and retry\n"
+        )
         return 2
 
 

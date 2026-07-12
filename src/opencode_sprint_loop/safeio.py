@@ -26,7 +26,12 @@ def open_directory(path: Path, *, create: bool = False) -> int:
             except FileNotFoundError:
                 if not create:
                     raise
-                os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    # Another controller may have created this lock-path component
+                    # after our failed open. Re-open it with the same no-follow rules.
+                    pass
                 child = os.open(
                     component,
                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -70,7 +75,9 @@ def open_regular_at(directory: int, name: str, flags: int, *, mode: int = 0o600)
     readable_snapshot = flags & os.O_ACCMODE == os.O_RDONLY and details.st_nlink == 0
     if not stat.S_ISREG(details.st_mode) or (details.st_nlink != 1 and not readable_snapshot):
         os.close(descriptor)
-        raise ControllerError("persistence_failed", f"Runtime artifact must be an unlinked regular file: {name}")
+        raise ControllerError(
+            "persistence_failed", f"Runtime artifact must be an unlinked regular file: {name}"
+        )
     return descriptor
 
 
@@ -88,10 +95,14 @@ def require_current_directory(path: Path, directory: int) -> None:
     try:
         current = os.stat(path, follow_symlinks=False)
     except OSError as error:
-        raise ControllerError("persistence_failed", f"Runtime directory changed during operation: {path}") from error
+        raise ControllerError(
+            "persistence_failed", f"Runtime directory changed during operation: {path}"
+        ) from error
     anchored = os.fstat(directory)
-    if (
-        not stat.S_ISDIR(current.st_mode)
-        or (current.st_dev, current.st_ino) != (anchored.st_dev, anchored.st_ino)
+    if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (
+        anchored.st_dev,
+        anchored.st_ino,
     ):
-        raise ControllerError("persistence_failed", f"Runtime directory changed during operation: {path}")
+        raise ControllerError(
+            "persistence_failed", f"Runtime directory changed during operation: {path}"
+        )

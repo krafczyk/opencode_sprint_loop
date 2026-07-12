@@ -31,6 +31,14 @@ python3 -m venv .venv
 .venv/bin/sprint-loop --help
 ```
 
+The source-install command allows pip to provision the pinned build backend and
+may therefore require package-index access. In an air-gapped, pre-provisioned
+environment where the pinned build backend is already installed, use:
+
+```bash
+.venv/bin/python -m pip install --no-index --no-deps --no-build-isolation .
+```
+
 For development:
 
 ```bash
@@ -173,6 +181,7 @@ python3 -m pip install --constraint requirements-dev.lock -e '.[dev]'
 python3 -m unittest discover -s tests -v
 python3 -m compileall -q src
 python3 -m ruff check src tests
+python3 -m ruff format --check src tests scripts
 python3 -m mypy
 python3 -m build --no-isolation
 git diff --check

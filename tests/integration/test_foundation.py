@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import io
 import json
 import multiprocessing
@@ -25,7 +24,7 @@ from opencode_sprint_loop.config import load_config
 from opencode_sprint_loop.errors import ControllerError
 from opencode_sprint_loop.events import append_event, load_events, transition_event
 from opencode_sprint_loop.jsonio import MAX_JSON_BYTES
-from opencode_sprint_loop.locking import advisory_lock
+from opencode_sprint_loop.locking import advisory_lock, ownership_lock
 from opencode_sprint_loop.paths import runtime_paths
 from opencode_sprint_loop.security import redact_diagnostic
 from opencode_sprint_loop.state import load_state, new_state, validate_state, write_state_atomic
@@ -40,7 +39,9 @@ def hold_lock(path: str, ready: multiprocessing.synchronize.Event) -> None:
 
 
 def invoke_in_child(
-    arguments: list[str], started: multiprocessing.synchronize.Event, results: multiprocessing.queues.Queue[tuple[int, str, str]]
+    arguments: list[str],
+    started: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue[tuple[int, str, str]],
 ) -> None:
     """Invoke the CLI in a separate process and return captured streams."""
     stdout = io.StringIO()
@@ -52,7 +53,9 @@ def invoke_in_child(
 
 
 def run_paused_after_validating(
-    arguments: list[str], ready: multiprocessing.synchronize.Event, release: multiprocessing.synchronize.Event,
+    arguments: list[str],
+    ready: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
     results: multiprocessing.queues.Queue[int],
 ) -> None:
     """Run a real controller process while retaining ownership after validation."""
@@ -74,7 +77,10 @@ def run_paused_after_validating(
 
 
 def pause_transition_in_child(
-    state: dict[str, Any], events_path: Path, state_path: Path, persistence_lock: Path,
+    state: dict[str, Any],
+    events_path: Path,
+    state_path: Path,
+    persistence_lock: Path,
     state_write_started: multiprocessing.synchronize.Event,
     release_state_write: multiprocessing.synchronize.Event,
     results: multiprocessing.queues.Queue[str | None],
@@ -91,7 +97,10 @@ def pause_transition_in_child(
         real_write_state(*arguments)  # type: ignore[arg-type]
 
     try:
-        with patch("opencode_sprint_loop.transitions.write_state_atomic_at", side_effect=pause_before_state_replace):
+        with patch(
+            "opencode_sprint_loop.transitions.write_state_atomic_at",
+            side_effect=pause_before_state_replace,
+        ):
             transition(state, events_path, state_path, persistence_lock, "validating")
     except Exception as error:
         results.put(repr(error))
@@ -100,7 +109,10 @@ def pause_transition_in_child(
 
 
 def pause_initial_transition_in_child(
-    state: dict[str, Any], events_path: Path, state_path: Path, persistence_lock: Path,
+    state: dict[str, Any],
+    events_path: Path,
+    state_path: Path,
+    persistence_lock: Path,
     state_write_started: multiprocessing.synchronize.Event,
     release_state_write: multiprocessing.synchronize.Event,
     results: multiprocessing.queues.Queue[str | None],
@@ -117,7 +129,10 @@ def pause_initial_transition_in_child(
         real_write_state(*arguments)  # type: ignore[arg-type]
 
     try:
-        with patch("opencode_sprint_loop.transitions.write_state_atomic_at", side_effect=pause_before_state_replace):
+        with patch(
+            "opencode_sprint_loop.transitions.write_state_atomic_at",
+            side_effect=pause_before_state_replace,
+        ):
             persist_initial(state, events_path, state_path, persistence_lock)
     except Exception as error:
         results.put(repr(error))
@@ -126,7 +141,9 @@ def pause_initial_transition_in_child(
 
 
 def read_state_until_stopped(
-    path: Path, stop: multiprocessing.synchronize.Event, results: multiprocessing.queues.Queue[str | None]
+    path: Path,
+    stop: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue[str | None],
 ) -> None:
     """Continuously validate atomic state snapshots from a separate process."""
     try:
@@ -141,7 +158,12 @@ def read_state_until_stopped(
 def git(path: Path, *arguments: str) -> str:
     """Run Git in a temporary fixture repository."""
     result = subprocess.run(
-        ["git", *arguments], cwd=path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        ["git", *arguments],
+        cwd=path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
         env={"PATH": __import__("os").environ["PATH"], "LC_ALL": "C"},
     )
     if result.returncode:
@@ -152,7 +174,12 @@ def git(path: Path, *arguments: str) -> str:
 def git_optional(path: Path, *arguments: str) -> str:
     """Run a Git inspection command that may have no result."""
     result = subprocess.run(
-        ["git", *arguments], cwd=path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        ["git", *arguments],
+        cwd=path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
         env={"PATH": os.environ["PATH"], "LC_ALL": "C"},
     )
     return result.stdout.strip()
@@ -164,6 +191,11 @@ def controller_locks(root: Path) -> tuple[Path, Path]:
     if not git_dir.is_absolute():
         git_dir = (root / git_dir).resolve()
     return _lock_paths(git_dir)
+
+
+def controller_metadata_directory(root: Path) -> Path:
+    """Return the controller-owned Git metadata directory for a fixture."""
+    return controller_locks(root)[0].parent
 
 
 def repository_snapshot(path: Path) -> dict[str, object]:
@@ -188,7 +220,14 @@ def write_config(root: Path, *, schema_version: int = 1) -> None:
         "schema_version": schema_version,
         "multisprint": "foundation",
         "sprint": 1,
-        "repositories": [{"name": "managed", "path": "repositories/managed", "branch": "main", "remote": "origin"}],
+        "repositories": [
+            {
+                "name": "managed",
+                "path": "repositories/managed",
+                "branch": "main",
+                "remote": "origin",
+            }
+        ],
         "documents": {
             "multisprint_spec": "docs/foundation/multisprint_spec.md",
             "sprint_spec": "docs/foundation/1/sprint_spec.md",
@@ -203,7 +242,13 @@ def write_config(root: Path, *, schema_version: int = 1) -> None:
             "invocation_timeout_seconds": 60,
             "server_unavailable_grace_seconds": 30,
         },
-        "ci": {"provider": "github", "poll_interval_seconds": 30, "allow_skipped": True, "allow_neutral": True, "zero_checks": "error"},
+        "ci": {
+            "provider": "github",
+            "poll_interval_seconds": 30,
+            "allow_skipped": True,
+            "allow_neutral": True,
+            "zero_checks": "error",
+        },
     }
     (root / "sprint_config.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
@@ -250,7 +295,17 @@ class SprintRepositoryFixture:
         write_config(self.root)
         git(self.root, "add", "AGENTS.md", "docs", ".opencode", "sprint_config.json")
         git(self.root, "commit", "-m", "Add sprint inputs")
-        git(self.root, "-c", "protocol.file.allow=always", "submodule", "add", "-b", "main", str(self.remote), "repositories/managed")
+        git(
+            self.root,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-b",
+            "main",
+            str(self.remote),
+            "repositories/managed",
+        )
         git(self.root, "commit", "-m", "Add managed submodule")
         return self.root
 
@@ -265,16 +320,23 @@ class SprintRepositoryFixture:
 
     def snapshot(self) -> dict[str, object]:
         """Capture Git state that read-only controller preflight must preserve."""
-        return {"sprint": repository_snapshot(self.root), "managed": repository_snapshot(self.managed)}
+        return {
+            "sprint": repository_snapshot(self.root),
+            "managed": repository_snapshot(self.managed),
+        }
 
     def make_dirty(self, repository: Path, kind: str) -> None:
         """Create one staged, unstaged, or untracked change in a fixture repository."""
         tracked = "AGENTS.md" if repository == self.root else "managed.txt"
-        target = repository / ("untracked.txt" if kind == "untracked" else tracked)
+        if kind == "untracked_directory":
+            target = repository / "untracked-directory" / "nested.txt"
+            target.parent.mkdir()
+        else:
+            target = repository / ("untracked.txt" if kind == "untracked" else tracked)
         target.write_text(f"{kind} fixture change\n", encoding="utf-8")
         if kind == "staged":
             git(repository, "add", target.name)
-        elif kind not in {"unstaged", "untracked"}:
+        elif kind not in {"unstaged", "untracked", "untracked_directory"}:
             raise ValueError(f"Unsupported dirty fixture kind: {kind}")
 
     def set_managed_branch(self, branch: str = "wrong") -> None:
@@ -334,7 +396,9 @@ class SprintRepositoryFixture:
         else:
             config = load_config(self.root)
             paths = runtime_paths(self.root, config.multisprint, config.sprint)
-            target = {"state": paths.state, "events": paths.events, "lock": paths.lock_metadata}[record]
+            target = {"state": paths.state, "events": paths.events, "lock": paths.lock_metadata}[
+                record
+            ]
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(contents, encoding="utf-8")
         return target
@@ -370,15 +434,21 @@ class FoundationTests(unittest.TestCase):
     ) -> None:
         """Assert a rejected run leaves both repository snapshots untouched."""
         before = fixture.snapshot()
-        code, _, stderr = self.invoke(["run", "--root", str(fixture.root), "--server-url", "opaque"])
+        code, _, stderr = self.invoke(
+            ["run", "--root", str(fixture.root), "--server-url", "opaque"]
+        )
         self.assertEqual(code, 2)
         self.assertIn(expected_code, stderr)
         self.assertEqual(fixture.snapshot(), before)
         self.assertFalse((fixture.root / "info").exists())
+        self.assertFalse(controller_metadata_directory(fixture.root).exists())
 
     def test_help_and_version_are_successful(self) -> None:
         """The public CLI help and version paths exit successfully with stable content."""
-        for arguments, expected in ((["--help"], "{run,status,pause,resume,stop}"), (["--version"], "0.1.0")):
+        for arguments, expected in (
+            (["--help"], "{run,status,pause,resume,stop}"),
+            (["--version"], "0.1.0"),
+        ):
             with self.subTest(arguments=arguments):
                 stdout = io.StringIO()
                 stderr = io.StringIO()
@@ -409,7 +479,9 @@ class FoundationTests(unittest.TestCase):
 
     def test_duplicate_config_keys_are_rejected(self) -> None:
         """Duplicate JSON keys do not silently overwrite configuration."""
-        (self.root / "sprint_config.json").write_text('{"schema_version": 1, "schema_version": 1}\n', encoding="utf-8")
+        (self.root / "sprint_config.json").write_text(
+            '{"schema_version": 1, "schema_version": 1}\n', encoding="utf-8"
+        )
         with self.assertRaises(ControllerError) as context:
             load_config(self.root)
         self.assertEqual(context.exception.code, "invalid_config")
@@ -418,7 +490,12 @@ class FoundationTests(unittest.TestCase):
         """Duplicate keys below the configuration root cannot silently override a value."""
         path = self.root / "sprint_config.json"
         contents = path.read_text(encoding="utf-8")
-        path.write_text(contents.replace('"provider": "github"', '"provider": "github", "provider": "github"', 1), encoding="utf-8")
+        path.write_text(
+            contents.replace(
+                '"provider": "github"', '"provider": "github", "provider": "github"', 1
+            ),
+            encoding="utf-8",
+        )
         with self.assertRaises(ControllerError) as context:
             load_config(self.root)
         self.assertEqual(context.exception.code, "invalid_config")
@@ -441,7 +518,9 @@ class FoundationTests(unittest.TestCase):
     def test_external_symlinked_configuration_is_rejected(self) -> None:
         """The controller cannot load configuration through an external symlink."""
         external = self.fixture.base / "external.json"
-        external.write_text((self.root / "sprint_config.json").read_text(encoding="utf-8"), encoding="utf-8")
+        external.write_text(
+            (self.root / "sprint_config.json").read_text(encoding="utf-8"), encoding="utf-8"
+        )
         config_path = self.root / "sprint_config.json"
         config_path.unlink()
         config_path.symlink_to(external)
@@ -471,18 +550,50 @@ class FoundationTests(unittest.TestCase):
         """Every required field reports its path, and booleans never satisfy integer fields."""
         original = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
         required_paths = (
-            ("schema_version",), ("multisprint",), ("sprint",), ("repositories",),
-            ("repositories", 0, "name"), ("repositories", 0, "path"), ("repositories", 0, "branch"), ("repositories", 0, "remote"),
-            *( ("documents", field) for field in ("multisprint_spec", "sprint_spec", "sprint_checklist") ),
-            *( ("agents", field) for field in ("builder", "auditor", "ci_fixer") ),
-            *( ("models", field) for field in ("builder", "auditor", "ci_fixer") ),
-            ("pre_ci_audit", "enabled"), ("pre_ci_audit", "max_rounds"),
-            *( ("limits", field) for field in ("max_implementation_cycles", "max_ci_fix_attempts", "invocation_timeout_seconds", "server_unavailable_grace_seconds") ),
-            ("ci", "provider"), ("ci", "poll_interval_seconds"), ("ci", "allow_skipped"), ("ci", "allow_neutral"), ("ci", "zero_checks"),
+            ("schema_version",),
+            ("multisprint",),
+            ("sprint",),
+            ("repositories",),
+            ("repositories", 0, "name"),
+            ("repositories", 0, "path"),
+            ("repositories", 0, "branch"),
+            ("repositories", 0, "remote"),
+            *(
+                ("documents", field)
+                for field in ("multisprint_spec", "sprint_spec", "sprint_checklist")
+            ),
+            *(("agents", field) for field in ("builder", "auditor", "ci_fixer")),
+            *(("models", field) for field in ("builder", "auditor", "ci_fixer")),
+            ("pre_ci_audit", "enabled"),
+            ("pre_ci_audit", "max_rounds"),
+            *(
+                ("limits", field)
+                for field in (
+                    "max_implementation_cycles",
+                    "max_ci_fix_attempts",
+                    "invocation_timeout_seconds",
+                    "server_unavailable_grace_seconds",
+                )
+            ),
+            ("ci", "provider"),
+            ("ci", "poll_interval_seconds"),
+            ("ci", "allow_skipped"),
+            ("ci", "allow_neutral"),
+            ("ci", "zero_checks"),
         )
         integer_paths = (
-            ("schema_version",), ("sprint",), ("pre_ci_audit", "max_rounds"),
-            *( ("limits", field) for field in ("max_implementation_cycles", "max_ci_fix_attempts", "invocation_timeout_seconds", "server_unavailable_grace_seconds") ),
+            ("schema_version",),
+            ("sprint",),
+            ("pre_ci_audit", "max_rounds"),
+            *(
+                ("limits", field)
+                for field in (
+                    "max_implementation_cycles",
+                    "max_ci_fix_attempts",
+                    "invocation_timeout_seconds",
+                    "server_unavailable_grace_seconds",
+                )
+            ),
             ("ci", "poll_interval_seconds"),
         )
         for path in required_paths:
@@ -497,8 +608,10 @@ class FoundationTests(unittest.TestCase):
                     load_config(self.root)
                 self.assertEqual(context.exception.code, "invalid_config")
                 expected = (
-                    f"repositories[0].{path[-1]}" if path[0] == "repositories" and len(path) > 1
-                    else f"{path[0]}.{path[-1]}" if len(path) > 1
+                    f"repositories[0].{path[-1]}"
+                    if path[0] == "repositories" and len(path) > 1
+                    else f"{path[0]}.{path[-1]}"
+                    if len(path) > 1
                     else f"sprint_config.json.{path[-1]}"
                 )
                 self.assertIn(expected, context.exception.message)
@@ -512,7 +625,9 @@ class FoundationTests(unittest.TestCase):
                 (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
                 with self.assertRaises(ControllerError) as context:
                     load_config(self.root)
-                self.assertIn(context.exception.code, {"invalid_config", "unsupported_config_schema"})
+                self.assertIn(
+                    context.exception.code, {"invalid_config", "unsupported_config_schema"}
+                )
 
     def test_configuration_path_escapes_are_rejected_for_repository_and_documents(self) -> None:
         """Configured repository and document paths cannot leave the sprint root directly or by symlink."""
@@ -522,7 +637,10 @@ class FoundationTests(unittest.TestCase):
         (outside / "document.md").write_text("outside\n", encoding="utf-8")
         link = self.root / "outside-link"
         link.symlink_to(outside, target_is_directory=True)
-        paths = (("repositories", 0, "path"), *( ("documents", field) for field in original["documents"] ))
+        paths = (
+            ("repositories", 0, "path"),
+            *(("documents", field) for field in original["documents"]),
+        )
         for path in paths:
             for value in ("../outside", "outside-link/document.md"):
                 with self.subTest(path=path, value=value):
@@ -531,7 +649,9 @@ class FoundationTests(unittest.TestCase):
                     for key in path[:-1]:
                         target = target[key]  # type: ignore[index]
                     target[path[-1]] = value  # type: ignore[index]
-                    (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+                    (self.root / "sprint_config.json").write_text(
+                        json.dumps(data), encoding="utf-8"
+                    )
                     with self.assertRaises(ControllerError) as context:
                         load_config(self.root)
                     self.assertEqual(context.exception.code, "invalid_config")
@@ -576,11 +696,49 @@ class FoundationTests(unittest.TestCase):
                     load_config(self.root)
                 self.assertEqual(context.exception.code, "invalid_config")
 
+    def test_configuration_rejects_repository_cardinality_root_paths_and_model_boundaries(
+        self,
+    ) -> None:
+        """Collection, containment, and provider/model boundary rules are explicit."""
+        original = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
+        for repositories in ([], [original["repositories"][0], original["repositories"][0]]):
+            with self.subTest(repositories=repositories):
+                data = json.loads(json.dumps(original))
+                data["repositories"] = repositories
+                (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(ControllerError) as context:
+                    load_config(self.root)
+                self.assertEqual(context.exception.code, "invalid_config")
+        for model in ("/model", "provider/", "provider /model", "provider/model name"):
+            with self.subTest(model=model):
+                data = json.loads(json.dumps(original))
+                data["models"]["builder"] = model
+                (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(ControllerError) as context:
+                    load_config(self.root)
+                self.assertEqual(context.exception.code, "invalid_config")
+        data = json.loads(json.dumps(original))
+        data["repositories"][0]["path"] = "."
+        (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaises(ControllerError) as context:
+            load_config(self.root)
+        self.assertEqual(context.exception.code, "invalid_config")
+        data = json.loads(json.dumps(original))
+        data["models"]["builder"] = "provider/model/with/slash"
+        (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual(load_config(self.root).models["builder"], "provider/model/with/slash")
+
     def test_configuration_rejects_wrong_container_types_and_nested_unknown_fields(self) -> None:
         """Every nested configuration object rejects incompatible collection types and extra fields."""
         original = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
         container_paths = (
-            ("repositories",), ("documents",), ("agents",), ("models",), ("pre_ci_audit",), ("limits",), ("ci",),
+            ("repositories",),
+            ("documents",),
+            ("agents",),
+            ("models",),
+            ("pre_ci_audit",),
+            ("limits",),
+            ("ci",),
         )
         for path in container_paths:
             with self.subTest(container=path):
@@ -590,7 +748,15 @@ class FoundationTests(unittest.TestCase):
                 with self.assertRaises(ControllerError) as context:
                     load_config(self.root)
                 self.assertEqual(context.exception.code, "invalid_config")
-        for path in (("repositories", 0), ("documents",), ("agents",), ("models",), ("pre_ci_audit",), ("limits",), ("ci",)):
+        for path in (
+            ("repositories", 0),
+            ("documents",),
+            ("agents",),
+            ("models",),
+            ("pre_ci_audit",),
+            ("limits",),
+            ("ci",),
+        ):
             with self.subTest(unknown=path):
                 data = json.loads(json.dumps(original))
                 target: object = data
@@ -631,6 +797,14 @@ class FoundationTests(unittest.TestCase):
                     load_config(self.root)
                 self.assertEqual(context.exception.code, "invalid_agent_definition")
                 path.write_text(contents, encoding="utf-8")
+        agent = self.root / ".opencode" / "agents" / "builder.md"
+        external = self.fixture.base / "external-agent.md"
+        external.write_text("external\n", encoding="utf-8")
+        agent.unlink()
+        agent.symlink_to(external)
+        with self.assertRaises(ControllerError) as context:
+            load_config(self.root)
+        self.assertEqual(context.exception.code, "invalid_agent_definition")
 
     def test_configuration_preserves_disabled_pre_ci_audit(self) -> None:
         """The reserved disabled-audit setting remains valid without Sprint 1 semantics."""
@@ -644,19 +818,46 @@ class FoundationTests(unittest.TestCase):
         code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 0, stderr)
         data = json.loads(stdout)
-        self.assertEqual(set(data), {
-            "schema_version", "controller_version", "sprint_root", "run_exists", "process_running",
-            "run_id", "sprint", "state", "reason", "active", "commits", "audit", "ci",
-            "counters", "checklist", "last_event", "updated_at",
-        })
+        self.assertEqual(
+            set(data),
+            {
+                "schema_version",
+                "controller_version",
+                "sprint_root",
+                "run_exists",
+                "process_running",
+                "run_id",
+                "sprint",
+                "state",
+                "reason",
+                "active",
+                "commits",
+                "audit",
+                "ci",
+                "counters",
+                "checklist",
+                "last_event",
+                "updated_at",
+            },
+        )
         self.assertEqual(data["schema_version"], 1)
         self.assertEqual(data["controller_version"], __version__)
         self.assertEqual(data["sprint_root"], str(self.root.resolve()))
         self.assertFalse(data["run_exists"])
         self.assertFalse(data["process_running"])
         for field in (
-            "run_id", "sprint", "state", "reason", "active", "commits", "audit", "ci",
-            "counters", "checklist", "last_event", "updated_at",
+            "run_id",
+            "sprint",
+            "state",
+            "reason",
+            "active",
+            "commits",
+            "audit",
+            "ci",
+            "counters",
+            "checklist",
+            "last_event",
+            "updated_at",
         ):
             self.assertIsNone(data[field], field)
         self.assertFalse((self.root / "info").exists())
@@ -698,7 +899,9 @@ class FoundationTests(unittest.TestCase):
             return original(arguments, **kwargs)  # type: ignore[arg-type]
 
         with patch("opencode_sprint_loop.git.subprocess.run", side_effect=record):
-            code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+            code, _, stderr = self.invoke(
+                ["run", "--root", str(self.root), "--server-url", "opaque"]
+            )
         self.assertEqual(code, 4, stderr)
         prohibited = {"add", "commit", "stash", "reset", "checkout", "switch", "clean", "push"}
         self.assertTrue(observed)
@@ -709,7 +912,9 @@ class FoundationTests(unittest.TestCase):
         git(self.root, "mv", "repositories/managed", "repositories/managed repo")
         data = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
         data["repositories"][0]["path"] = "repositories/managed repo"
-        (self.root / "sprint_config.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        (self.root / "sprint_config.json").write_text(
+            json.dumps(data, indent=2) + "\n", encoding="utf-8"
+        )
         git(self.root, "add", ".gitmodules", "sprint_config.json", "repositories")
         git(self.root, "commit", "-m", "Move managed submodule")
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
@@ -728,21 +933,27 @@ class FoundationTests(unittest.TestCase):
             if calls == 0:
                 data = json.loads((root / "sprint_config.json").read_text(encoding="utf-8"))
                 data["multisprint"] = "updated"
-                (root / "sprint_config.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                (root / "sprint_config.json").write_text(
+                    json.dumps(data, indent=2) + "\n", encoding="utf-8"
+                )
                 git(root, "add", "sprint_config.json")
                 git(root, "commit", "-m", "Update sprint identity")
             calls += 1
             return result
 
         with patch("opencode_sprint_loop.cli.validate_preflight", side_effect=validate_then_change):
-            code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+            code, _, stderr = self.invoke(
+                ["run", "--root", str(self.root), "--server-url", "opaque"]
+            )
         self.assertEqual(code, 4, stderr)
         self.assertTrue((self.root / "info" / "updated" / "1" / "state.json").exists())
         self.assertFalse((self.root / "info" / "foundation").exists())
 
     def test_valid_run_persists_placeholder_state(self) -> None:
         """A valid run creates the intentional three-event blocked placeholder."""
-        code, stdout, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque-value"])
+        code, stdout, stderr = self.invoke(
+            ["run", "--root", str(self.root), "--server-url", "opaque-value"]
+        )
         self.assertEqual(code, 4, (stdout, stderr))
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
@@ -750,7 +961,9 @@ class FoundationTests(unittest.TestCase):
         events = load_events(paths.events)
         self.assertEqual(state["state"], "blocked")
         self.assertEqual(state["reason"]["code"], "execution_not_implemented")
-        self.assertEqual([event["type"] for event in events], ["run.started", "state.entered", "run.blocked"])
+        self.assertEqual(
+            [event["type"] for event in events], ["run.started", "state.entered", "run.blocked"]
+        )
         self.assertIsNone(state["server"]["url"])
         self.assertIn("execution_not_implemented", stderr)
 
@@ -785,44 +998,61 @@ class FoundationTests(unittest.TestCase):
 
     def test_placeholder_status_matches_stable_projection(self) -> None:
         """Persisted status exposes only the documented status projection fields."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 0, stderr)
         status = json.loads(stdout)
         paths = runtime_paths(self.root, "foundation", 1)
         state = load_state(paths.state)
         events = load_events(paths.events)
-        self.assertEqual(status, {
-            "schema_version": 1,
-            "controller_version": __version__,
-            "sprint_root": str(self.root.resolve()),
-            "run_exists": True,
-            "process_running": False,
-            "run_id": state["run_id"],
-            "sprint": {"multisprint": "foundation", "index": 1},
-            "state": "blocked",
-            "reason": {
-                "code": "execution_not_implemented",
-                "message": "Sprint execution begins in a later implementation sprint.",
+        self.assertEqual(
+            status,
+            {
+                "schema_version": 1,
+                "controller_version": __version__,
+                "sprint_root": str(self.root.resolve()),
+                "run_exists": True,
+                "process_running": False,
+                "run_id": state["run_id"],
+                "sprint": {"multisprint": "foundation", "index": 1},
+                "state": "blocked",
+                "reason": {
+                    "code": "execution_not_implemented",
+                    "message": "Sprint execution begins in a later implementation sprint.",
+                },
+                "active": {"role": None, "invocation_id": None, "session_id": None},
+                "commits": {"local": {"managed": None}, "pushed": {"managed": None}},
+                "audit": {
+                    "phase": None,
+                    "pre_ci_round": 0,
+                    "pre_ci_max_rounds": 2,
+                    "remaining_effort": None,
+                },
+                "ci": {"status": "not_started", "attempt": 0, "commit_sha": None},
+                "counters": {"implementation_cycles": 0, "ci_fix_attempts": 0},
+                "checklist": {
+                    "satisfied": 0,
+                    "partial": 0,
+                    "unsatisfied": 0,
+                    "not_evaluated": 0,
+                    "assessed_at": None,
+                },
+                "last_event": {
+                    "sequence": 3,
+                    "type": "run.blocked",
+                    "timestamp": events[-1]["timestamp"],
+                },
+                "updated_at": state["updated_at"],
             },
-            "active": {"role": None, "invocation_id": None, "session_id": None},
-            "commits": {"local": {"managed": None}, "pushed": {"managed": None}},
-            "audit": {"phase": None, "pre_ci_round": 0, "pre_ci_max_rounds": 2, "remaining_effort": None},
-            "ci": {"status": "not_started", "attempt": 0, "commit_sha": None},
-            "counters": {"implementation_cycles": 0, "ci_fix_attempts": 0},
-            "checklist": {
-                "satisfied": 0, "partial": 0, "unsatisfied": 0, "not_evaluated": 0,
-                "assessed_at": None,
-            },
-            "last_event": {
-                "sequence": 3, "type": "run.blocked", "timestamp": events[-1]["timestamp"],
-            },
-            "updated_at": state["updated_at"],
-        })
+        )
 
     def test_status_rejects_configuration_derived_audit_mismatch(self) -> None:
         """Status refuses persisted audit limits that contradict current configuration."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         paths = runtime_paths(self.root, "foundation", 1)
         state = json.loads(paths.state.read_text(encoding="utf-8"))
         state["audit"]["pre_ci_max_rounds"] = 999
@@ -833,7 +1063,9 @@ class FoundationTests(unittest.TestCase):
 
     def test_existing_run_precedes_dirty_worktree_error(self) -> None:
         """Runtime artifacts cause run_already_exists even though they dirty the worktree."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
         self.assertEqual(code, 2)
         self.assertIn("run_already_exists", stderr)
@@ -859,7 +1091,9 @@ class FoundationTests(unittest.TestCase):
         for root in cases:
             with self.subTest(root=root):
                 info_existed = (root / "info").exists()
-                code, _, stderr = self.invoke(["run", "--root", str(root), "--server-url", "opaque"])
+                code, _, stderr = self.invoke(
+                    ["run", "--root", str(root), "--server-url", "opaque"]
+                )
                 self.assertEqual(code, 2)
                 self.assertTrue(stderr)
                 self.assertEqual((root / "info").exists(), info_existed)
@@ -870,7 +1104,9 @@ class FoundationTests(unittest.TestCase):
         non_git.mkdir()
         bare = self.fixture.base / "status-bare.git"
         git(self.fixture.base, "init", "--bare", str(bare))
-        for root in (self.root / "missing", non_git, self.root / "docs", bare):
+        regular = self.fixture.base / "status-regular-file"
+        regular.write_text("not a directory\n", encoding="utf-8")
+        for root in (self.root / "missing", non_git, regular, self.root / "docs", bare):
             with self.subTest(root=root):
                 code, stdout, stderr = self.invoke(["status", "--root", str(root), "--json"])
                 self.assertEqual(code, 2)
@@ -907,7 +1143,9 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("missing_required_file", stderr)
         self.assertFalse((self.root / "info").exists())
 
-    def test_sprint_root_without_a_resolvable_head_is_rejected_without_runtime_artifacts(self) -> None:
+    def test_sprint_root_without_a_resolvable_head_is_rejected_without_runtime_artifacts(
+        self,
+    ) -> None:
         """A worktree whose current HEAD does not resolve cannot enter controller preflight."""
         git(self.root, "update-ref", "-d", "HEAD")
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
@@ -937,12 +1175,16 @@ class FoundationTests(unittest.TestCase):
     def test_dirty_repository_variants_preserve_git_snapshots(self) -> None:
         """All staged, unstaged, and untracked root and managed changes remain untouched."""
         for repository_name in ("sprint", "managed"):
-            for kind in ("staged", "unstaged", "untracked"):
+            for kind in ("staged", "unstaged", "untracked", "untracked_directory"):
                 with self.subTest(repository=repository_name, kind=kind):
                     fixture, _ = self.variant()
                     repository = fixture.root if repository_name == "sprint" else fixture.managed
                     fixture.make_dirty(repository, kind)
-                    expected = "dirty_sprint_repository" if repository_name == "sprint" else "dirty_managed_repository"
+                    expected = (
+                        "dirty_sprint_repository"
+                        if repository_name == "sprint"
+                        else "dirty_managed_repository"
+                    )
                     self.assert_preflight_preserves_snapshot(fixture, expected)
 
     def test_ignored_untracked_files_are_rejected_and_preserved(self) -> None:
@@ -957,9 +1199,15 @@ class FoundationTests(unittest.TestCase):
                 with exclude.open("a", encoding="utf-8") as handle:
                     handle.write("ignored.txt\n")
                 (repository / "ignored.txt").write_text("user work\n", encoding="utf-8")
-                expected = "dirty_sprint_repository" if repository_name == "sprint" else "dirty_managed_repository"
+                expected = (
+                    "dirty_sprint_repository"
+                    if repository_name == "sprint"
+                    else "dirty_managed_repository"
+                )
                 self.assert_preflight_preserves_snapshot(fixture, expected)
-                self.assertEqual((repository / "ignored.txt").read_text(encoding="utf-8"), "user work\n")
+                self.assertEqual(
+                    (repository / "ignored.txt").read_text(encoding="utf-8"), "user work\n"
+                )
 
     def test_nested_submodule_dirtiness_cannot_be_hidden_by_git_configuration(self) -> None:
         """Managed preflight overrides submodule ignore settings when checking cleanliness."""
@@ -991,7 +1239,14 @@ class FoundationTests(unittest.TestCase):
     def test_replacement_clone_is_not_accepted_as_registered_submodule(self) -> None:
         """A same-HEAD repository cannot impersonate the registered submodule checkout."""
         shutil.rmtree(self.fixture.managed)
-        git(self.fixture.base, "clone", "--branch", "main", str(self.fixture.remote), str(self.fixture.managed))
+        git(
+            self.fixture.base,
+            "clone",
+            "--branch",
+            "main",
+            str(self.fixture.remote),
+            str(self.fixture.managed),
+        )
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
         self.assertEqual(code, 2)
         self.assertIn("uninitialized_submodule", stderr)
@@ -1006,7 +1261,12 @@ class FoundationTests(unittest.TestCase):
         shutil.move(str(module_dir), self.fixture.managed / ".git")
         config_path = self.fixture.managed / ".git" / "config"
         config_path.write_text(
-            "\n".join(line for line in config_path.read_text(encoding="utf-8").splitlines() if "worktree" not in line) + "\n",
+            "\n".join(
+                line
+                for line in config_path.read_text(encoding="utf-8").splitlines()
+                if "worktree" not in line
+            )
+            + "\n",
             encoding="utf-8",
         )
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
@@ -1015,14 +1275,32 @@ class FoundationTests(unittest.TestCase):
     def test_worktree_backed_by_another_submodule_is_rejected(self) -> None:
         """An absorbed checkout must use the Git directory for its own .gitmodules entry."""
         other = self.root / "repositories" / "other"
-        git(self.root, "-c", "protocol.file.allow=always", "submodule", "add", "-b", "main", str(self.fixture.remote), str(other.relative_to(self.root)))
+        git(
+            self.root,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-b",
+            "main",
+            str(self.fixture.remote),
+            str(other.relative_to(self.root)),
+        )
         git(self.root, "add", ".gitmodules", "repositories")
         git(self.root, "commit", "-m", "Add second submodule")
         other_git_dir = Path(git(other, "rev-parse", "--git-dir"))
         if not other_git_dir.is_absolute():
             other_git_dir = (other / other_git_dir).resolve()
         shutil.rmtree(self.fixture.managed)
-        git(self.fixture.base, f"--git-dir={other_git_dir}", "worktree", "add", "--force", str(self.fixture.managed), "main")
+        git(
+            self.fixture.base,
+            f"--git-dir={other_git_dir}",
+            "worktree",
+            "add",
+            "--force",
+            str(self.fixture.managed),
+            "main",
+        )
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
         self.assertEqual(code, 2)
         self.assertIn("uninitialized_submodule", stderr)
@@ -1115,7 +1393,9 @@ class FoundationTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 fixture, _ = self.variant()
                 mutate(fixture)
-                code, _, stderr = self.invoke(["run", "--root", str(fixture.root), "--server-url", "opaque"])
+                code, _, stderr = self.invoke(
+                    ["run", "--root", str(fixture.root), "--server-url", "opaque"]
+                )
                 self.assertEqual(code, 2)
                 for text in (str(fixture.managed), *expected):
                     self.assertIn(text, stderr)
@@ -1150,9 +1430,13 @@ class FoundationTests(unittest.TestCase):
 
     def test_deferred_commands_preserve_existing_runtime_artifacts(self) -> None:
         """Reserved controls leave an existing Sprint 1 run byte-for-byte unchanged."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         paths = runtime_paths(self.root, "foundation", 1)
-        before = {path: path.read_bytes() for path in (paths.state, paths.events, paths.lock_metadata)}
+        before = {
+            path: path.read_bytes() for path in (paths.state, paths.events, paths.lock_metadata)
+        }
         for arguments in (
             ["pause", "--root", str(self.root)],
             ["resume", "--root", str(self.root), "--server-url", "opaque"],
@@ -1170,7 +1454,9 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         self.assertEqual(stdout, f"Sprint root: {self.root.resolve()}\nState: no run\n")
         self.assertEqual(stderr, "")
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         code, stdout, stderr = self.invoke(["status", "--root", str(self.root)])
         self.assertEqual(code, 0, stderr)
         self.assertIn("Sprint: foundation / 1", stdout)
@@ -1189,12 +1475,16 @@ class FoundationTests(unittest.TestCase):
     def test_server_url_is_opaque_and_absent_from_controller_artifacts(self) -> None:
         """Sprint 1 neither parses, emits, nor persists the supplied server URL value."""
         opaque = "not a URL user:synthetic-secret?token=synthetic-secret#fragment"
-        code, stdout, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", opaque])
+        code, stdout, stderr = self.invoke(
+            ["run", "--root", str(self.root), "--server-url", opaque]
+        )
         self.assertEqual(code, 4)
         self.assertEqual(stdout, "")
         self.assertNotIn(opaque, stderr)
         self.assertNotIn("synthetic-secret", stderr)
-        artifacts = b"".join(path.read_bytes() for path in (self.root / "info").rglob("*") if path.is_file())
+        artifacts = b"".join(
+            path.read_bytes() for path in (self.root / "info").rglob("*") if path.is_file()
+        )
         self.assertNotIn(opaque.encode(), artifacts)
         self.assertNotIn(b"synthetic-secret", artifacts)
 
@@ -1246,7 +1536,9 @@ class FoundationTests(unittest.TestCase):
             validate_state(state)
         self.assertEqual(context.exception.code, "corrupt_state")
 
-        diagnostic = redact_diagnostic("https://user:synthetic-secret@example.invalid/?token=synthetic-secret")
+        diagnostic = redact_diagnostic(
+            "https://user:synthetic-secret@example.invalid/?token=synthetic-secret"
+        )
         self.assertNotIn("synthetic-secret", diagnostic)
         self.assertIn("[REDACTED]", diagnostic)
 
@@ -1260,7 +1552,12 @@ class FoundationTests(unittest.TestCase):
             "AKIA" + "A" * 16,
         ):
             with self.subTest(value=value):
-                event = transition_event(new_state(load_config(self.root)), "run.started", "initializing", {"previous_state": None, "note": value})
+                event = transition_event(
+                    new_state(load_config(self.root)),
+                    "run.started",
+                    "initializing",
+                    {"previous_state": None, "note": value},
+                )
                 with self.assertRaises(ControllerError) as context:
                     append_event(self.root / "info" / "events.jsonl", event)
                 self.assertEqual(context.exception.code, "persistence_failed")
@@ -1289,18 +1586,35 @@ class FoundationTests(unittest.TestCase):
 
     def test_status_rejects_inconsistent_persistence(self) -> None:
         """An event log ahead of state fails closed rather than guessing."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         with paths.events.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"schema_version": 1, "sequence": 4, "timestamp": "2026-01-01T00:00:00Z", "run_id": load_state(paths.state)["run_id"], "type": "state.entered", "state": "blocked", "payload": {}}) + "\n")
+            handle.write(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "sequence": 4,
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "run_id": load_state(paths.state)["run_id"],
+                        "type": "state.entered",
+                        "state": "blocked",
+                        "payload": {},
+                    }
+                )
+                + "\n"
+            )
         code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 2)
         self.assertIn("inconsistent_persistence", stderr)
 
     def test_status_rejects_partial_event_line(self) -> None:
         """Partial JSONL is corruption and is never automatically truncated."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         with paths.events.open("ab") as handle:
@@ -1313,48 +1627,73 @@ class FoundationTests(unittest.TestCase):
 
     def test_event_sequence_corruption_fails_closed(self) -> None:
         """Duplicate, gapped, and mismatched event records cannot be interpreted as history."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
-        original = [json.loads(line) for line in paths.events.read_text(encoding="utf-8").splitlines()]
+        original = [
+            json.loads(line) for line in paths.events.read_text(encoding="utf-8").splitlines()
+        ]
         for label, mutate in (
             ("duplicate", lambda records: records.__setitem__(1, {**records[1], "sequence": 1})),
             ("gap", lambda records: records.__setitem__(1, {**records[1], "sequence": 3})),
-            ("run_id", lambda records: records.__setitem__(1, {**records[1], "run_id": "00000000-0000-4000-8000-000000000000"})),
+            (
+                "run_id",
+                lambda records: records.__setitem__(
+                    1, {**records[1], "run_id": "00000000-0000-4000-8000-000000000000"}
+                ),
+            ),
+            ("schema", lambda records: records.__setitem__(1, {**records[1], "schema_version": 2})),
         ):
             with self.subTest(label=label):
                 records = [dict(event) for event in original]
                 mutate(records)
-                paths.events.write_text("".join(json.dumps(event) + "\n" for event in records), encoding="utf-8")
+                paths.events.write_text(
+                    "".join(json.dumps(event) + "\n" for event in records), encoding="utf-8"
+                )
                 with self.assertRaises(ControllerError) as context:
                     load_events(paths.events)
                 self.assertEqual(context.exception.code, "corrupt_event_log")
-        paths.events.write_text("".join(json.dumps(event) + "\n" for event in original[:2]), encoding="utf-8")
+        paths.events.write_text(
+            "".join(json.dumps(event) + "\n" for event in original[:2]), encoding="utf-8"
+        )
         code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 2)
         self.assertIn("corrupt_event_log", stderr)
 
     def test_duplicate_state_and_event_json_keys_fail_closed(self) -> None:
         """Duplicate state and event keys cannot be hidden behind otherwise valid persistence."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         paths = runtime_paths(self.root, "foundation", 1)
         state = paths.state.read_text(encoding="utf-8")
-        paths.state.write_text(state.replace('"state": "blocked"', '"state": "blocked", "state": "blocked"', 1), encoding="utf-8")
+        paths.state.write_text(
+            state.replace('"state": "blocked"', '"state": "blocked", "state": "blocked"', 1),
+            encoding="utf-8",
+        )
         code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 2)
         self.assertIn("corrupt_state", stderr)
 
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 2)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 2
+        )
         paths.state.write_text(state, encoding="utf-8")
         events = paths.events.read_text(encoding="utf-8")
-        paths.events.write_text(events.replace('"sequence": 1', '"sequence": 1, "sequence": 1', 1), encoding="utf-8")
+        paths.events.write_text(
+            events.replace('"sequence": 1', '"sequence": 1, "sequence": 1', 1), encoding="utf-8"
+        )
         code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 2)
         self.assertIn("corrupt_event_log", stderr)
 
     def test_event_short_write_preserves_existing_bytes_and_fails_explicitly(self) -> None:
         """A detected short append never rewrites valid history and leaves corruption visible."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         state = load_state(paths.state)
@@ -1379,7 +1718,9 @@ class FoundationTests(unittest.TestCase):
 
     def test_run_rejects_corrupt_existing_persistence(self) -> None:
         """Existing artifacts are validated before the controller reports run exists."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         state = json.loads(paths.state.read_text(encoding="utf-8"))
@@ -1391,7 +1732,9 @@ class FoundationTests(unittest.TestCase):
 
     def test_status_rejects_invalid_nested_state(self) -> None:
         """Malformed nested state is an actionable controller error, not KeyError."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         state = json.loads(paths.state.read_text(encoding="utf-8"))
@@ -1450,7 +1793,11 @@ class FoundationTests(unittest.TestCase):
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         state = new_state(config)
         state["state"] = "blocked"
-        state["reason"] = {"code": "test", "message": "test", "details": {"note": "x" * MAX_JSON_BYTES}}
+        state["reason"] = {
+            "code": "test",
+            "message": "test",
+            "details": {"note": "x" * MAX_JSON_BYTES},
+        }
         state["process"]["active"] = False
         with self.assertRaises(ControllerError) as context:
             write_state_atomic(paths.state, state)
@@ -1472,6 +1819,7 @@ class FoundationTests(unittest.TestCase):
                 write_state_atomic(paths.state, replacement)
         self.assertEqual(context.exception.code, "persistence_failed")
         self.assertEqual(load_state(paths.state)["state"], "initializing")
+        self.assertEqual(list(paths.info_dir.glob(".state-*.tmp")), [])
 
     def test_atomic_state_write_and_sync_failures_leave_complete_snapshots(self) -> None:
         """Write, pre-replace sync, and post-replace sync failures never truncate state."""
@@ -1486,7 +1834,11 @@ class FoundationTests(unittest.TestCase):
 
         real_open = os.open
 
-        def fail_temporary_open(path: str | bytes | os.PathLike[str] | os.PathLike[bytes], *arguments: object, **keywords: object) -> int:
+        def fail_temporary_open(
+            path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            *arguments: object,
+            **keywords: object,
+        ) -> int:
             if isinstance(path, str) and path.startswith(".state-"):
                 raise OSError("injected")
             return real_open(path, *arguments, **keywords)  # type: ignore[arg-type]
@@ -1496,24 +1848,29 @@ class FoundationTests(unittest.TestCase):
                 write_state_atomic(paths.state, replacement)
         self.assertEqual(context.exception.code, "persistence_failed")
         self.assertEqual(load_state(paths.state)["state"], "initializing")
+        self.assertEqual(list(paths.info_dir.glob(".state-*.tmp")), [])
 
         with patch("opencode_sprint_loop.state.os.write", side_effect=OSError("injected")):
             with self.assertRaises(ControllerError) as context:
                 write_state_atomic(paths.state, replacement)
         self.assertEqual(context.exception.code, "persistence_failed")
         self.assertEqual(load_state(paths.state)["state"], "initializing")
+        self.assertEqual(list(paths.info_dir.glob(".state-*.tmp")), [])
 
         with patch("opencode_sprint_loop.state.os.fsync", side_effect=OSError("injected")):
             with self.assertRaises(ControllerError) as context:
                 write_state_atomic(paths.state, replacement)
         self.assertEqual(context.exception.code, "persistence_failed")
         self.assertEqual(load_state(paths.state)["state"], "initializing")
+        self.assertEqual(list(paths.info_dir.glob(".state-*.tmp")), [])
 
         with patch("opencode_sprint_loop.state.os.fsync", side_effect=[None, OSError("injected")]):
             with self.assertRaises(ControllerError) as context:
                 write_state_atomic(paths.state, replacement)
         self.assertEqual(context.exception.code, "persistence_failed")
         self.assertEqual(load_state(paths.state)["state"], "blocked")
+        self.assertEqual(list(paths.info_dir.glob(".state-*.tmp")), [])
+        self.assertEqual(paths.state.stat().st_mode & 0o077, 0)
 
     def test_interrupted_transition_leaves_event_ahead_of_state_inconsistent(self) -> None:
         """An interruption after event sync is detected and is never automatically replayed."""
@@ -1521,7 +1878,10 @@ class FoundationTests(unittest.TestCase):
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         state = new_state(config)
         _, persistence_lock = controller_locks(self.root)
-        with patch("opencode_sprint_loop.transitions.write_state_atomic_at", side_effect=OSError("injected")):
+        with patch(
+            "opencode_sprint_loop.transitions.write_state_atomic_at",
+            side_effect=OSError("injected"),
+        ):
             with self.assertRaises(OSError):
                 persist_initial(state, paths.events, paths.state, persistence_lock)
         self.assertFalse(paths.state.exists())
@@ -1541,12 +1901,17 @@ class FoundationTests(unittest.TestCase):
         original = transitions.write_state_atomic_at
         displaced = self.fixture.base / "displaced-runtime"
 
-        def replace_runtime_directory(directory: int, name: str, path: Path, serialized: str) -> None:
+        def replace_runtime_directory(
+            directory: int, name: str, path: Path, serialized: str
+        ) -> None:
             paths.info_dir.rename(displaced)
             paths.info_dir.mkdir(parents=True)
             original(directory, name, path, serialized)
 
-        with patch("opencode_sprint_loop.transitions.write_state_atomic_at", side_effect=replace_runtime_directory):
+        with patch(
+            "opencode_sprint_loop.transitions.write_state_atomic_at",
+            side_effect=replace_runtime_directory,
+        ):
             with self.assertRaises(ControllerError) as context:
                 transition(state, paths.events, paths.state, persistence_lock, "validating")
         self.assertEqual(context.exception.code, "persistence_failed")
@@ -1567,7 +1932,14 @@ class FoundationTests(unittest.TestCase):
         for destination, reason in (("blocked", None), ("finished", None), ("unknown", None)):
             with self.subTest(destination=destination):
                 with self.assertRaises(ControllerError) as context:
-                    transition(state, paths.events, paths.state, persistence_lock, destination, reason=reason)
+                    transition(
+                        state,
+                        paths.events,
+                        paths.state,
+                        persistence_lock,
+                        destination,
+                        reason=reason,
+                    )
                 self.assertEqual(context.exception.code, "internal_error")
                 self.assertEqual(paths.state.read_bytes(), before_state)
                 self.assertEqual(paths.events.read_bytes(), before_events)
@@ -1603,18 +1975,24 @@ class FoundationTests(unittest.TestCase):
         not_new["state"] = "validating"
         with advisory_lock(persistence_lock, exclusive=True):
             with self.assertRaises(ControllerError) as context:
-                persist_initial(not_new, paths.events, paths.state, persistence_lock, lock_held=True)
+                persist_initial(
+                    not_new, paths.events, paths.state, persistence_lock, lock_held=True
+                )
         self.assertEqual(context.exception.code, "internal_error")
         self.assertFalse(paths.state.exists())
         self.assertFalse(paths.events.exists())
 
         with advisory_lock(persistence_lock, exclusive=True):
-            persisted = persist_initial(new_state(config), paths.events, paths.state, persistence_lock, lock_held=True)
+            persisted = persist_initial(
+                new_state(config), paths.events, paths.state, persistence_lock, lock_held=True
+            )
         before_state = paths.state.read_bytes()
         before_events = paths.events.read_bytes()
         with advisory_lock(persistence_lock, exclusive=True):
             with self.assertRaises(ControllerError) as context:
-                persist_initial(persisted, paths.events, paths.state, persistence_lock, lock_held=True)
+                persist_initial(
+                    persisted, paths.events, paths.state, persistence_lock, lock_held=True
+                )
         self.assertEqual(context.exception.code, "inconsistent_persistence")
         self.assertEqual(paths.state.read_bytes(), before_state)
         self.assertEqual(paths.events.read_bytes(), before_events)
@@ -1636,7 +2014,9 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("corrupt_state", stderr)
 
-        self.assertEqual(self.invoke(["run", "--root", str(fixture.root), "--server-url", "opaque"])[0], 2)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(fixture.root), "--server-url", "opaque"])[0], 2
+        )
         paths.state.unlink()
         write_state_atomic(paths.state, new_state(load_config(root)))
         paths.events.write_text(oversized + "\n", encoding="utf-8")
@@ -1687,7 +2067,12 @@ class FoundationTests(unittest.TestCase):
     def test_runtime_symlinks_are_rejected_without_following_them(self) -> None:
         """Runtime directories and artifacts, including dangling events, cannot redirect I/O."""
         for label, prepare in (
-            ("info", lambda root, paths, outside: (root / "info").symlink_to(outside, target_is_directory=True)),
+            (
+                "info",
+                lambda root, paths, outside: (root / "info").symlink_to(
+                    outside, target_is_directory=True
+                ),
+            ),
             (
                 "multisprint",
                 lambda root, paths, outside: (
@@ -1738,22 +2123,36 @@ class FoundationTests(unittest.TestCase):
 
     def test_runtime_reader_rejects_ancestor_replacement_after_preflight(self) -> None:
         """Descriptor-anchored reads do not follow an `info/` symlink installed after checks."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         outside = self.fixture.base / "outside-info"
         (self.root / "info").rename(outside)
         (self.root / "info").symlink_to(outside, target_is_directory=True)
-        before = {path.relative_to(outside): path.read_bytes() for path in outside.rglob("*") if path.is_file()}
+        before = {
+            path.relative_to(outside): path.read_bytes()
+            for path in outside.rglob("*")
+            if path.is_file()
+        }
         with patch("opencode_sprint_loop.cli.ensure_runtime_paths_safe"):
             code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 2)
         self.assertEqual(stdout, "")
         self.assertIn("corrupt_state", stderr)
-        after = {path.relative_to(outside): path.read_bytes() for path in outside.rglob("*") if path.is_file()}
+        after = {
+            path.relative_to(outside): path.read_bytes()
+            for path in outside.rglob("*")
+            if path.is_file()
+        }
         self.assertEqual(after, before)
 
     def test_fifo_runtime_artifacts_are_rejected_without_blocking(self) -> None:
         """Status uses metadata checks and never opens non-regular runtime artifacts."""
-        for label, artifact_name in (("state", "state"), ("events", "events"), ("lock", "lock_metadata")):
+        for label, artifact_name in (
+            ("state", "state"),
+            ("events", "events"),
+            ("lock", "lock_metadata"),
+        ):
             with self.subTest(artifact=label):
                 fixture, root = self.variant()
                 paths = runtime_paths(root, "foundation", 1)
@@ -1770,7 +2169,9 @@ class FoundationTests(unittest.TestCase):
                 try:
                     self.assertTrue(started.wait(timeout=5))
                     process.join(timeout=5)
-                    self.assertFalse(process.is_alive(), "status blocked on a FIFO runtime artifact")
+                    self.assertFalse(
+                        process.is_alive(), "status blocked on a FIFO runtime artifact"
+                    )
                     code, stdout, stderr = results.get(timeout=1)
                     self.assertEqual(code, 2)
                     self.assertEqual(stdout, "")
@@ -1794,22 +2195,33 @@ class FoundationTests(unittest.TestCase):
         temporary.symlink_to(outside)
         with patch("opencode_sprint_loop.cli.secrets.token_hex", return_value="fixed"):
             with self.assertRaises(ControllerError) as context:
-                _write_lock_metadata(paths.lock_metadata, new_state(config))
+                _write_lock_metadata(self.root, paths.lock_metadata, new_state(config))
         self.assertEqual(context.exception.code, "persistence_failed")
         self.assertEqual(outside.read_text(encoding="utf-8"), "outside remains unchanged\n")
         self.assertFalse(paths.lock_metadata.exists())
 
     def test_build_and_clean_wheel_installation(self) -> None:
         """A temporary source copy builds, includes documents, and installs as an executable wheel."""
-        if importlib.util.find_spec("build") is None:
-            self.skipTest("build frontend is unavailable in this test environment")
         project_root = Path(__file__).resolve().parents[2]
+        offline_environment = {
+            **os.environ,
+            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "PIP_NO_INDEX": "1",
+        }
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "source"
             shutil.copytree(
                 project_root,
                 source,
-                ignore=shutil.ignore_patterns(".git", ".venv", "build", "dist", "*.egg-info", "__pycache__", "opencode_sprint_loop.lua"),
+                ignore=shutil.ignore_patterns(
+                    ".git",
+                    ".venv",
+                    "build",
+                    "dist",
+                    "*.egg-info",
+                    "__pycache__",
+                    "opencode_sprint_loop.lua",
+                ),
             )
             result = subprocess.run(
                 [sys.executable, "-m", "build", "--no-isolation"],
@@ -1818,6 +2230,7 @@ class FoundationTests(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
+                env=offline_environment,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             archives = list((source / "dist").glob("*.tar.gz"))
@@ -1826,18 +2239,42 @@ class FoundationTests(unittest.TestCase):
                 names = set(archive.getnames())
             wheel = next((source / "dist").glob("*.whl"))
             environment = Path(temporary) / "wheel-environment"
-            result = subprocess.run([sys.executable, "-m", "venv", str(environment)], text=True, capture_output=True, check=False)
-            self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run(
-                [str(environment / "bin" / "python"), "-m", "pip", "install", "--no-deps", str(wheel)],
+                [sys.executable, "-m", "venv", str(environment)],
                 text=True,
                 capture_output=True,
                 check=False,
+                env=offline_environment,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run(
+                [
+                    str(environment / "bin" / "python"),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-deps",
+                    str(wheel),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=offline_environment,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             executable = environment / "bin" / "sprint-loop"
-            for arguments in (("--help",), ("--version",), ("status", "--root", str(self.root), "--json")):
-                result = subprocess.run([str(executable), *arguments], text=True, capture_output=True, check=False)
+            for arguments in (
+                ("--help",),
+                ("--version",),
+                ("status", "--root", str(self.root), "--json"),
+            ):
+                result = subprocess.run(
+                    [str(executable), *arguments],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=offline_environment,
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
         for document in (
             "docs/v1_final_software_specification.md",
@@ -1854,7 +2291,9 @@ class FoundationTests(unittest.TestCase):
             git_dir = (self.root / git_dir).resolve()
         run_lock, _ = _lock_paths(git_dir)
         with advisory_lock(run_lock, exclusive=True):
-            code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+            code, _, stderr = self.invoke(
+                ["run", "--root", str(self.root), "--server-url", "opaque"]
+            )
         self.assertEqual(code, 2)
         self.assertIn("run_already_active", stderr)
         self.assertFalse((self.root / "info").exists())
@@ -1869,11 +2308,28 @@ class FoundationTests(unittest.TestCase):
             git(self.root, "checkout", "-b", "lock-anchor-test")
             git(self.root, "checkout", "main")
             git(self.root, "config", "--unset", "controller.lock-test")
-            self.assertEqual(tuple(os.stat(path).st_ino for path in (run_lock, persistence_lock.parent)), before)
+            self.assertEqual(
+                tuple(os.stat(path).st_ino for path in (run_lock, persistence_lock.parent)), before
+            )
         with advisory_lock(persistence_lock, exclusive=False):
             pass
         self.assertTrue(run_lock.is_dir())
         self.assertTrue(persistence_lock.is_dir())
+
+    def test_replaced_run_anchor_cannot_create_a_second_owner(self) -> None:
+        """The ownership namespace remains locked if the visible run anchor is replaced."""
+        run_lock, _ = controller_locks(self.root)
+        displaced = self.fixture.base / "displaced-run-lock"
+        with ownership_lock(run_lock, blocking=False) as first:
+            run_lock.rename(displaced)
+            run_lock.mkdir()
+            with self.assertRaises(ControllerError) as context:
+                with ownership_lock(run_lock, blocking=False):
+                    pass
+            self.assertEqual(context.exception.code, "run_already_active")
+            with self.assertRaises(ControllerError) as context:
+                first.ensure_current()
+            self.assertEqual(context.exception.code, "persistence_failed")
 
     def test_status_reports_real_separate_process_ownership_without_lock_metadata(self) -> None:
         """Status derives activity from the authoritative lock holder and persisted process identity."""
@@ -1883,7 +2339,12 @@ class FoundationTests(unittest.TestCase):
         results = context.Queue()
         process = context.Process(
             target=run_paused_after_validating,
-            args=(["run", "--root", str(self.root), "--server-url", "opaque"], ready, release, results),
+            args=(
+                ["run", "--root", str(self.root), "--server-url", "opaque"],
+                ready,
+                release,
+                results,
+            ),
         )
         process.start()
         try:
@@ -1909,7 +2370,9 @@ class FoundationTests(unittest.TestCase):
 
     def test_foreign_lock_holder_does_not_make_a_prior_run_active(self) -> None:
         """A kernel lock held by a different PID cannot be attributed to persisted state."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         run_lock, _ = controller_locks(self.root)
         context = multiprocessing.get_context("fork")
         ready = context.Event()
@@ -1929,7 +2392,9 @@ class FoundationTests(unittest.TestCase):
         """Status uses the shared persistence lock and read-only ownership evidence only."""
         from opencode_sprint_loop import cli
 
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         observed: list[tuple[str, bool]] = []
         original_lock = cli.advisory_lock
 
@@ -1946,7 +2411,9 @@ class FoundationTests(unittest.TestCase):
 
     def test_status_rejects_pid_only_liveness_when_linux_identity_is_available(self) -> None:
         """Null persisted process identity cannot fall back to a reusable PID on Linux."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         state = json.loads(paths.state.read_text(encoding="utf-8"))
@@ -1966,7 +2433,9 @@ class FoundationTests(unittest.TestCase):
 
     def test_status_ignores_malformed_lock_metadata(self) -> None:
         """Malformed descriptive metadata cannot override authoritative ownership."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         paths = runtime_paths(self.root, "foundation", 1)
         metadata = json.loads(paths.lock_metadata.read_text(encoding="utf-8"))
         metadata["schema_version"] = True
@@ -1982,7 +2451,9 @@ class FoundationTests(unittest.TestCase):
 
     def test_status_ignores_semantically_invalid_lock_timestamp(self) -> None:
         """Descriptive timestamps cannot override matching OS lock/process evidence."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         paths = runtime_paths(self.root, "foundation", 1)
         metadata = json.loads(paths.lock_metadata.read_text(encoding="utf-8"))
         metadata["started_at"] = "2026-99-99T99:99:99Z"
@@ -2004,7 +2475,9 @@ class FoundationTests(unittest.TestCase):
         process.start()
         try:
             self.assertTrue(ready.wait(timeout=5))
-            code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+            code, _, stderr = self.invoke(
+                ["run", "--root", str(self.root), "--server-url", "opaque"]
+            )
             self.assertEqual(code, 2)
             self.assertIn("run_already_active", stderr)
         finally:
@@ -2037,7 +2510,9 @@ class FoundationTests(unittest.TestCase):
             handle.write("info/\n")
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
         self.assertEqual(code, 4, stderr)
-        self.assertEqual(json.loads(paths.lock_metadata.read_text(encoding="utf-8"))["schema_version"], 1)
+        self.assertEqual(
+            json.loads(paths.lock_metadata.read_text(encoding="utf-8"))["schema_version"], 1
+        )
 
     def test_tracked_lock_metadata_is_never_replaced(self) -> None:
         """A user-tracked lock.json cannot be claimed as stale controller metadata."""
@@ -2053,6 +2528,20 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("inconsistent_persistence", stderr)
         self.assertEqual(paths.lock_metadata.read_bytes(), before)
         self.assertEqual(git(self.root, "status", "--porcelain=v2"), "")
+
+    def test_lock_metadata_tracking_race_preserves_the_existing_file(self) -> None:
+        """Metadata installation never overwrites a path tracked after initial validation."""
+        from opencode_sprint_loop.cli import _write_lock_metadata
+
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        paths.info_dir.mkdir(parents=True)
+        paths.lock_metadata.write_text("stale metadata\n", encoding="utf-8")
+        with patch("opencode_sprint_loop.cli.is_tracked_path", side_effect=[False, True]):
+            with self.assertRaises(ControllerError) as context:
+                _write_lock_metadata(self.root, paths.lock_metadata, new_state(config))
+        self.assertEqual(context.exception.code, "inconsistent_persistence")
+        self.assertEqual(paths.lock_metadata.read_text(encoding="utf-8"), "stale metadata\n")
 
     def test_ignored_stale_lock_metadata_cannot_hide_extra_directories(self) -> None:
         """The stale-lock exception rejects ignored controller trees with any extra content."""
@@ -2079,7 +2568,7 @@ class FoundationTests(unittest.TestCase):
         release_ownership = context.Event()
         results = context.Queue()
         parent_pid = os.getpid()
-        original_lock = cli.advisory_lock
+        original_lock = cli.ownership_lock
 
         @contextlib.contextmanager
         def delay_child_ownership(path: Path, **kwargs: object) -> Any:
@@ -2087,20 +2576,26 @@ class FoundationTests(unittest.TestCase):
                 waiting_for_ownership.set()
                 if not release_ownership.wait(timeout=10):
                     raise RuntimeError("timed out waiting to continue ownership race")
-            with original_lock(path, **kwargs):
-                yield
+            with original_lock(path, **kwargs) as lock:
+                yield lock
 
-        with patch("opencode_sprint_loop.cli.advisory_lock", side_effect=delay_child_ownership):
+        with patch("opencode_sprint_loop.cli.ownership_lock", side_effect=delay_child_ownership):
             started = context.Event()
             process = context.Process(
                 target=invoke_in_child,
-                args=(["run", "--root", str(self.root), "--server-url", "opaque"], started, results),
+                args=(
+                    ["run", "--root", str(self.root), "--server-url", "opaque"],
+                    started,
+                    results,
+                ),
             )
             process.start()
             try:
                 self.assertTrue(started.wait(timeout=5))
                 self.assertTrue(waiting_for_ownership.wait(timeout=5))
-                code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+                code, _, stderr = self.invoke(
+                    ["run", "--root", str(self.root), "--server-url", "opaque"]
+                )
                 self.assertEqual(code, 4, stderr)
                 paths = runtime_paths(self.root, "foundation", 1)
                 before_state = paths.state.read_bytes()
@@ -2127,26 +2622,36 @@ class FoundationTests(unittest.TestCase):
         variants = (
             ("wrong_branch", lambda fixture: fixture.set_managed_branch()),
             ("missing_remote", lambda fixture: fixture.remove_managed_remote()),
-            ("dirty_managed_repository", lambda fixture: fixture.make_dirty(fixture.managed, "untracked")),
-            ("git_operation_in_progress", lambda fixture: fixture.mark_git_operation(fixture.managed, "merge")),
+            (
+                "dirty_managed_repository",
+                lambda fixture: fixture.make_dirty(fixture.managed, "untracked"),
+            ),
+            (
+                "git_operation_in_progress",
+                lambda fixture: fixture.mark_git_operation(fixture.managed, "merge"),
+            ),
         )
         for expected, mutate in variants:
             with self.subTest(expected=expected):
                 fixture, _ = self.variant()
-                original_lock = cli.advisory_lock
+                original_lock = cli.ownership_lock
                 mutated = False
 
                 @contextlib.contextmanager
                 def mutate_after_ownership(path: Path, **kwargs: object) -> Any:
                     nonlocal mutated
-                    with original_lock(path, **kwargs):  # type: ignore[arg-type]
-                        if path.name == "run" and bool(kwargs["exclusive"]) and not mutated:
+                    with original_lock(path, **kwargs) as lock:  # type: ignore[arg-type]
+                        if path.name == "run" and not mutated:
                             mutate(fixture)
                             mutated = True
-                        yield
+                        yield lock
 
-                with patch("opencode_sprint_loop.cli.advisory_lock", side_effect=mutate_after_ownership):
-                    code, _, stderr = self.invoke(["run", "--root", str(fixture.root), "--server-url", "opaque"])
+                with patch(
+                    "opencode_sprint_loop.cli.ownership_lock", side_effect=mutate_after_ownership
+                ):
+                    code, _, stderr = self.invoke(
+                        ["run", "--root", str(fixture.root), "--server-url", "opaque"]
+                    )
                 self.assertTrue(mutated)
                 self.assertEqual(code, 2)
                 self.assertIn(expected, stderr)
@@ -2171,8 +2676,13 @@ class FoundationTests(unittest.TestCase):
         transition_process = context.Process(
             target=pause_transition_in_child,
             args=(
-                initial, paths.events, paths.state, persistence_lock, state_write_started,
-                release_state_write, transition_results,
+                initial,
+                paths.events,
+                paths.state,
+                persistence_lock,
+                state_write_started,
+                release_state_write,
+                transition_results,
             ),
         )
         transition_process.start()
@@ -2221,8 +2731,13 @@ class FoundationTests(unittest.TestCase):
         transition_process = context.Process(
             target=pause_initial_transition_in_child,
             args=(
-                new_state(config), paths.events, paths.state, persistence_lock, state_write_started,
-                release_state_write, transition_results,
+                new_state(config),
+                paths.events,
+                paths.state,
+                persistence_lock,
+                state_write_started,
+                release_state_write,
+                transition_results,
             ),
         )
         transition_process.start()
@@ -2260,7 +2775,9 @@ class FoundationTests(unittest.TestCase):
 
     def test_status_rejects_state_for_different_sprint(self) -> None:
         """Persisted state cannot be projected for a different configured sprint."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         state = json.loads(paths.state.read_text(encoding="utf-8"))
@@ -2272,7 +2789,9 @@ class FoundationTests(unittest.TestCase):
 
     def test_status_rejects_reason_that_differs_from_last_event(self) -> None:
         """Mutable state cannot replace the append-only transition reason."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         paths = runtime_paths(self.root, "foundation", 1)
         state = json.loads(paths.state.read_text(encoding="utf-8"))
         state["reason"]["message"] = "different reason"
@@ -2283,18 +2802,26 @@ class FoundationTests(unittest.TestCase):
 
     def test_status_rejects_semantically_forged_event_history(self) -> None:
         """Matching sequence and final state cannot disguise an impossible transition history."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         paths = runtime_paths(self.root, "foundation", 1)
-        events = [json.loads(line) for line in paths.events.read_text(encoding="utf-8").splitlines()]
+        events = [
+            json.loads(line) for line in paths.events.read_text(encoding="utf-8").splitlines()
+        ]
         events[0]["type"] = "state.entered"
-        paths.events.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+        paths.events.write_text(
+            "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+        )
         code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 2)
         self.assertIn("corrupt_event_log", stderr)
 
     def test_hardlinked_runtime_artifacts_and_locks_are_rejected(self) -> None:
         """Controller writes cannot target runtime or lock inodes aliased outside their roots."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
         paths = runtime_paths(self.root, "foundation", 1)
         outside_event = self.fixture.base / "outside-events"
         outside_event.write_text("outside\n", encoding="utf-8")
@@ -2360,7 +2887,9 @@ class FoundationTests(unittest.TestCase):
                 with self.assertRaises(ControllerError) as context:
                     validate_state(state)
                 self.assertEqual(context.exception.code, "corrupt_state")
-        event = transition_event(new_state(config), "run.started", "initializing", {"previous_state": None})
+        event = transition_event(
+            new_state(config), "run.started", "initializing", {"previous_state": None}
+        )
         event["timestamp"] = "2026-01-01"
         with self.assertRaises(ControllerError) as context:
             append_event(self.root / "info" / "events.jsonl", event)
@@ -2447,13 +2976,17 @@ class FoundationTests(unittest.TestCase):
 
         original = transitions.append_event_at
 
-        def fail_validating(directory: int, name: str, path: Path, event: dict[str, object]) -> None:
+        def fail_validating(
+            directory: int, name: str, path: Path, event: dict[str, object]
+        ) -> None:
             if event["state"] == "validating":
                 raise OSError("injected")
             original(directory, name, path, event)  # type: ignore[arg-type]
 
         with patch("opencode_sprint_loop.transitions.append_event_at", side_effect=fail_validating):
-            code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+            code, _, stderr = self.invoke(
+                ["run", "--root", str(self.root), "--server-url", "opaque"]
+            )
         self.assertEqual(code, 2)
         self.assertIn("internal_error", stderr)
         config = load_config(self.root)

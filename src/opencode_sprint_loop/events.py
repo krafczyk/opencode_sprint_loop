@@ -15,11 +15,25 @@ from .safeio import open_directory, open_regular_at
 from .security import validate_safe_data
 from .state import RFC3339_UTC, STATE_NAMES, utc_now
 
-EVENT_TYPES = frozenset({
-    "run.started", "state.entered", "server.validated", "agent.started", "agent.completed",
-    "agent.interrupted", "git.committed", "git.pushed", "ci.discovered", "ci.completed",
-    "audit.completed", "run.paused", "run.blocked", "run.stopped", "run.finished",
-})
+EVENT_TYPES = frozenset(
+    {
+        "run.started",
+        "state.entered",
+        "server.validated",
+        "agent.started",
+        "agent.completed",
+        "agent.interrupted",
+        "git.committed",
+        "git.pushed",
+        "ci.discovered",
+        "ci.completed",
+        "audit.completed",
+        "run.paused",
+        "run.blocked",
+        "run.stopped",
+        "run.finished",
+    }
+)
 
 _SPRINT_ONE_TRANSITIONS = {
     ("initializing", "validating"): "state.entered",
@@ -29,6 +43,8 @@ _SPRINT_ONE_TRANSITIONS = {
 }
 
 _EVENT_FIELDS = {"schema_version", "sequence", "timestamp", "run_id", "type", "state", "payload"}
+
+
 def _validate_safe_payload(value: Any, *, code: str) -> None:
     """Reject credential-bearing fields and values from durable event payloads."""
     validate_safe_data(value, code=code, label="Event payload")
@@ -38,9 +54,17 @@ def validate_event(event: dict[str, Any], *, code: str = "corrupt_event_log") ->
     """Validate one complete event envelope before durable use or append."""
     if set(event) != _EVENT_FIELDS:
         raise ControllerError(code, "Event fields do not match the schema")
-    if not isinstance(event["schema_version"], int) or isinstance(event["schema_version"], bool) or event["schema_version"] != 1:
+    if (
+        not isinstance(event["schema_version"], int)
+        or isinstance(event["schema_version"], bool)
+        or event["schema_version"] != 1
+    ):
         raise ControllerError(code, "Event schema version is unsupported")
-    if not isinstance(event["sequence"], int) or isinstance(event["sequence"], bool) or event["sequence"] <= 0:
+    if (
+        not isinstance(event["sequence"], int)
+        or isinstance(event["sequence"], bool)
+        or event["sequence"] <= 0
+    ):
         raise ControllerError(code, "Event sequence must be a positive integer")
     if not isinstance(event["run_id"], str):
         raise ControllerError(code, "Event run_id is invalid")
@@ -52,7 +76,9 @@ def validate_event(event: dict[str, Any], *, code: str = "corrupt_event_log") ->
         raise ControllerError(code, "Event timestamp is invalid")
     try:
         timestamp = event["timestamp"]
-        parsed = datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00" if timestamp.endswith("Z") else timestamp)
+        parsed = datetime.fromisoformat(
+            timestamp.removesuffix("Z") + "+00:00" if timestamp.endswith("Z") else timestamp
+        )
     except ValueError as error:
         raise ControllerError(code, "Event timestamp is invalid") from error
     if parsed.tzinfo is None:
@@ -101,7 +127,10 @@ def load_events_at(directory: int, name: str, path: Path) -> list[dict[str, Any]
                 result: dict[str, Any] = {}
                 for key, value in pairs:
                     if key in result:
-                        raise ControllerError("corrupt_event_log", f"Duplicate JSON key {key!r} in event line {number}")
+                        raise ControllerError(
+                            "corrupt_event_log",
+                            f"Duplicate JSON key {key!r} in event line {number}",
+                        )
                     result[key] = value
                 return result
 
@@ -112,7 +141,9 @@ def load_events_at(directory: int, name: str, path: Path) -> list[dict[str, Any]
                     parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
                 )
             except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
-                raise ControllerError("corrupt_event_log", f"Malformed event line {number}") from error
+                raise ControllerError(
+                    "corrupt_event_log", f"Malformed event line {number}"
+                ) from error
             if not isinstance(event, dict):
                 raise ControllerError("corrupt_event_log", f"Event line {number} is not an object")
             events.append(event)
@@ -143,14 +174,18 @@ def validate_event_history(events: list[dict[str, Any]]) -> None:
         destination = event["state"]
         expected_type = _SPRINT_ONE_TRANSITIONS.get((previous, destination))
         if event["type"] != expected_type:
-            raise ControllerError("corrupt_event_log", "Event does not describe an allowed Sprint 1 transition")
+            raise ControllerError(
+                "corrupt_event_log", "Event does not describe an allowed Sprint 1 transition"
+            )
         payload = event["payload"]
         if payload.get("previous_state") != previous:
             raise ControllerError("corrupt_event_log", "Event prior state is inconsistent")
         if destination in {"blocked", "failed"}:
             reason = payload.get("reason")
             if not isinstance(reason, dict) or not reason.get("code") or not reason.get("message"):
-                raise ControllerError("corrupt_event_log", "Blocked or failed event requires a reason")
+                raise ControllerError(
+                    "corrupt_event_log", "Blocked or failed event requires a reason"
+                )
         previous = destination
 
 
@@ -172,7 +207,10 @@ def append_event_at(directory: int, name: str, path: Path, event: dict[str, Any]
     """Durably append one event through an already-open runtime directory."""
     validate_event(event, code="persistence_failed")
     try:
-        serialized = json.dumps(event, sort_keys=True, ensure_ascii=True, allow_nan=False).encode("utf-8") + b"\n"
+        serialized = (
+            json.dumps(event, sort_keys=True, ensure_ascii=True, allow_nan=False).encode("utf-8")
+            + b"\n"
+        )
     except (TypeError, ValueError, RecursionError) as error:
         raise ControllerError("persistence_failed", "Event cannot be serialized") from error
     if len(serialized) > MAX_JSON_BYTES:
@@ -191,7 +229,9 @@ def append_event_at(directory: int, name: str, path: Path, event: dict[str, Any]
         raise ControllerError("persistence_failed", f"Could not append event: {path}") from error
 
 
-def transition_event(state: dict[str, Any], event_type: str, destination: str, payload: dict[str, Any]) -> dict[str, Any]:
+def transition_event(
+    state: dict[str, Any], event_type: str, destination: str, payload: dict[str, Any]
+) -> dict[str, Any]:
     """Build the next event associated with one state transition."""
     return {
         "schema_version": 1,

@@ -41,7 +41,9 @@ def load_json_object_handle(handle: BinaryIO, path: Path, *, code: str) -> dict[
         raise ValueError(f"Non-finite JSON value {value}")
 
     try:
-        data = json.loads(text, object_pairs_hook=reject_duplicates, parse_constant=reject_nonfinite)
+        data = json.loads(
+            text, object_pairs_hook=reject_duplicates, parse_constant=reject_nonfinite
+        )
     except (json.JSONDecodeError, ControllerError, RecursionError, ValueError) as error:
         if isinstance(error, ControllerError):
             raise
@@ -58,7 +60,9 @@ def load_json_object(path: Path, *, code: str) -> dict[str, Any]:
         with path.open("rb") as handle:
             return load_json_object_handle(handle, path, code=code)
     except FileNotFoundError as error:
-        raise ControllerError("missing_required_file", f"Required file is missing: {path}") from error
+        raise ControllerError(
+            "missing_required_file", f"Required file is missing: {path}"
+        ) from error
     except OSError as error:
         raise ControllerError(code, f"Cannot inspect JSON input: {path}") from error
 

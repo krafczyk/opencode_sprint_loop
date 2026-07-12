@@ -87,7 +87,10 @@ def load_config(root: Path) -> SprintConfig:
             try:
                 details = os.fstat(descriptor)
                 if not stat.S_ISREG(details.st_mode):
-                    raise ControllerError("invalid_config", f"sprint_config.json must be a regular file: {config_path}")
+                    raise ControllerError(
+                        "invalid_config",
+                        f"sprint_config.json must be a regular file: {config_path}",
+                    )
                 handle = os.fdopen(descriptor, "rb", closefd=True)
                 descriptor = -1
                 with handle:
@@ -98,18 +101,37 @@ def load_config(root: Path) -> SprintConfig:
         finally:
             os.close(directory)
     except FileNotFoundError:
-        raise ControllerError("missing_required_file", f"Missing required sprint_config.json: {config_path}")
+        raise ControllerError(
+            "missing_required_file", f"Missing required sprint_config.json: {config_path}"
+        )
     except OSError as error:
-        raise ControllerError("invalid_config", f"sprint_config.json must be a regular file: {config_path}") from error
+        raise ControllerError(
+            "invalid_config", f"sprint_config.json must be a regular file: {config_path}"
+        ) from error
     if "schema_version" not in data:
         raise ControllerError("invalid_config", "Missing field: sprint_config.json.schema_version")
-    if not isinstance(data["schema_version"], int) or isinstance(data["schema_version"], bool) or data["schema_version"] != 1:
-        raise ControllerError("unsupported_config_schema", "schema_version must equal integer 1; migrate configuration to the supported schema")
+    if (
+        not isinstance(data["schema_version"], int)
+        or isinstance(data["schema_version"], bool)
+        or data["schema_version"] != 1
+    ):
+        raise ControllerError(
+            "unsupported_config_schema",
+            "schema_version must equal integer 1; migrate configuration to the supported schema",
+        )
     _expect_keys(
         data,
         {
-            "schema_version", "multisprint", "sprint", "repositories", "documents", "agents",
-            "models", "pre_ci_audit", "limits", "ci",
+            "schema_version",
+            "multisprint",
+            "sprint",
+            "repositories",
+            "documents",
+            "agents",
+            "models",
+            "pre_ci_audit",
+            "limits",
+            "ci",
         },
         "sprint_config.json",
     )
@@ -117,8 +139,14 @@ def load_config(root: Path) -> SprintConfig:
     sprint = _positive_int(data["sprint"], "sprint")
 
     repositories = data["repositories"]
-    if not isinstance(repositories, list) or len(repositories) != 1 or not isinstance(repositories[0], dict):
-        raise ControllerError("invalid_config", "repositories must contain exactly one object in V1")
+    if (
+        not isinstance(repositories, list)
+        or len(repositories) != 1
+        or not isinstance(repositories[0], dict)
+    ):
+        raise ControllerError(
+            "invalid_config", "repositories must contain exactly one object in V1"
+        )
     repository_data = repositories[0]
     _expect_keys(repository_data, {"name", "path", "branch", "remote"}, "repositories[0]")
     repository_name = _identifier(repository_data["name"], "repositories[0].name")
@@ -141,10 +169,36 @@ def load_config(root: Path) -> SprintConfig:
     documents: dict[str, Path] = {}
     document_identities: set[tuple[int, int]] = set()
     for key in document_keys:
-        path = resolve_within(root, _string(documents_data[key], f"documents.{key}"), field=f"documents.{key}")
-        if not path.is_file() or path.stat().st_size == 0:
-            raise ControllerError("missing_required_file", f"documents.{key} must be a non-empty regular file: {path}")
-        identity = (path.stat().st_dev, path.stat().st_ino)
+        path = resolve_within(
+            root, _string(documents_data[key], f"documents.{key}"), field=f"documents.{key}"
+        )
+        document_details: os.stat_result | None = None
+        try:
+            relative = path.relative_to(root)
+            directory = open_directory(root / relative.parent)
+            try:
+                descriptor = os.open(
+                    relative.name,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=directory,
+                )
+                try:
+                    document_details = os.fstat(descriptor)
+                finally:
+                    os.close(descriptor)
+            finally:
+                os.close(directory)
+        except (FileNotFoundError, OSError, ValueError):
+            pass
+        if (
+            document_details is None
+            or not stat.S_ISREG(document_details.st_mode)
+            or document_details.st_size == 0
+        ):
+            raise ControllerError(
+                "missing_required_file", f"documents.{key} must be a non-empty regular file: {path}"
+            )
+        identity = (document_details.st_dev, document_details.st_ino)
         if identity in document_identities:
             raise ControllerError("invalid_config", "documents must resolve to distinct files")
         document_identities.add(identity)
@@ -163,7 +217,9 @@ def load_config(root: Path) -> SprintConfig:
         except ValueError:
             local_agent = None
         if agent_file.is_symlink() or not agent_file.is_file() or local_agent is None:
-            raise ControllerError("invalid_agent_definition", f"Missing agent definition: {agent_file}")
+            raise ControllerError(
+                "invalid_agent_definition", f"Missing agent definition: {agent_file}"
+            )
 
     models_data = data["models"]
     if not isinstance(models_data, dict):
@@ -173,8 +229,15 @@ def load_config(root: Path) -> SprintConfig:
     for role in role_keys:
         value = _string(models_data[role], f"models.{role}")
         provider, separator, model = value.partition("/")
-        if not separator or not provider or not model or any(character.isspace() for character in value):
-            raise ControllerError("invalid_config", f"models.{role} must be provider/model without whitespace")
+        if (
+            not separator
+            or not provider
+            or not model
+            or any(character.isspace() for character in value)
+        ):
+            raise ControllerError(
+                "invalid_config", f"models.{role} must be provider/model without whitespace"
+            )
         models[role] = value
 
     audit_data = data["pre_ci_audit"]
@@ -187,7 +250,12 @@ def load_config(root: Path) -> SprintConfig:
     limits_data = data["limits"]
     if not isinstance(limits_data, dict):
         raise ControllerError("invalid_config", "limits must be an object")
-    limit_keys = {"max_implementation_cycles", "max_ci_fix_attempts", "invocation_timeout_seconds", "server_unavailable_grace_seconds"}
+    limit_keys = {
+        "max_implementation_cycles",
+        "max_ci_fix_attempts",
+        "invocation_timeout_seconds",
+        "server_unavailable_grace_seconds",
+    }
     _expect_keys(limits_data, limit_keys, "limits")
     limits = {key: _positive_int(limits_data[key], f"limits.{key}") for key in limit_keys}
 
@@ -198,14 +266,20 @@ def load_config(root: Path) -> SprintConfig:
     _expect_keys(ci_data, ci_keys, "ci")
     if ci_data["provider"] != "github":
         raise ControllerError("invalid_config", "ci.provider must equal github in V1")
-    if not isinstance(ci_data["allow_skipped"], bool) or not isinstance(ci_data["allow_neutral"], bool):
-        raise ControllerError("invalid_config", "ci.allow_skipped and ci.allow_neutral must be booleans")
+    if not isinstance(ci_data["allow_skipped"], bool) or not isinstance(
+        ci_data["allow_neutral"], bool
+    ):
+        raise ControllerError(
+            "invalid_config", "ci.allow_skipped and ci.allow_neutral must be booleans"
+        )
     zero_checks = _string(ci_data["zero_checks"], "ci.zero_checks")
     if not ZERO_CHECKS.fullmatch(zero_checks):
         raise ControllerError("invalid_config", "ci.zero_checks must be a lower-case identifier")
     ci: dict[str, Any] = {
         "provider": "github",
-        "poll_interval_seconds": _positive_int(ci_data["poll_interval_seconds"], "ci.poll_interval_seconds"),
+        "poll_interval_seconds": _positive_int(
+            ci_data["poll_interval_seconds"], "ci.poll_interval_seconds"
+        ),
         "allow_skipped": ci_data["allow_skipped"],
         "allow_neutral": ci_data["allow_neutral"],
         "zero_checks": zero_checks,

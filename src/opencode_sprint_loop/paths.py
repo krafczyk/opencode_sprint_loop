@@ -16,7 +16,9 @@ def canonical_root(value: str) -> Path:
     if not path.exists():
         raise ControllerError("root_not_found", f"Sprint root does not exist: {path.absolute()}")
     if not path.is_dir():
-        raise ControllerError("root_not_found", f"Sprint root is not a directory: {path.absolute()}")
+        raise ControllerError(
+            "root_not_found", f"Sprint root is not a directory: {path.absolute()}"
+        )
     return path.resolve()
 
 
@@ -29,7 +31,9 @@ def resolve_within(root: Path, value: str, *, field: str, require_exists: bool =
     try:
         resolved.relative_to(root)
     except ValueError as error:
-        raise ControllerError("invalid_config", f"{field} resolves outside sprint root: {value}") from error
+        raise ControllerError(
+            "invalid_config", f"{field} resolves outside sprint root: {value}"
+        ) from error
     if require_exists and not resolved.exists():
         raise ControllerError("missing_required_file", f"{field} does not exist: {resolved}")
     return resolved
@@ -63,11 +67,18 @@ def ensure_runtime_paths_safe(root: Path, paths: RuntimePaths) -> None:
         if os.path.lexists(component):
             mode = os.lstat(component).st_mode
             if stat.S_ISLNK(mode):
-                raise ControllerError("inconsistent_persistence", f"Runtime path must not be a symlink: {component}")
+                raise ControllerError(
+                    "inconsistent_persistence", f"Runtime path must not be a symlink: {component}"
+                )
             if not stat.S_ISDIR(mode):
-                raise ControllerError("inconsistent_persistence", f"Runtime path must be a directory: {component}")
+                raise ControllerError(
+                    "inconsistent_persistence", f"Runtime path must be a directory: {component}"
+                )
     for artifact in (paths.state, paths.events, paths.lock_metadata):
         if os.path.lexists(artifact):
             mode = os.lstat(artifact).st_mode
             if not stat.S_ISREG(mode):
-                raise ControllerError("inconsistent_persistence", f"Runtime artifact must be a regular file: {artifact}")
+                raise ControllerError(
+                    "inconsistent_persistence",
+                    f"Runtime artifact must be a regular file: {artifact}",
+                )

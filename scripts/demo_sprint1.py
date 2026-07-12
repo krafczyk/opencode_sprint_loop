@@ -17,7 +17,9 @@ from pathlib import Path
 
 def run(command: list[str], *, cwd: Path | None = None, expected: int = 0) -> None:
     """Run one demonstration command and print its complete safe output."""
-    result = subprocess.run(command, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    result = subprocess.run(
+        command, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+    )
     print(f"$ {' '.join(command)}")
     if result.stdout:
         print(result.stdout, end="")
@@ -32,13 +34,54 @@ def git(root: Path, *arguments: str) -> None:
     run(["git", *arguments], cwd=root)
 
 
+def git_output(root: Path, *arguments: str) -> str:
+    """Return one deterministic Git inspection result without printing it."""
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode:
+        raise SystemExit(f"Git inspection failed: {' '.join(arguments)}: {result.stderr}")
+    return result.stdout
+
+
+def repository_snapshot(root: Path) -> dict[str, object]:
+    """Capture the Git state that rejected preflight must not change."""
+    index = Path(git_output(root, "rev-parse", "--git-path", "index").strip())
+    if not index.is_absolute():
+        index = (root / index).resolve()
+    return {
+        "head": git_output(root, "rev-parse", "HEAD").strip(),
+        "branch": git_output(root, "symbolic-ref", "--quiet", "--short", "HEAD").strip(),
+        "status": git_output(root, "status", "--porcelain=v2", "--untracked-files=all"),
+        "index": index.read_bytes(),
+    }
+
+
+def require_unchanged(before: dict[str, object], root: Path, label: str) -> None:
+    """Stop the demonstration if rejected preflight changed Git state."""
+    if repository_snapshot(root) != before:
+        raise SystemExit(f"{label} unexpectedly changed Git state: {root}")
+
+
 def write_config(root: Path, *, schema_version: int = 1) -> None:
     """Write the complete valid Sprint 1 configuration fixture."""
     config = {
         "schema_version": schema_version,
         "multisprint": "demo",
         "sprint": 1,
-        "repositories": [{"name": "managed", "path": "repositories/managed", "branch": "main", "remote": "origin"}],
+        "repositories": [
+            {
+                "name": "managed",
+                "path": "repositories/managed",
+                "branch": "main",
+                "remote": "origin",
+            }
+        ],
         "documents": {
             "multisprint_spec": "docs/demo/multisprint_spec.md",
             "sprint_spec": "docs/demo/1/sprint_spec.md",
@@ -53,7 +96,13 @@ def write_config(root: Path, *, schema_version: int = 1) -> None:
             "invocation_timeout_seconds": 60,
             "server_unavailable_grace_seconds": 30,
         },
-        "ci": {"provider": "github", "poll_interval_seconds": 30, "allow_skipped": True, "allow_neutral": True, "zero_checks": "error"},
+        "ci": {
+            "provider": "github",
+            "poll_interval_seconds": 30,
+            "allow_skipped": True,
+            "allow_neutral": True,
+            "zero_checks": "error",
+        },
     }
     (root / "sprint_config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
@@ -90,7 +139,17 @@ def create_fixture(base: Path) -> Path:
     write_config(root)
     git(root, "add", "AGENTS.md", ".opencode", "docs", "sprint_config.json")
     git(root, "commit", "-m", "Add sprint inputs")
-    git(root, "-c", "protocol.file.allow=always", "submodule", "add", "-b", "main", str(remote), "repositories/managed")
+    git(
+        root,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-b",
+        "main",
+        str(remote),
+        "repositories/managed",
+    )
     git(root, "commit", "-m", "Add managed submodule")
     return root
 
@@ -127,7 +186,18 @@ with patch("opencode_sprint_loop.cli.transition", side_effect=pause_after_valida
     raise SystemExit(cli.main(sys.argv[3:]))
 """
     process = subprocess.Popen(
-        [str(interpreter), "-c", code, str(ready), str(release), "run", "--root", str(root), "--server-url", "opaque-demo-url"],
+        [
+            str(interpreter),
+            "-c",
+            code,
+            str(ready),
+            str(release),
+            "run",
+            "--root",
+            str(root),
+            "--server-url",
+            "opaque-demo-url",
+        ],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -187,14 +257,27 @@ def main() -> int:
     print(f"\nDemo sprint root: {root}")
     run([arguments.executable, "--help"])
     run([arguments.executable, "--version"])
+    before_no_run = repository_snapshot(root)
     run([arguments.executable, "status", "--root", str(root)])
     run([arguments.executable, "status", "--root", str(root), "--json"])
+    require_unchanged(before_no_run, root, "No-run status")
+    require_no_runtime_artifacts(root)
 
     active_root = create_named_fixture(base, "active-controller")
     print(f"\nActive controller fixture: {active_root}")
     active, release = start_paused_controller(arguments.executable, active_root)
     run([arguments.executable, "status", "--root", str(active_root), "--json"])
-    run([arguments.executable, "run", "--root", str(active_root), "--server-url", "opaque-demo-url"], expected=2)
+    run(
+        [
+            arguments.executable,
+            "run",
+            "--root",
+            str(active_root),
+            "--server-url",
+            "opaque-demo-url",
+        ],
+        expected=2,
+    )
     release.write_text("release\n", encoding="utf-8")
     stdout, stderr = active.communicate(timeout=10)
     print(f"$ {arguments.executable} run --root {active_root} --server-url opaque-demo-url")
@@ -208,7 +291,17 @@ def main() -> int:
     lock_root = create_named_fixture(base, "lock-rejection")
     print(f"\nOS lock rejection fixture: {lock_root}")
     with hold_run_lock(lock_root):
-        run([arguments.executable, "run", "--root", str(lock_root), "--server-url", "opaque-demo-url"], expected=2)
+        run(
+            [
+                arguments.executable,
+                "run",
+                "--root",
+                str(lock_root),
+                "--server-url",
+                "opaque-demo-url",
+            ],
+            expected=2,
+        )
         run([arguments.executable, "status", "--root", str(lock_root), "--json"])
     require_no_runtime_artifacts(lock_root)
 
@@ -216,24 +309,48 @@ def main() -> int:
     dirty_managed = dirty_root / "repositories" / "managed"
     (dirty_managed / "user-work.txt").write_text("uncommitted user work\n", encoding="utf-8")
     print(f"\nDirty managed no-mutation fixture: {dirty_root}")
+    dirty_before = {
+        "sprint": repository_snapshot(dirty_root),
+        "managed": repository_snapshot(dirty_managed),
+    }
     git(dirty_managed, "status", "--short")
-    run([arguments.executable, "run", "--root", str(dirty_root), "--server-url", "opaque-demo-url"], expected=2)
+    run(
+        [arguments.executable, "run", "--root", str(dirty_root), "--server-url", "opaque-demo-url"],
+        expected=2,
+    )
     git(dirty_managed, "status", "--short")
+    require_unchanged(dirty_before["sprint"], dirty_root, "Dirty sprint preflight")
+    require_unchanged(dirty_before["managed"], dirty_managed, "Dirty managed preflight")
     require_no_runtime_artifacts(dirty_root)
 
     schema_root = create_named_fixture(base, "unknown-schema")
     write_config(schema_root, schema_version=2)
     print(f"\nUnknown schema no-mutation fixture: {schema_root}")
+    schema_before = repository_snapshot(schema_root)
     git(schema_root, "status", "--short")
-    run([arguments.executable, "run", "--root", str(schema_root), "--server-url", "opaque-demo-url"], expected=2)
+    run(
+        [
+            arguments.executable,
+            "run",
+            "--root",
+            str(schema_root),
+            "--server-url",
+            "opaque-demo-url",
+        ],
+        expected=2,
+    )
     git(schema_root, "status", "--short")
+    require_unchanged(schema_before, schema_root, "Unknown-schema preflight")
     require_no_runtime_artifacts(schema_root)
 
     print("No OpenCode server or GitHub credentials were used.")
     git(root, "submodule", "status")
     git(root, "status", "--short")
     git(root / "repositories" / "managed", "status", "--short")
-    run([arguments.executable, "run", "--root", str(root), "--server-url", "opaque-demo-url"], expected=4)
+    run(
+        [arguments.executable, "run", "--root", str(root), "--server-url", "opaque-demo-url"],
+        expected=4,
+    )
     print((root / "info" / "demo" / "1" / "state.json").read_text(encoding="utf-8"), end="")
     print((root / "info" / "demo" / "1" / "events.jsonl").read_text(encoding="utf-8"), end="")
     run([arguments.executable, "status", "--root", str(root)])

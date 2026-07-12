@@ -61,7 +61,9 @@ def _process_running(run_lock: Path, paths: RuntimePaths, state: dict[str, Any])
     return True
 
 
-def project_status(root: Path, config: SprintConfig, paths: RuntimePaths, run_lock: Path) -> dict[str, Any]:
+def project_status(
+    root: Path, config: SprintConfig, paths: RuntimePaths, run_lock: Path
+) -> dict[str, Any]:
     """Load, validate, and project current state without mutating workflow data."""
     state, events = validate_persistence(paths, config)
     if state is None or events is None:
@@ -76,7 +78,9 @@ def project_status(root: Path, config: SprintConfig, paths: RuntimePaths, run_lo
         "run_id": state["run_id"],
         "sprint": {"multisprint": state["multisprint"], "index": state["sprint"]},
         "state": state["state"],
-        "reason": None if state["reason"] is None else {
+        "reason": None
+        if state["reason"] is None
+        else {
             "code": state["reason"]["code"],
             "message": state["reason"]["message"],
         },
@@ -88,7 +92,11 @@ def project_status(root: Path, config: SprintConfig, paths: RuntimePaths, run_lo
             "pre_ci_max_rounds": state["audit"]["pre_ci_max_rounds"],
             "remaining_effort": state["audit"]["remaining_effort"],
         },
-        "ci": {"status": state["ci"]["status"], "attempt": state["ci"]["attempt"], "commit_sha": state["ci"]["commit_sha"]},
+        "ci": {
+            "status": state["ci"]["status"],
+            "attempt": state["ci"]["attempt"],
+            "commit_sha": state["ci"]["commit_sha"],
+        },
         "counters": state["counters"],
         "checklist": {
             "satisfied": state["checklist"]["satisfied"],
@@ -97,7 +105,11 @@ def project_status(root: Path, config: SprintConfig, paths: RuntimePaths, run_lo
             "not_evaluated": state["checklist"]["not_evaluated"],
             "assessed_at": state["checklist"]["assessed_at"],
         },
-        "last_event": {"sequence": event["sequence"], "type": event["type"], "timestamp": event["timestamp"]},
+        "last_event": {
+            "sequence": event["sequence"],
+            "type": event["type"],
+            "timestamp": event["timestamp"],
+        },
         "updated_at": state["updated_at"],
     }
 
@@ -111,37 +123,59 @@ def validate_persistence(
     except FileNotFoundError:
         return None, None
     except OSError as error:
-        raise ControllerError("corrupt_state", f"Cannot inspect runtime directory: {paths.info_dir}") from error
+        raise ControllerError(
+            "corrupt_state", f"Cannot inspect runtime directory: {paths.info_dir}"
+        ) from error
     try:
         state_exists = path_exists(directory, paths.state.name)
         events_exists = path_exists(directory, paths.events.name)
         if not state_exists and not events_exists:
             return None, None
         if state_exists != events_exists:
-            raise ControllerError("inconsistent_persistence", "State and event log must either both exist or both be absent")
+            raise ControllerError(
+                "inconsistent_persistence",
+                "State and event log must either both exist or both be absent",
+            )
         state = load_state_at(directory, paths.state.name, paths.state)
         if state["multisprint"] != config.multisprint or state["sprint"] != config.sprint:
-            raise ControllerError("inconsistent_persistence", "Persisted state does not match configured sprint identity")
+            raise ControllerError(
+                "inconsistent_persistence",
+                "Persisted state does not match configured sprint identity",
+            )
         expected_keys = {repository.name for repository in config.repositories}
-        if set(state["commits"]["local"]) != expected_keys or set(state["commits"]["pushed"]) != expected_keys:
-            raise ControllerError("inconsistent_persistence", "Persisted commit maps do not match configured repository")
+        if (
+            set(state["commits"]["local"]) != expected_keys
+            or set(state["commits"]["pushed"]) != expected_keys
+        ):
+            raise ControllerError(
+                "inconsistent_persistence",
+                "Persisted commit maps do not match configured repository",
+            )
         if state["audit"]["pre_ci_max_rounds"] != config.pre_ci_max_rounds:
-            raise ControllerError("inconsistent_persistence", "Persisted audit maximum does not match configuration")
+            raise ControllerError(
+                "inconsistent_persistence", "Persisted audit maximum does not match configuration"
+            )
         events = load_events_at(directory, paths.events.name, paths.events)
         if not events:
             raise ControllerError("corrupt_event_log", "State exists but event log is empty")
         if events[-1]["sequence"] < state["last_event_sequence"]:
             raise ControllerError("corrupt_event_log", "Event log is behind persisted state")
         if events[-1]["sequence"] > state["last_event_sequence"]:
-            raise ControllerError("inconsistent_persistence", "Event log is ahead of persisted state")
+            raise ControllerError(
+                "inconsistent_persistence", "Event log is ahead of persisted state"
+            )
         validate_event_history(events)
         event = events[-1]
         if event["run_id"] != state["run_id"] or event["state"] != state["state"]:
             raise ControllerError("inconsistent_persistence", "State does not match its last event")
         if event["timestamp"] != state["updated_at"]:
-            raise ControllerError("inconsistent_persistence", "State update timestamp does not match its last event")
+            raise ControllerError(
+                "inconsistent_persistence", "State update timestamp does not match its last event"
+            )
         if event["payload"].get("reason") != state["reason"]:
-            raise ControllerError("inconsistent_persistence", "State reason does not match its last event")
+            raise ControllerError(
+                "inconsistent_persistence", "State reason does not match its last event"
+            )
         require_current_directory(paths.info_dir, directory)
         return state, events
     finally:
@@ -164,5 +198,7 @@ def format_status(status: dict[str, Any]) -> str:
     if reason is not None:
         lines.append(f"Reason: {reason['code']}: {reason['message']}")
     if status["last_event"] is not None:
-        lines.append(f"Last event: {status['last_event']['type']} ({status['last_event']['timestamp']})")
+        lines.append(
+            f"Last event: {status['last_event']['type']} ({status['last_event']['timestamp']})"
+        )
     return "\n".join(lines) + "\n"

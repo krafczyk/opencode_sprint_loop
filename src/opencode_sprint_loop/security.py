@@ -8,8 +8,12 @@ from typing import Any
 from .errors import ControllerError
 
 
-_SENSITIVE_FIELD = re.compile(r"(?:credential|password|secret|token|api[_-]?key|authorization)", re.IGNORECASE)
-_PROVIDER_TOKEN = r"(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})"
+_SENSITIVE_FIELD = re.compile(
+    r"(?:credential|password|secret|token|api[_-]?key|authorization)", re.IGNORECASE
+)
+_PROVIDER_TOKEN = (
+    r"(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})"
+)
 _CREDENTIAL_VALUE = re.compile(
     r"(?:\b(?:authorization|proxy-authorization)\s*:\s*(?:basic|bearer)\s+\S+|"
     r"https?://[^/\s@]+@|"
