@@ -12,6 +12,13 @@ license = { text = "MIT" }
 authors = [{ name = "opencode_sprint_loop contributors" }]
 dependencies = []
 
+[project.optional-dependencies]
+dev = [
+    "build==1.2.2.post1",
+    "mypy==1.16.1",
+    "ruff==0.12.1",
+]
+
 [project.scripts]
 sprint-loop = "opencode_sprint_loop.cli:main"
 

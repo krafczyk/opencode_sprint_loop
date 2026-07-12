@@ -62,7 +62,7 @@ def _positive_int(value: Any, field: str) -> int:
     """Validate one positive JSON integer without accepting booleans."""
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ControllerError("invalid_config", f"{field} must be a positive integer")
-    return value
+    return int(value)
 
 
 def _identifier(value: Any, field: str) -> str:

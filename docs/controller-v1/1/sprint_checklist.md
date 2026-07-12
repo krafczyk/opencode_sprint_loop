@@ -21,7 +21,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S1-PKG-002** Register the `sprint-loop` console entry point.
 - [x] **S1-PKG-003** Create the Python package under `src/opencode_sprint_loop/`.
 - [x] **S1-PKG-004** Expose a package version used by `sprint-loop --version` and status output.
-- [x] **S1-PKG-005** Add a test package with separate unit and integration-oriented areas or equivalent clear organization.
+- [ ] **S1-PKG-005** Add a test package with separate unit and integration-oriented areas or equivalent clear organization.
 - [x] **S1-PKG-006** Ensure a clean editable or wheel installation exposes `sprint-loop` without relying on the repository working directory.
 - [x] **S1-PKG-007** Configure the default test command so it runs without network access, credentials, OpenCode, GitHub, or global Git identity.
 - [x] **S1-PKG-008** Add formatting, linting, and type-check configuration selected for the project, or document why a category is intentionally deferred.
@@ -147,11 +147,11 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S1-SAFE-002** Prove representative invalid configuration failures leave no runtime files.
 - [x] **S1-SAFE-003** Prove representative sprint repository failures leave no runtime files.
 - [x] **S1-SAFE-004** Prove representative managed repository failures leave no runtime files.
-- [x] **S1-SAFE-005** Compare sprint and managed HEADs before and after failure.
-- [x] **S1-SAFE-006** Compare branches before and after failure.
-- [x] **S1-SAFE-007** Compare index identities or staged diffs before and after failure.
-- [x] **S1-SAFE-008** Compare porcelain status before and after failure.
-- [x] **S1-SAFE-009** Verify no commit, stash, reset, clean, checkout, switch, add, or push command is invoked.
+- [ ] **S1-SAFE-005** Compare sprint and managed HEADs before and after failure.
+- [ ] **S1-SAFE-006** Compare branches before and after failure.
+- [ ] **S1-SAFE-007** Compare index identities or staged diffs before and after failure.
+- [ ] **S1-SAFE-008** Compare porcelain status before and after failure.
+- [ ] **S1-SAFE-009** Verify no commit, stash, reset, clean, checkout, switch, add, or push command is invoked.
 - [x] **S1-SAFE-010** Check for existing state and event artifacts before worktree cleanliness so valid controller-owned runtime files produce `run_already_exists` and malformed/incomplete artifacts produce persistence errors rather than `dirty_sprint_repository`.
 - [x] **S1-SAFE-011** Repeat existing-state and concurrency-sensitive repository checks after acquiring ownership and before runtime mutation.
 - [x] **S1-SAFE-012** Prove a post-lock revalidation failure creates no runtime files and releases ownership.
@@ -186,8 +186,8 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S1-ATOM-005** Replace `state.json` atomically.
 - [x] **S1-ATOM-006** `fsync` the containing directory where supported.
 - [x] **S1-ATOM-007** Clean up handled abandoned temporary files when safe.
-- [x] **S1-ATOM-008** Inject failures before write, during write, before replace, and after replace.
-- [x] **S1-ATOM-009** Verify readers observe either the complete previous state or complete next state, never truncated JSON.
+- [ ] **S1-ATOM-008** Inject failures before write, during write, before replace, and after replace.
+- [ ] **S1-ATOM-009** Verify readers observe either the complete previous state or complete next state, never truncated JSON.
 
 ## 13. Event Log
 
@@ -213,7 +213,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S1-CONSIST-004** Treat an event log behind state as corruption.
 - [x] **S1-CONSIST-005** Treat an event log ahead of state as `inconsistent_persistence`.
 - [x] **S1-CONSIST-006** Do not automatically replay ahead events in Sprint 1.
-- [x] **S1-CONSIST-007** Add fault-injection coverage for interruption between event sync and state replacement.
+- [ ] **S1-CONSIST-007** Add fault-injection coverage for interruption between event sync and state replacement.
 - [x] **S1-CONSIST-008** Hold the exclusive persistence lock across event append and state replacement.
 - [x] **S1-CONSIST-009** Hold the shared persistence lock across status reads of events and state so normal transitions cannot appear inconsistent.
 - [x] **S1-CONSIST-010** Acquire the persistence lock before creating first-run runtime paths and hold it through the first complete event/state pair.
@@ -296,42 +296,42 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S1-FIX-006** Add the managed repository as a real Git submodule.
 - [x] **S1-FIX-007** Create required AGENTS, agent definition, specification, checklist, and configuration files.
 - [x] **S1-FIX-008** Commit a clean valid fixture baseline.
-- [x] **S1-FIX-009** Add helpers for staged, unstaged, and untracked changes in either repository.
-- [x] **S1-FIX-010** Add helpers for wrong branch, detached HEAD, and missing remote.
-- [x] **S1-FIX-011** Add helpers for uninitialized submodule and gitlink/HEAD mismatch.
-- [x] **S1-FIX-012** Add helpers for merge, rebase, cherry-pick, revert, and bisect state.
-- [x] **S1-FIX-013** Add helpers for malformed configuration, state, event, and lock records.
+- [ ] **S1-FIX-009** Add helpers for staged, unstaged, and untracked changes in either repository.
+- [ ] **S1-FIX-010** Add helpers for wrong branch, detached HEAD, and missing remote.
+- [ ] **S1-FIX-011** Add helpers for uninitialized submodule and gitlink/HEAD mismatch.
+- [ ] **S1-FIX-012** Add helpers for merge, rebase, cherry-pick, revert, and bisect state.
+- [ ] **S1-FIX-013** Add helpers for malformed configuration, state, event, and lock records.
 - [x] **S1-FIX-014** Keep all fixtures offline and independent of the user's home Git configuration.
 
 ## 20. Automated Verification
 
-- [x] **S1-TEST-001** Add unit coverage for every configuration rule.
+- [ ] **S1-TEST-001** Add unit coverage for every configuration rule.
 - [x] **S1-TEST-002** Add unit coverage for duplicate-key JSON detection.
-- [x] **S1-TEST-003** Add unit coverage for path containment and symlink escape.
-- [x] **S1-TEST-004** Add unit coverage for state and event model validation.
-- [x] **S1-TEST-005** Add unit coverage for every allowed and representative rejected transition.
-- [x] **S1-TEST-006** Add atomic-write fault-injection coverage.
-- [x] **S1-TEST-007** Add append-only event and consistency fault coverage.
-- [x] **S1-TEST-008** Add repository integration coverage for every sprint root failure class.
-- [x] **S1-TEST-009** Add repository integration coverage for every managed submodule failure class.
-- [x] **S1-TEST-010** Add mutation-invariant assertions to invalid preflight tests.
+- [ ] **S1-TEST-003** Add unit coverage for path containment and symlink escape.
+- [ ] **S1-TEST-004** Add unit coverage for state and event model validation.
+- [ ] **S1-TEST-005** Add unit coverage for every allowed and representative rejected transition.
+- [ ] **S1-TEST-006** Add atomic-write fault-injection coverage.
+- [ ] **S1-TEST-007** Add append-only event and consistency fault coverage.
+- [ ] **S1-TEST-008** Add repository integration coverage for every sprint root failure class.
+- [ ] **S1-TEST-009** Add repository integration coverage for every managed submodule failure class.
+- [ ] **S1-TEST-010** Add mutation-invariant assertions to invalid preflight tests.
 - [x] **S1-TEST-011** Add concurrent ownership coverage using separate processes, not only threads.
-- [x] **S1-TEST-012** Add stale and malformed metadata plus process-identity coverage.
-- [x] **S1-TEST-013** Add CLI tests for help, version, usage errors, and deferred controls.
-- [x] **S1-TEST-013A** Prove each deferred control command leaves state, events, lock metadata, worktrees, indexes, branches, and HEADs unchanged.
-- [x] **S1-TEST-014** Add CLI tests for no-run human and JSON status.
-- [x] **S1-TEST-015** Add CLI tests for placeholder-run human and JSON status.
-- [x] **S1-TEST-016** Add CLI tests proving JSON standard output contains no diagnostics.
+- [ ] **S1-TEST-012** Add stale and malformed metadata plus process-identity coverage.
+- [ ] **S1-TEST-013** Add CLI tests for help, version, usage errors, and deferred controls.
+- [ ] **S1-TEST-013A** Prove each deferred control command leaves state, events, lock metadata, worktrees, indexes, branches, and HEADs unchanged.
+- [ ] **S1-TEST-014** Add CLI tests for no-run human and JSON status.
+- [ ] **S1-TEST-015** Add CLI tests for placeholder-run human and JSON status.
+- [ ] **S1-TEST-016** Add CLI tests proving JSON standard output contains no diagnostics.
 - [x] **S1-TEST-017** Add CLI tests proving invalid runs create no runtime paths.
 - [x] **S1-TEST-018** Add a complete valid-run test asserting all three events and final state.
 - [x] **S1-TEST-018A** Add a test proving any existing persisted run is rejected before worktree cleanliness and remains unchanged.
-- [x] **S1-TEST-018B** Add a two-process race test proving post-lock revalidation prevents a second run from writing.
-- [x] **S1-TEST-018C** Add a concurrent status test proving the persistence lock prevents transient event/state inconsistency during a normal transition.
-- [x] **S1-TEST-018C1** Add a concurrent no-run/first-transition status test proving status observes either a complete no-run view or a complete initialized-run view.
-- [x] **S1-TEST-018D** Add event short-write and partial-final-line tests with no automatic truncation.
-- [x] **S1-TEST-018E** Test that the opaque server URL is neither parsed, logged, nor persisted.
-- [x] **S1-TEST-018F** Test process activity while ownership is held and after release, including final persisted inactive intent.
-- [x] **S1-TEST-018G** Test the 1 MiB bounds for configuration, state, and individual event lines.
+- [ ] **S1-TEST-018B** Add a two-process race test proving post-lock revalidation prevents a second run from writing.
+- [ ] **S1-TEST-018C** Add a concurrent status test proving the persistence lock prevents transient event/state inconsistency during a normal transition.
+- [ ] **S1-TEST-018C1** Add a concurrent no-run/first-transition status test proving status observes either a complete no-run view or a complete initialized-run view.
+- [ ] **S1-TEST-018D** Add event short-write and partial-final-line tests with no automatic truncation.
+- [ ] **S1-TEST-018E** Test that the opaque server URL is neither parsed, logged, nor persisted.
+- [ ] **S1-TEST-018F** Test process activity while ownership is held and after release, including final persisted inactive intent.
+- [ ] **S1-TEST-018G** Test the 1 MiB bounds for configuration, state, and individual event lines.
 - [x] **S1-TEST-019** Run the full default suite in an environment without OpenCode or GitHub credentials.
 - [x] **S1-TEST-020** Run configured formatting, linting, and type checks.
 - [x] **S1-TEST-021** Build the source distribution and wheel successfully.
@@ -395,10 +395,10 @@ An item may be checked only when its implementation, tests, and required documen
 
 ## 25. Completion Gate
 
-- [x] **S1-DONE-001** Every applicable checklist item above is checked.
-- [x] **S1-DONE-002** All Sprint 1 acceptance criteria in `sprint_spec.md` are demonstrably satisfied.
+- [ ] **S1-DONE-001** Every applicable checklist item above is checked.
+- [ ] **S1-DONE-002** All Sprint 1 acceptance criteria in `sprint_spec.md` are demonstrably satisfied.
 - [x] **S1-DONE-003** The narrow test suites pass during development.
-- [x] **S1-DONE-004** The complete default test suite passes.
+- [ ] **S1-DONE-004** The complete default test suite passes.
 - [x] **S1-DONE-005** Formatting, linting, type checking, package build, and clean-install smoke tests pass.
 - [x] **S1-DONE-006** `git diff --check` passes.
 - [x] **S1-DONE-007** Final repository status contains only intended Sprint 1 changes.

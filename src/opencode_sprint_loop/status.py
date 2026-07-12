@@ -25,7 +25,7 @@ def _no_run(root: Path) -> dict[str, Any]:
         "sprint": None,
         "state": None,
         "reason": None,
-        "active": {"role": None, "invocation_id": None, "session_id": None},
+        "active": None,
         "commits": None,
         "audit": None,
         "ci": None,

@@ -19,7 +19,7 @@ It does **not** yet run OpenCode sessions, make commits or pushes, monitor GitHu
 - Python 3.11 or newer.
 - Git.
 
-The package has no runtime dependencies. The pinned build requirement is declared in `pyproject.toml` for reproducible package builds.
+The package has no runtime dependencies. Pinned build and development tools are declared in the `dev` extra in `pyproject.toml`.
 
 ## Installation
 
@@ -34,7 +34,7 @@ python3 -m venv .venv
 For development:
 
 ```bash
-python3 -m pip install --no-deps -e .
+python3 -m pip install -e '.[dev]'
 python3 -m opencode_sprint_loop.cli --help
 ```
 
@@ -126,7 +126,22 @@ V1 configuration is collection-shaped but Sprint 1 accepts exactly one managed r
 }
 ```
 
-Configuration paths are relative to the sprint root and may not escape it. Configuration rejects duplicate JSON keys, unknown fields, unsupported schema versions, invalid identifiers, and missing or empty required documents. Agent files must be present in `.opencode/agents/`.
+Configuration field rules:
+
+| Field | Validation |
+| --- | --- |
+| `schema_version` | Integer `1`; booleans are rejected. |
+| `multisprint`, repository `name`, agent names | Lowercase identifier matching `^[a-z0-9][a-z0-9_-]{0,63}$`. |
+| `sprint`, audit rounds, limits, CI interval | Positive integers; booleans are rejected. |
+| `repositories` | Exactly one object. Its path is non-empty, relative, contained by the root, not the root itself, and may not contain `..`. |
+| Repository branch and remote | Non-empty single-line strings without NUL. |
+| `documents` | Three distinct, non-empty regular files contained by the sprint root. |
+| `agents` | Each configured name requires `.opencode/agents/<name>.md`. |
+| `models` | `provider/model` with non-empty, whitespace-free components; additional `/` characters are allowed in the model identifier. |
+| `pre_ci_audit.enabled`, CI allow flags | JSON booleans. Sprint 1 preserves audit-enabled state without acting on it. |
+| `ci` | Provider is `github`; `zero_checks` is a lower-case identifier. `error` is the recommended value. |
+
+Schema version 1 rejects duplicate JSON keys and unknown fields at every level. Configuration paths are relative to the sprint root and may not escape it.
 
 ## Runtime Records and Status
 
@@ -141,17 +156,36 @@ info/<multisprint>/<sprint>/
 
 The event log records `run.started`, `state.entered`, and `run.blocked`; state ends at `blocked` with reason code `execution_not_implemented`. Sprint 1 does not create checkpoint commits, so these controller-owned runtime files remain uncommitted until Sprint 4 introduces checkpoint commits.
 
-Use `status --json` for integrations. It emits one JSON object and writes diagnostics only to standard error. With no existing run it reports `run_exists: false` and does not create worktree or runtime files.
+Use `status --json` for integrations. It emits one JSON object and writes diagnostics only to standard error. Its stable top-level fields are `schema_version`, `controller_version`, `sprint_root`, `run_exists`, `process_running`, `run_id`, `sprint`, `state`, `reason`, `active`, `commits`, `audit`, `ci`, `counters`, `checklist`, `last_event`, and `updated_at`.
+
+When no run exists, `run_exists` is `false`, `process_running` is `false`, and every run-specific field from `run_id` through `updated_at` is `null`. No-run status does not create worktree or runtime files. For a placeholder run, `active` is an object containing null `role`, `invocation_id`, and `session_id` fields; `last_event` identifies the final `run.blocked` record.
 
 ## Verification
 
 Run the default offline test suite:
 
 ```bash
+python3 -m pip install -e '.[dev]'
 python3 -m unittest discover -s tests -v
 python3 -m compileall -q src
-python3 -m pip wheel --no-deps --wheel-dir /tmp/opencode-sprint-loop-wheel .
+python3 -m ruff check src tests
+python3 -m mypy
+python3 -m build
 git diff --check
 ```
 
 The tests create temporary local Git repositories and submodules. They do not require a model, OpenCode server, GitHub account, network access, or global Git identity.
+
+## Sprint 1 Demonstration
+
+The following offline commands exercise the Sprint 1 exit demonstration using real temporary Git repositories and a real submodule created by the tests:
+
+```bash
+python3 -m unittest -v tests.test_foundation.FoundationTests.test_no_run_json_status_is_read_only
+python3 -m unittest -v tests.test_foundation.FoundationTests.test_valid_run_persists_placeholder_state
+python3 -m unittest -v tests.test_foundation.FoundationTests.test_separate_process_ownership_lock_rejects_run
+python3 -m unittest -v tests.test_foundation.FoundationTests.test_dirty_managed_repository_fails_without_runtime_artifacts
+python3 -m unittest -v tests.test_foundation.FoundationTests.test_unknown_schema_fails_without_runtime_artifacts
+```
+
+Together with the installation commands above, these tests demonstrate no-run status, the three persisted placeholder events, concurrent ownership rejection, mutation-free dirty-repository rejection, and mutation-free unsupported-schema rejection without a live OpenCode server or GitHub credentials.

@@ -22,16 +22,25 @@ class GitRepository:
 
 def _run(path: Path, *arguments: str, allow_failure: bool = False) -> str:
     """Run a read-only Git command with deterministic diagnostics."""
-    environment = {"LC_ALL": "C", "LANG": "C", "PATH": os.environ.get("PATH", "")}
-    result = subprocess.run(
-        ["git", *arguments],
-        cwd=path,
-        env=environment,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    environment = {
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PATH": os.environ.get("PATH", ""),
+        # Git status may otherwise refresh cached stat information in the index.
+        "GIT_OPTIONAL_LOCKS": "0",
+    }
+    try:
+        result = subprocess.run(
+            ["git", *arguments],
+            cwd=path,
+            env=environment,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, UnicodeError) as error:
+        raise ControllerError("root_not_git_worktree", f"Cannot inspect Git repository at {path}") from error
     if result.returncode != 0 and not allow_failure:
         detail = result.stderr.strip() or result.stdout.strip() or "Git command failed"
         raise ControllerError("root_not_git_worktree", f"Git inspection failed in {path}: {detail}")
@@ -91,8 +100,18 @@ def _ensure_submodule(root: GitRepository, config: SprintConfig) -> GitRepositor
     modules = root.root / ".gitmodules"
     if not modules.is_file():
         raise ControllerError("invalid_submodule", f"Missing .gitmodules for managed repository: {config.repository.path}")
-    registered = _run(root.root, "config", "--file", str(modules), "--get-regexp", r"^submodule\..*\.path$", allow_failure=True)
-    if relative not in [line.rsplit(" ", 1)[-1] for line in registered.splitlines() if line]:
+    registered = _run(
+        root.root,
+        "config",
+        "--null",
+        "--file",
+        str(modules),
+        "--get-regexp",
+        r"^submodule\..*\.path$",
+        allow_failure=True,
+    )
+    registered_paths = [record.partition("\n")[2] for record in registered.split("\0") if record]
+    if relative not in registered_paths:
         raise ControllerError("invalid_submodule", f"Managed repository is not registered in .gitmodules: {config.repository.path}")
     if not config.repository.path.exists():
         raise ControllerError("uninitialized_submodule", f"Managed submodule is not initialized: {config.repository.path}")

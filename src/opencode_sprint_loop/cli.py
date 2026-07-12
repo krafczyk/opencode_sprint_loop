@@ -89,6 +89,30 @@ def _write_lock_metadata(path: Path, state: dict[str, object]) -> None:
         raise ControllerError("persistence_failed", f"Could not persist lock metadata: {path}") from error
 
 
+def _persist_best_effort_failure(paths: RuntimePaths, config: SprintConfig) -> None:
+    """Record a safe failed transition only when the current durable pair is consistent."""
+    if not paths.state.exists() or not paths.events.exists():
+        return
+    try:
+        state, _ = validate_persistence(paths, config)
+        if state["state"] not in {"initializing", "validating"}:
+            return
+        transition(
+            state,
+            paths.events,
+            paths.state,
+            "failed",
+            reason={
+                "code": "internal_error",
+                "message": "Controller failed after durable state became available.",
+                "details": {},
+            },
+        )
+    except (ControllerError, OSError):
+        # Preserve the original failure and never overwrite inconsistent evidence.
+        return
+
+
 def _run(root_value: str, server_url: str) -> int:
     """Execute the intentional Sprint 1 placeholder workflow without network access."""
     if not server_url:
@@ -100,24 +124,33 @@ def _run(root_value: str, server_url: str) -> int:
     validate_preflight(root, config, require_clean=True, allowed_root_untracked=allowed)
     with advisory_lock(run_lock, exclusive=True, blocking=False):
         with advisory_lock(persistence_lock, exclusive=True):
-            _existing_run(paths, config)
-            allowed = {paths.lock_metadata.relative_to(root).as_posix()} if paths.lock_metadata.exists() else set()
-            validate_preflight(root, config, require_clean=True, allowed_root_untracked=allowed)
-            state = new_state(config)
-            _write_lock_metadata(paths.lock_metadata, state)
-            persist_initial(state, paths.events, paths.state)
-            transition(state, paths.events, paths.state, "validating")
-            transition(
-                state,
-                paths.events,
-                paths.state,
-                "blocked",
-                reason={
-                    "code": "execution_not_implemented",
-                    "message": "Sprint execution begins in a later implementation sprint.",
-                    "details": {},
-                },
-            )
+            try:
+                # Reload after ownership so a concurrent clean configuration change
+                # cannot direct this run to stale runtime paths or repository data.
+                root, config, paths, post_lock_run_lock, post_lock_persistence_lock = _load_root_config(root_value)
+                if post_lock_run_lock != run_lock or post_lock_persistence_lock != persistence_lock:
+                    raise ControllerError("internal_error", "Controller lock location changed during preflight")
+                _existing_run(paths, config)
+                allowed = {paths.lock_metadata.relative_to(root).as_posix()} if paths.lock_metadata.exists() else set()
+                validate_preflight(root, config, require_clean=True, allowed_root_untracked=allowed)
+                state = new_state(config)
+                _write_lock_metadata(paths.lock_metadata, state)
+                persist_initial(state, paths.events, paths.state)
+                transition(state, paths.events, paths.state, "validating")
+                transition(
+                    state,
+                    paths.events,
+                    paths.state,
+                    "blocked",
+                    reason={
+                        "code": "execution_not_implemented",
+                        "message": "Sprint execution begins in a later implementation sprint.",
+                        "details": {},
+                    },
+                )
+            except Exception:
+                _persist_best_effort_failure(paths, config)
+                raise
     return 4
 
 
@@ -142,9 +175,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run(arguments.root, arguments.server_url)
         if arguments.command == "status":
             return _status(arguments.root, arguments.json)
+        if arguments.command == "resume" and not arguments.server_url:
+            raise ControllerError("invalid_arguments", "--server-url must be non-empty")
+        # Reserved controls still validate their root and configuration before
+        # reporting that their Sprint 1 coordination semantics are unavailable.
+        _load_root_config(arguments.root)
         raise ControllerError("feature_not_implemented", f"{arguments.command} is not implemented in Sprint 1")
     except ControllerError as error:
         sys.stderr.write(f"{error.code}: {error.message}\n")
+        return 2
+    except Exception:
+        sys.stderr.write("internal_error: Unexpected controller failure; inspect local controller logs and retry\n")
         return 2
 
 

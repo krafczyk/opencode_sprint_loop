@@ -17,12 +17,16 @@ def load_json_object(path: Path, *, code: str) -> dict[str, Any]:
         size = path.stat().st_size
     except FileNotFoundError as error:
         raise ControllerError("missing_required_file", f"Required file is missing: {path}") from error
+    except OSError as error:
+        raise ControllerError(code, f"Cannot inspect JSON input: {path}") from error
     if size > MAX_JSON_BYTES:
         raise ControllerError(code, f"JSON input exceeds 1 MiB: {path}")
     try:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
         raise ControllerError(code, f"JSON input is not UTF-8: {path}") from error
+    except OSError as error:
+        raise ControllerError(code, f"Cannot read JSON input: {path}") from error
 
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}

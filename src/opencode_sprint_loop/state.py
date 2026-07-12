@@ -92,11 +92,40 @@ _REQUIRED = {
 }
 
 
+def _exact_fields(data: Any, fields: set[str], label: str) -> dict[str, Any]:
+    """Require a schema-version-one object to have exactly its documented fields."""
+    if not isinstance(data, dict) or set(data) != fields:
+        raise ControllerError("corrupt_state", f"State {label} fields are invalid")
+    return data
+
+
+def _nonnegative_int(value: Any, field: str) -> int:
+    """Validate a non-negative persisted counter without accepting booleans."""
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ControllerError("corrupt_state", f"State {field} must be a non-negative integer")
+    return value
+
+
+def _nullable_string(value: Any, field: str) -> None:
+    """Validate a nullable string field in the durable schema."""
+    if value is not None and not isinstance(value, str):
+        raise ControllerError("corrupt_state", f"State {field} is invalid")
+
+
+def _validate_reason(reason: Any) -> None:
+    """Validate the structured, non-secret reason persisted for a transition."""
+    fields = _exact_fields(reason, {"code", "message", "details"}, "reason")
+    if not isinstance(fields["code"], str) or not fields["code"]:
+        raise ControllerError("corrupt_state", "State reason code is invalid")
+    if not isinstance(fields["message"], str) or not fields["message"]:
+        raise ControllerError("corrupt_state", "State reason message is invalid")
+    if not isinstance(fields["details"], dict):
+        raise ControllerError("corrupt_state", "State reason details are invalid")
+
+
 def validate_state(data: dict[str, Any]) -> dict[str, Any]:
     """Validate persisted state before it influences controller decisions."""
-    missing = _REQUIRED - set(data)
-    if missing:
-        raise ControllerError("corrupt_state", f"State is missing required field: {sorted(missing)[0]}")
+    _exact_fields(data, _REQUIRED, "top-level")
     if not isinstance(data["schema_version"], int) or isinstance(data["schema_version"], bool) or data["schema_version"] != 1:
         raise ControllerError("unsupported_state_schema", "Unsupported state schema version")
     try:
@@ -106,72 +135,61 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data["state"], str) or data["state"] not in STATE_NAMES:
         raise ControllerError("corrupt_state", f"Unknown workflow state: {data['state']!r}")
     if data["state"] in {"blocked", "failed", "stopped"}:
-        reason = data["reason"]
-        if not isinstance(reason, dict) or not isinstance(reason.get("code"), str) or not isinstance(reason.get("message"), str):
-            raise ControllerError("corrupt_state", "Blocked, failed, and stopped states require a structured reason")
-    if data["reason"] is not None:
-        reason = data["reason"]
-        if not isinstance(reason, dict) or not isinstance(reason.get("code"), str) or not isinstance(reason.get("message"), str) or not isinstance(reason.get("details", {}), dict):
-            raise ControllerError("corrupt_state", "State reason is invalid")
-    if not isinstance(data["last_event_sequence"], int) or isinstance(data["last_event_sequence"], bool) or data["last_event_sequence"] < 0:
-        raise ControllerError("corrupt_state", "State last_event_sequence must be a non-negative integer")
-    if not isinstance(data["multisprint"], str) or not isinstance(data["sprint"], int) or isinstance(data["sprint"], bool):
+        _validate_reason(data["reason"])
+    elif data["reason"] is not None:
+        raise ControllerError("corrupt_state", "State reason must be null outside blocked, failed, and stopped states")
+    _nonnegative_int(data["last_event_sequence"], "last_event_sequence")
+    if not isinstance(data["multisprint"], str) or not data["multisprint"] or not isinstance(data["sprint"], int) or isinstance(data["sprint"], bool) or data["sprint"] <= 0:
         raise ControllerError("corrupt_state", "State sprint identity is invalid")
     _timestamp(data["created_at"], "created_at")
     _timestamp(data["updated_at"], "updated_at")
-    if not isinstance(data["process"], dict) or not isinstance(data["process"].get("active"), bool):
-        raise ControllerError("corrupt_state", "State process object is invalid")
-    process_required = {"pid", "process_start", "hostname", "active"}
-    if process_required - set(data["process"]) or not isinstance(data["process"]["pid"], int) or not isinstance(data["process"]["hostname"], str):
+    process = _exact_fields(data["process"], {"pid", "process_start", "hostname", "active"}, "process")
+    if not isinstance(process["active"], bool) or not isinstance(process["pid"], int) or isinstance(process["pid"], bool) or process["pid"] <= 0 or not isinstance(process["hostname"], str) or not process["hostname"]:
         raise ControllerError("corrupt_state", "State process fields are invalid")
-    if data["process"]["process_start"] is not None and not isinstance(data["process"]["process_start"], str):
+    if process["process_start"] is not None and (not isinstance(process["process_start"], str) or not process["process_start"]):
         raise ControllerError("corrupt_state", "State process_start is invalid")
-    if not isinstance(data["server"], dict) or {"url", "version"} - set(data["server"]):
-        raise ControllerError("corrupt_state", "State server object is invalid")
-    if any(data["server"][field] is not None and not isinstance(data["server"][field], str) for field in ("url", "version")):
-        raise ControllerError("corrupt_state", "State server fields are invalid")
-    if data["active_invocation"] is not None and not isinstance(data["active_invocation"], dict):
-        raise ControllerError("corrupt_state", "State active_invocation is invalid")
-    for field in ("commits", "audit", "ci", "counters", "checklist", "control"):
-        if not isinstance(data[field], dict):
-            raise ControllerError("corrupt_state", f"State {field} object is invalid")
-    required_nested = {
-        "commits": {"local", "pushed"},
-        "audit": {"phase", "pre_ci_round", "pre_ci_max_rounds", "latest_report", "remaining_effort"},
-        "ci": {"attempt", "commit_sha", "status", "checks"},
-        "counters": {"implementation_cycles", "ci_fix_attempts"},
-        "checklist": {"satisfied", "partial", "unsatisfied", "not_evaluated", "assessed_at", "items"},
-        "control": {"requested", "requested_at", "resume_state"},
-    }
-    for field, required in required_nested.items():
-        if required - set(data[field]):
-            raise ControllerError("corrupt_state", f"State {field} is missing required fields")
-    if not isinstance(data["commits"]["local"], dict) or not isinstance(data["commits"]["pushed"], dict):
+    server = _exact_fields(data["server"], {"url", "version"}, "server")
+    if server["url"] is not None or server["version"] is not None:
+        raise ControllerError("corrupt_state", "Sprint 1 server fields must be null")
+    if data["active_invocation"] is not None:
+        raise ControllerError("corrupt_state", "Sprint 1 active_invocation must be null")
+
+    commits = _exact_fields(data["commits"], {"local", "pushed"}, "commits")
+    if not isinstance(commits["local"], dict) or not isinstance(commits["pushed"], dict):
         raise ControllerError("corrupt_state", "State commit maps are invalid")
-    if any(value is not None and not isinstance(value, str) for commit_map in data["commits"].values() for value in commit_map.values()):
+    if any(not isinstance(key, str) or not key or value is not None and not isinstance(value, str) for commit_map in commits.values() for key, value in commit_map.items()):
         raise ControllerError("corrupt_state", "State commit values are invalid")
-    if not all(isinstance(data["audit"][field], int) and not isinstance(data["audit"][field], bool) and data["audit"][field] >= 0 for field in ("pre_ci_round", "pre_ci_max_rounds")):
+
+    audit = _exact_fields(data["audit"], {"phase", "pre_ci_round", "pre_ci_max_rounds", "latest_report", "remaining_effort"}, "audit")
+    if _nonnegative_int(audit["pre_ci_round"], "audit.pre_ci_round") < 0 or not isinstance(audit["pre_ci_max_rounds"], int) or isinstance(audit["pre_ci_max_rounds"], bool) or audit["pre_ci_max_rounds"] <= 0:
         raise ControllerError("corrupt_state", "State audit counters are invalid")
-    if not isinstance(data["ci"]["attempt"], int) or isinstance(data["ci"]["attempt"], bool) or not isinstance(data["ci"]["checks"], list):
+    _nullable_string(audit["phase"], "audit.phase")
+    _nullable_string(audit["latest_report"], "audit.latest_report")
+    _nullable_string(audit["remaining_effort"], "audit.remaining_effort")
+
+    ci = _exact_fields(data["ci"], {"attempt", "commit_sha", "status", "checks"}, "ci")
+    if _nonnegative_int(ci["attempt"], "ci.attempt") < 0 or not isinstance(ci["checks"], list) or ci["checks"]:
         raise ControllerError("corrupt_state", "State CI fields are invalid")
-    if not isinstance(data["ci"]["status"], str) or data["ci"]["commit_sha"] is not None and not isinstance(data["ci"]["commit_sha"], str):
+    if ci["status"] != "not_started" or ci["commit_sha"] is not None:
         raise ControllerError("corrupt_state", "State CI metadata is invalid")
-    if not all(isinstance(data["counters"][field], int) and not isinstance(data["counters"][field], bool) and data["counters"][field] >= 0 for field in data["counters"]):
-        raise ControllerError("corrupt_state", "State counters are invalid")
-    if not isinstance(data["checklist"]["items"], list):
+
+    counters = _exact_fields(data["counters"], {"implementation_cycles", "ci_fix_attempts"}, "counters")
+    _nonnegative_int(counters["implementation_cycles"], "counters.implementation_cycles")
+    _nonnegative_int(counters["ci_fix_attempts"], "counters.ci_fix_attempts")
+
+    checklist = _exact_fields(data["checklist"], {"satisfied", "partial", "unsatisfied", "not_evaluated", "assessed_at", "items"}, "checklist")
+    if not isinstance(checklist["items"], list) or checklist["items"]:
         raise ControllerError("corrupt_state", "State checklist items are invalid")
-    if not all(isinstance(data["checklist"][field], int) and not isinstance(data["checklist"][field], bool) and data["checklist"][field] >= 0 for field in ("satisfied", "partial", "unsatisfied", "not_evaluated")):
-        raise ControllerError("corrupt_state", "State checklist counters are invalid")
-    if data["checklist"]["assessed_at"] is not None:
-        _timestamp(data["checklist"]["assessed_at"], "checklist.assessed_at")
-    if data["audit"]["phase"] is not None and not isinstance(data["audit"]["phase"], str) or data["audit"]["latest_report"] is not None and not isinstance(data["audit"]["latest_report"], str) or data["audit"]["remaining_effort"] is not None and not isinstance(data["audit"]["remaining_effort"], str):
-        raise ControllerError("corrupt_state", "State audit metadata is invalid")
-    if data["control"]["requested"] is not None and not isinstance(data["control"]["requested"], str):
-        raise ControllerError("corrupt_state", "State control request is invalid")
-    if data["control"]["requested_at"] is not None:
-        _timestamp(data["control"]["requested_at"], "control.requested_at")
-    if data["control"]["resume_state"] is not None and data["control"]["resume_state"] not in STATE_NAMES:
-        raise ControllerError("corrupt_state", "State control resume_state is invalid")
+    for field in ("satisfied", "partial", "unsatisfied", "not_evaluated"):
+        _nonnegative_int(checklist[field], f"checklist.{field}")
+    if checklist["assessed_at"] is not None:
+        _timestamp(checklist["assessed_at"], "checklist.assessed_at")
+
+    control = _exact_fields(data["control"], {"requested", "requested_at", "resume_state"}, "control")
+    if any(value is not None for value in control.values()):
+        raise ControllerError("corrupt_state", "Sprint 1 control fields must be null")
+    if data["state"] not in TERMINAL_STATES and data["terminal_result"] is not None:
+        raise ControllerError("corrupt_state", "State terminal_result must be null for non-terminal states")
     if data["terminal_result"] is not None and not isinstance(data["terminal_result"], dict):
         raise ControllerError("corrupt_state", "State terminal_result is invalid")
     return data
@@ -185,14 +203,18 @@ def load_state(path: Path) -> dict[str, Any]:
 def write_state_atomic(path: Path, state: dict[str, Any]) -> None:
     """Atomically replace state after complete validation and durable flushing."""
     validate_state(state)
+    try:
+        serialized = dump_json(state)
+    except (TypeError, ValueError, RecursionError) as error:
+        raise ControllerError("persistence_failed", "State cannot be serialized") from error
     temporary: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=path.parent)
         temporary = Path(temporary_name)
-        os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(dump_json(state))
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(serialized)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
