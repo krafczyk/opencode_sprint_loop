@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import socket
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +10,10 @@ from . import __version__
 from .config import SprintConfig
 from .errors import ControllerError
 from .events import load_events_at, validate_event_history
-from .jsonio import load_json_object_handle
-from .locking import is_exclusively_locked
+from .locking import exclusive_lock_pid
 from .paths import RuntimePaths
-from .safeio import open_directory, open_regular, path_exists, require_current_directory
-from .state import is_rfc3339_utc, load_state_at, process_start_identity
+from .safeio import open_directory, path_exists, require_current_directory
+from .state import load_state_at, process_start_identity
 
 
 def _no_run(root: Path) -> dict[str, Any]:
@@ -42,51 +40,25 @@ def _no_run(root: Path) -> dict[str, Any]:
 
 
 def _process_running(run_lock: Path, paths: RuntimePaths, state: dict[str, Any]) -> bool:
-    """Confirm lock ownership belongs to the persisted run when identity is available."""
-    try:
-        descriptor, directory = open_regular(paths.lock_metadata, os.O_RDONLY)
-        try:
-            with os.fdopen(descriptor, "rb", closefd=True) as handle:
-                metadata = load_json_object_handle(handle, paths.lock_metadata, code="corrupt_state")
-        finally:
-            os.close(directory)
-    except (ControllerError, FileNotFoundError):
-        return False
+    """Confirm the authoritative OS lock belongs to the persisted process."""
     process = state["process"]
-    required = {"schema_version", "run_id", "pid", "process_start", "hostname", "started_at"}
-    if set(metadata) != required:
+    pid = process["pid"]
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
-    if not isinstance(metadata["schema_version"], int) or isinstance(metadata["schema_version"], bool) or metadata["schema_version"] != 1:
+    holder = exclusive_lock_pid(run_lock)
+    if holder != pid:
         return False
-    if not isinstance(metadata["run_id"], str) or not isinstance(metadata["hostname"], str) or not metadata["hostname"]:
-        return False
-    if not is_rfc3339_utc(metadata["started_at"]):
-        return False
-    if metadata["process_start"] is not None and (
-        not isinstance(metadata["process_start"], str) or not metadata["process_start"]
-    ):
-        return False
-    if metadata["run_id"] != state["run_id"] or metadata["hostname"] != socket.gethostname():
-        return False
-    if metadata["pid"] != process["pid"] or metadata["process_start"] != process["process_start"]:
-        return False
-    if not isinstance(metadata["pid"], int) or isinstance(metadata["pid"], bool) or metadata["pid"] <= 0:
-        return False
-    expected_start = metadata["process_start"]
-    current_start = process_start_identity(metadata["pid"])
+    expected_start = process["process_start"]
+    current_start = process_start_identity(pid)
     if expected_start is not None:
-        return (
-            isinstance(expected_start, str)
-            and expected_start == current_start
-            and is_exclusively_locked(run_lock)
-        )
+        return isinstance(expected_start, str) and expected_start == current_start
     if current_start is not None:
         return False
     try:
-        os.kill(metadata["pid"], 0)
+        os.kill(pid, 0)
     except OSError:
         return False
-    return is_exclusively_locked(run_lock)
+    return True
 
 
 def project_status(root: Path, config: SprintConfig, paths: RuntimePaths, run_lock: Path) -> dict[str, Any]:
@@ -153,6 +125,8 @@ def validate_persistence(
         expected_keys = {repository.name for repository in config.repositories}
         if set(state["commits"]["local"]) != expected_keys or set(state["commits"]["pushed"]) != expected_keys:
             raise ControllerError("inconsistent_persistence", "Persisted commit maps do not match configured repository")
+        if state["audit"]["pre_ci_max_rounds"] != config.pre_ci_max_rounds:
+            raise ControllerError("inconsistent_persistence", "Persisted audit maximum does not match configuration")
         events = load_events_at(directory, paths.events.name, paths.events)
         if not events:
             raise ControllerError("corrupt_event_log", "State exists but event log is empty")

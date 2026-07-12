@@ -50,9 +50,9 @@ def _expect_keys(data: dict[str, Any], expected: set[str], field: str) -> None:
     unknown = set(data) - expected
     missing = expected - set(data)
     if unknown:
-        raise ControllerError("invalid_config", f"Unknown field in {field}: {sorted(unknown)[0]}")
+        raise ControllerError("invalid_config", f"Unknown field: {field}.{sorted(unknown)[0]}")
     if missing:
-        raise ControllerError("invalid_config", f"Missing field in {field}: {sorted(missing)[0]}")
+        raise ControllerError("invalid_config", f"Missing field: {field}.{sorted(missing)[0]}")
 
 
 def _string(value: Any, field: str) -> str:
@@ -102,7 +102,7 @@ def load_config(root: Path) -> SprintConfig:
     except OSError as error:
         raise ControllerError("invalid_config", f"sprint_config.json must be a regular file: {config_path}") from error
     if "schema_version" not in data:
-        raise ControllerError("invalid_config", "Missing field in sprint_config.json: schema_version")
+        raise ControllerError("invalid_config", "Missing field: sprint_config.json.schema_version")
     if not isinstance(data["schema_version"], int) or isinstance(data["schema_version"], bool) or data["schema_version"] != 1:
         raise ControllerError("unsupported_config_schema", "schema_version must equal integer 1; migrate configuration to the supported schema")
     _expect_keys(

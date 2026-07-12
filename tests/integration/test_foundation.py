@@ -51,6 +51,28 @@ def invoke_in_child(
     results.put((code, stdout.getvalue(), stderr.getvalue()))
 
 
+def run_paused_after_validating(
+    arguments: list[str], ready: multiprocessing.synchronize.Event, release: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue[int],
+) -> None:
+    """Run a real controller process while retaining ownership after validation."""
+    from opencode_sprint_loop import cli
+
+    original_transition = cli.transition
+
+    def pause_after_validating(*transition_arguments: object, **keywords: object) -> object:
+        result = original_transition(*transition_arguments, **keywords)  # type: ignore[arg-type]
+        destination = keywords.get("destination", transition_arguments[4])
+        if destination == "validating":
+            ready.set()
+            if not release.wait(timeout=10):
+                raise RuntimeError("timed out waiting to complete controller run")
+        return result
+
+    with patch("opencode_sprint_loop.cli.transition", side_effect=pause_after_validating):
+        results.put(main(arguments))
+
+
 def pause_transition_in_child(
     state: dict[str, Any], events_path: Path, state_path: Path, persistence_lock: Path,
     state_write_started: multiprocessing.synchronize.Event,
@@ -465,6 +487,12 @@ class FoundationTests(unittest.TestCase):
                 with self.assertRaises(ControllerError) as context:
                     load_config(self.root)
                 self.assertEqual(context.exception.code, "invalid_config")
+                expected = (
+                    f"repositories[0].{path[-1]}" if path[0] == "repositories" and len(path) > 1
+                    else f"{path[0]}.{path[-1]}" if len(path) > 1
+                    else f"sprint_config.json.{path[-1]}"
+                )
+                self.assertIn(expected, context.exception.message)
         for path in integer_paths:
             with self.subTest(boolean=path):
                 data = json.loads(json.dumps(original))
@@ -588,6 +616,13 @@ class FoundationTests(unittest.TestCase):
                     load_config(self.root)
                 self.assertEqual(context.exception.code, "invalid_agent_definition")
                 path.write_text(contents, encoding="utf-8")
+
+    def test_configuration_preserves_disabled_pre_ci_audit(self) -> None:
+        """The reserved disabled-audit setting remains valid without Sprint 1 semantics."""
+        data = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
+        data["pre_ci_audit"]["enabled"] = False
+        (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+        self.assertFalse(load_config(self.root).pre_ci_enabled)
 
     def test_no_run_json_status_is_read_only(self) -> None:
         """Status returns a stable no-run projection without worktree artifacts."""
@@ -770,6 +805,17 @@ class FoundationTests(unittest.TestCase):
             "updated_at": state["updated_at"],
         })
 
+    def test_status_rejects_configuration_derived_audit_mismatch(self) -> None:
+        """Status refuses persisted audit limits that contradict current configuration."""
+        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        paths = runtime_paths(self.root, "foundation", 1)
+        state = json.loads(paths.state.read_text(encoding="utf-8"))
+        state["audit"]["pre_ci_max_rounds"] = 999
+        paths.state.write_text(json.dumps(state), encoding="utf-8")
+        code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 2)
+        self.assertIn("inconsistent_persistence", stderr)
+
     def test_existing_run_precedes_dirty_worktree_error(self) -> None:
         """Runtime artifacts cause run_already_exists even though they dirty the worktree."""
         self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
@@ -802,6 +848,26 @@ class FoundationTests(unittest.TestCase):
                 self.assertEqual(code, 2)
                 self.assertTrue(stderr)
                 self.assertEqual((root / "info").exists(), info_existed)
+
+    def test_status_root_failures_create_no_runtime_paths(self) -> None:
+        """Status rejects invalid roots without creating runtime paths or worktree files."""
+        non_git = self.fixture.base / "status-non-git"
+        non_git.mkdir()
+        for root in (self.root / "missing", non_git, self.root / "docs"):
+            with self.subTest(root=root):
+                code, stdout, stderr = self.invoke(["status", "--root", str(root), "--json"])
+                self.assertEqual(code, 2)
+                self.assertEqual(stdout, "")
+                self.assertTrue(stderr)
+                self.assertFalse((root / "info").exists())
+
+    def test_missing_root_agents_file_fails_without_runtime_artifacts(self) -> None:
+        """Run preflight requires the root instructions file before mutation."""
+        (self.root / "AGENTS.md").unlink()
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 2)
+        self.assertIn("missing_required_file", stderr)
+        self.assertFalse((self.root / "info").exists())
 
     def test_sprint_root_without_a_resolvable_head_is_rejected_without_runtime_artifacts(self) -> None:
         """A worktree whose current HEAD does not resolve cannot enter controller preflight."""
@@ -988,6 +1054,18 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("missing_remote", stderr)
         self.assertFalse((self.root / "info").exists())
 
+    def test_option_like_remote_name_is_not_accepted_from_git_usage_output(self) -> None:
+        """A failed remote query cannot be mistaken for a configured remote URL."""
+        data = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
+        data["repositories"][0]["remote"] = "-h"
+        (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+        git(self.root, "add", "sprint_config.json")
+        git(self.root, "commit", "-m", "Use invalid remote name")
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 2)
+        self.assertIn("missing_remote", stderr)
+        self.assertFalse((self.root / "info").exists())
+
     def test_git_failure_diagnostics_include_path_and_expected_values(self) -> None:
         """Git preflight errors report the repository, expected setting, and observed condition."""
         variants = (
@@ -1031,6 +1109,22 @@ class FoundationTests(unittest.TestCase):
                 self.assertIn("feature_not_implemented", stderr)
                 self.assertEqual(self.fixture.snapshot(), before)
         self.assertFalse((self.root / "info").exists())
+
+    def test_deferred_commands_preserve_existing_runtime_artifacts(self) -> None:
+        """Reserved controls leave an existing Sprint 1 run byte-for-byte unchanged."""
+        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        paths = runtime_paths(self.root, "foundation", 1)
+        before = {path: path.read_bytes() for path in (paths.state, paths.events, paths.lock_metadata)}
+        for arguments in (
+            ["pause", "--root", str(self.root)],
+            ["resume", "--root", str(self.root), "--server-url", "opaque"],
+            ["stop", "--root", str(self.root)],
+        ):
+            with self.subTest(command=arguments[0]):
+                code, _, stderr = self.invoke(arguments)
+                self.assertEqual(code, 2)
+                self.assertIn("feature_not_implemented", stderr)
+                self.assertEqual({path: path.read_bytes() for path in before}, before)
 
     def test_human_no_run_and_placeholder_status(self) -> None:
         """Human status remains concise before and after the placeholder run."""
@@ -1621,30 +1715,46 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(outside.read_text(encoding="utf-8"), "outside remains unchanged\n")
         self.assertFalse(paths.lock_metadata.exists())
 
-    def test_source_distribution_includes_controller_documents(self) -> None:
-        """The packaging manifest carries authoritative documentation in the source archive."""
-        if importlib.util.find_spec("setuptools") is None:
-            self.skipTest("setuptools build backend is unavailable in this test environment")
+    def test_build_and_clean_wheel_installation(self) -> None:
+        """A temporary source copy builds, includes documents, and installs as an executable wheel."""
+        if importlib.util.find_spec("build") is None:
+            self.skipTest("build frontend is unavailable in this test environment")
         project_root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            shutil.copytree(
+                project_root,
+                source,
+                ignore=shutil.ignore_patterns(".git", ".venv", "build", "dist", "*.egg-info", "__pycache__", "opencode_sprint_loop.lua"),
+            )
             result = subprocess.run(
-                [
-                    sys.executable,
-                    "-c",
-                    "from setuptools.build_meta import build_sdist; import sys; print(build_sdist(sys.argv[1]))",
-                    temporary,
-                ],
-                cwd=project_root,
+                [sys.executable, "-m", "build"],
+                cwd=source,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            archives = list(Path(temporary).glob("*.tar.gz"))
+            archives = list((source / "dist").glob("*.tar.gz"))
             self.assertEqual(len(archives), 1)
             with tarfile.open(archives[0]) as archive:
                 names = set(archive.getnames())
+            wheel = next((source / "dist").glob("*.whl"))
+            environment = Path(temporary) / "wheel-environment"
+            result = subprocess.run([sys.executable, "-m", "venv", str(environment)], text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run(
+                [str(environment / "bin" / "python"), "-m", "pip", "install", "--no-deps", str(wheel)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            executable = environment / "bin" / "sprint-loop"
+            for arguments in (("--help",), ("--version",), ("status", "--root", str(self.root), "--json")):
+                result = subprocess.run([str(executable), *arguments], text=True, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
         for document in (
             "docs/v1_final_software_specification.md",
             "docs/multi_sprint_plan.md",
@@ -1666,27 +1776,70 @@ class FoundationTests(unittest.TestCase):
         self.assertFalse((self.root / "info").exists())
 
     def test_controller_locks_use_stable_git_metadata_anchors(self) -> None:
-        """Ownership and persistence locks never depend on replaceable controller lock files."""
+        """Ownership and persistence use dedicated directories Git never rewrites."""
         run_lock, persistence_lock = controller_locks(self.root)
-        self.assertEqual((run_lock.name, persistence_lock.name), ("HEAD", "config"))
-        self.assertTrue(run_lock.is_file())
-        self.assertTrue(persistence_lock.is_file())
-        self.assertFalse((run_lock.parent / "opencode-sprint-loop").exists())
-
-    def test_status_reports_live_ownership_without_trusting_persisted_intent(self) -> None:
-        """Status remains readable and derives activity from the held ownership lock."""
-        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
-        git_dir = Path(git(self.root, "rev-parse", "--git-dir"))
-        if not git_dir.is_absolute():
-            git_dir = (self.root / git_dir).resolve()
-        run_lock, _ = _lock_paths(git_dir)
+        self.assertEqual((run_lock.name, persistence_lock.name), ("run", "persistence"))
         with advisory_lock(run_lock, exclusive=True):
+            before = tuple(os.stat(path).st_ino for path in (run_lock, persistence_lock.parent))
+            git(self.root, "config", "controller.lock-test", "true")
+            git(self.root, "checkout", "-b", "lock-anchor-test")
+            git(self.root, "checkout", "main")
+            git(self.root, "config", "--unset", "controller.lock-test")
+            self.assertEqual(tuple(os.stat(path).st_ino for path in (run_lock, persistence_lock.parent)), before)
+        with advisory_lock(persistence_lock, exclusive=False):
+            pass
+        self.assertTrue(run_lock.is_dir())
+        self.assertTrue(persistence_lock.is_dir())
+
+    def test_status_reports_real_separate_process_ownership_without_lock_metadata(self) -> None:
+        """Status derives activity from the authoritative lock holder and persisted process identity."""
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        release = context.Event()
+        results = context.Queue()
+        process = context.Process(
+            target=run_paused_after_validating,
+            args=(["run", "--root", str(self.root), "--server-url", "opaque"], ready, release, results),
+        )
+        process.start()
+        try:
+            self.assertTrue(ready.wait(timeout=5))
+            paths = runtime_paths(self.root, "foundation", 1)
+            paths.lock_metadata.unlink()
             code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
             self.assertEqual(code, 0, stderr)
             self.assertTrue(json.loads(stdout)["process_running"])
-        code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
-        self.assertEqual(code, 0, stderr)
-        self.assertFalse(json.loads(stdout)["process_running"])
+            release.set()
+            process.join(timeout=5)
+            self.assertFalse(process.is_alive())
+            self.assertEqual(results.get(timeout=1), 4)
+            code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+            self.assertEqual(code, 0, stderr)
+            self.assertFalse(json.loads(stdout)["process_running"])
+        finally:
+            release.set()
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+            results.close()
+
+    def test_foreign_lock_holder_does_not_make_a_prior_run_active(self) -> None:
+        """A kernel lock held by a different PID cannot be attributed to persisted state."""
+        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        run_lock, _ = controller_locks(self.root)
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        process = context.Process(target=hold_lock, args=(str(run_lock), ready))
+        process.start()
+        try:
+            self.assertTrue(ready.wait(timeout=5))
+            code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+            self.assertEqual(code, 0, stderr)
+            self.assertFalse(json.loads(stdout)["process_running"])
+        finally:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.terminate()
 
     def test_status_never_acquires_the_exclusive_ownership_lock(self) -> None:
         """Status uses the shared persistence lock and read-only ownership evidence only."""
@@ -1705,7 +1858,7 @@ class FoundationTests(unittest.TestCase):
         with patch("opencode_sprint_loop.cli.advisory_lock", side_effect=record_lock):
             code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 0, stderr)
-        self.assertEqual(observed, [("config", False)])
+        self.assertEqual(observed, [("persistence", False)])
 
     def test_status_rejects_pid_only_liveness_when_linux_identity_is_available(self) -> None:
         """Null persisted process identity cannot fall back to a reusable PID on Linux."""
@@ -1728,7 +1881,7 @@ class FoundationTests(unittest.TestCase):
         self.assertFalse(json.loads(stdout)["process_running"])
 
     def test_status_ignores_malformed_lock_metadata(self) -> None:
-        """Only fully valid metadata can corroborate a held ownership lock."""
+        """Malformed descriptive metadata cannot override authoritative ownership."""
         self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
         paths = runtime_paths(self.root, "foundation", 1)
         metadata = json.loads(paths.lock_metadata.read_text(encoding="utf-8"))
@@ -1741,10 +1894,10 @@ class FoundationTests(unittest.TestCase):
         with advisory_lock(run_lock, exclusive=True):
             code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 0, stderr)
-        self.assertFalse(json.loads(stdout)["process_running"])
+        self.assertTrue(json.loads(stdout)["process_running"])
 
     def test_status_ignores_semantically_invalid_lock_timestamp(self) -> None:
-        """Lock metadata needs a real RFC 3339 UTC timestamp before it corroborates ownership."""
+        """Descriptive timestamps cannot override matching OS lock/process evidence."""
         self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
         paths = runtime_paths(self.root, "foundation", 1)
         metadata = json.loads(paths.lock_metadata.read_text(encoding="utf-8"))
@@ -1754,7 +1907,7 @@ class FoundationTests(unittest.TestCase):
         with advisory_lock(run_lock, exclusive=True):
             code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 0, stderr)
-        self.assertFalse(json.loads(stdout)["process_running"])
+        self.assertTrue(json.loads(stdout)["process_running"])
 
     def test_separate_process_ownership_lock_rejects_run(self) -> None:
         """Ownership is enforced across controller processes, not only threads."""
@@ -1815,7 +1968,7 @@ class FoundationTests(unittest.TestCase):
 
         @contextlib.contextmanager
         def delay_child_ownership(path: Path, **kwargs: object) -> Any:
-            if os.getpid() != parent_pid and path.name == "HEAD":
+            if os.getpid() != parent_pid and path.name == "run":
                 waiting_for_ownership.set()
                 if not release_ownership.wait(timeout=10):
                     raise RuntimeError("timed out waiting to continue ownership race")
@@ -1851,6 +2004,41 @@ class FoundationTests(unittest.TestCase):
                     process.terminate()
                     process.join(timeout=5)
                 results.close()
+
+    def test_post_lock_revalidation_rejects_changed_repository_assumptions(self) -> None:
+        """Changes after initial preflight fail closed before creating runtime artifacts."""
+        from opencode_sprint_loop import cli
+
+        variants = (
+            ("wrong_branch", lambda fixture: fixture.set_managed_branch()),
+            ("missing_remote", lambda fixture: fixture.remove_managed_remote()),
+            ("dirty_managed_repository", lambda fixture: fixture.make_dirty(fixture.managed, "untracked")),
+            ("git_operation_in_progress", lambda fixture: fixture.mark_git_operation(fixture.managed, "merge")),
+        )
+        for expected, mutate in variants:
+            with self.subTest(expected=expected):
+                fixture, _ = self.variant()
+                original_lock = cli.advisory_lock
+                mutated = False
+
+                @contextlib.contextmanager
+                def mutate_after_ownership(path: Path, **kwargs: object) -> Any:
+                    nonlocal mutated
+                    with original_lock(path, **kwargs):  # type: ignore[arg-type]
+                        if path.name == "run" and bool(kwargs["exclusive"]) and not mutated:
+                            mutate(fixture)
+                            mutated = True
+                        yield
+
+                with patch("opencode_sprint_loop.cli.advisory_lock", side_effect=mutate_after_ownership):
+                    code, _, stderr = self.invoke(["run", "--root", str(fixture.root), "--server-url", "opaque"])
+                self.assertTrue(mutated)
+                self.assertEqual(code, 2)
+                self.assertIn(expected, stderr)
+                self.assertFalse((fixture.root / "info").exists())
+                run_lock, _ = controller_locks(fixture.root)
+                with advisory_lock(run_lock, exclusive=True, blocking=False):
+                    pass
 
     def test_status_waits_for_a_complete_normal_transition(self) -> None:
         """Status cannot expose the event-ahead snapshot during a locked transition."""
@@ -2100,6 +2288,24 @@ class FoundationTests(unittest.TestCase):
         state = new_state(config)
         _, persistence_lock = controller_locks(self.root)
         state = persist_initial(state, paths.events, paths.state, persistence_lock)
+        transition(
+            state,
+            paths.events,
+            paths.state,
+            persistence_lock,
+            "failed",
+            reason={"code": "internal_error", "message": "test failure", "details": {}},
+        )
+        self.assertEqual(load_state(paths.state)["state"], "failed")
+        self.assertEqual(load_events(paths.events)[-1]["state"], "failed")
+
+    def test_transition_allows_failure_from_validating_state(self) -> None:
+        """The documented validating-to-failed recovery transition remains reachable."""
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        _, persistence_lock = controller_locks(self.root)
+        state = persist_initial(new_state(config), paths.events, paths.state, persistence_lock)
+        state = transition(state, paths.events, paths.state, persistence_lock, "validating")
         transition(
             state,
             paths.events,

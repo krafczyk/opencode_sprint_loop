@@ -9,7 +9,9 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -93,12 +95,58 @@ def create_fixture(base: Path) -> Path:
     return root
 
 
+def start_paused_controller(executable: str, root: Path) -> tuple[subprocess.Popen[str], Path]:
+    """Start a real controller and pause it after its durable validating transition."""
+    executable_path = Path(executable).resolve()
+    interpreter = executable_path.parent / "python"
+    if not interpreter.exists():
+        interpreter = Path(sys.executable)
+    ready = root / ".controller-ready"
+    release = root / ".controller-release"
+    code = """
+import sys
+import time
+from pathlib import Path
+from unittest.mock import patch
+from opencode_sprint_loop import cli
+
+ready = Path(sys.argv[1])
+release = Path(sys.argv[2])
+original = cli.transition
+
+def pause_after_validating(*arguments, **keywords):
+    result = original(*arguments, **keywords)
+    destination = keywords.get("destination", arguments[4])
+    if destination == "validating":
+        ready.write_text("ready\\n", encoding="utf-8")
+        while not release.exists():
+            time.sleep(0.01)
+    return result
+
+with patch("opencode_sprint_loop.cli.transition", side_effect=pause_after_validating):
+    raise SystemExit(cli.main(sys.argv[3:]))
+"""
+    process = subprocess.Popen(
+        [str(interpreter), "-c", code, str(ready), str(release), "run", "--root", str(root), "--server-url", "opaque-demo-url"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    deadline = time.monotonic() + 10
+    while not ready.exists():
+        if process.poll() is not None or time.monotonic() >= deadline:
+            stdout, stderr = process.communicate()
+            raise SystemExit(f"Controller did not reach validating state: {stdout}{stderr}")
+        time.sleep(0.01)
+    return process, release
+
+
 @contextlib.contextmanager
 def hold_run_lock(root: Path) -> object:
-    """Hold the controller's ownership lock for the lock-rejection demonstration."""
-    # Sprint 1 locks the stable Git HEAD metadata file, rather than a
-    # controller-created path that could be replaced while locked.
-    descriptor = os.open(root / ".git" / "HEAD", os.O_RDONLY)
+    """Hold the controller ownership anchor for the explicit OS-lock rejection check."""
+    lock_path = root / ".git" / "opencode-sprint-loop" / "run"
+    lock_path.mkdir(parents=True)
+    descriptor = os.open(lock_path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
@@ -142,8 +190,23 @@ def main() -> int:
     run([arguments.executable, "status", "--root", str(root)])
     run([arguments.executable, "status", "--root", str(root), "--json"])
 
+    active_root = create_named_fixture(base, "active-controller")
+    print(f"\nActive controller fixture: {active_root}")
+    active, release = start_paused_controller(arguments.executable, active_root)
+    run([arguments.executable, "status", "--root", str(active_root), "--json"])
+    run([arguments.executable, "run", "--root", str(active_root), "--server-url", "opaque-demo-url"], expected=2)
+    release.write_text("release\n", encoding="utf-8")
+    stdout, stderr = active.communicate(timeout=10)
+    print(f"$ {arguments.executable} run --root {active_root} --server-url opaque-demo-url")
+    if stdout:
+        print(stdout, end="")
+    if stderr:
+        print(stderr, end="")
+    if active.returncode != 4:
+        raise SystemExit(f"Expected active controller exit 4, received {active.returncode}")
+
     lock_root = create_named_fixture(base, "lock-rejection")
-    print(f"\nLock rejection fixture: {lock_root}")
+    print(f"\nOS lock rejection fixture: {lock_root}")
     with hold_run_lock(lock_root):
         run([arguments.executable, "run", "--root", str(lock_root), "--server-url", "opaque-demo-url"], expected=2)
         run([arguments.executable, "status", "--root", str(lock_root), "--json"])

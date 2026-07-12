@@ -53,10 +53,11 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _lock_paths(git_dir: Path) -> tuple[Path, Path]:
-    """Return stable Git metadata files used as distinct advisory lock anchors."""
-    # Controller-created lock files can be replaced while their old inode remains
-    # locked. Git owns and preserves these two independent metadata files instead.
-    return git_dir / "HEAD", git_dir / "config"
+    """Return dedicated Git-metadata directories used as advisory lock anchors."""
+    base = git_dir / "opencode-sprint-loop"
+    # Git never rewrites controller-owned metadata directories during ordinary
+    # branch, index, remote, or configuration operations.
+    return base / "run", base / "persistence"
 
 
 def _load_root_config(root_value: str) -> tuple[Path, SprintConfig, RuntimePaths, Path, Path]:

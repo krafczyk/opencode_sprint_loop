@@ -193,8 +193,8 @@ def validate_preflight(root: Path, config: SprintConfig, *, require_clean: bool,
     repository = config.repositories[0]
     if branch != repository.branch:
         raise ControllerError("wrong_branch", f"Managed repository {managed.root} is on branch {branch}; expected {repository.branch}. Check out the configured branch before running")
-    remote = _run(managed.root, "remote", "get-url", repository.remote, allow_failure=True).strip()
-    if not remote:
+    remotes = _run(managed.root, "remote").splitlines()
+    if repository.remote not in remotes:
         raise ControllerError("missing_remote", f"Managed repository {managed.root} has no configured remote {repository.remote}; add it before running")
     if require_clean:
         _ensure_clean(managed, "dirty_managed_repository", "Managed repository")

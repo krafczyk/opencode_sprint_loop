@@ -4,78 +4,50 @@ from __future__ import annotations
 
 import fcntl
 import os
-import stat
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
 from .errors import ControllerError
-from .safeio import open_directory, open_regular, open_regular_at
+from .safeio import open_directory
 
 
 @contextmanager
 def advisory_lock(path: Path, *, exclusive: bool, blocking: bool = True) -> Iterator[None]:
-    """Hold a Linux advisory lock or raise ``ControllerError``; creates only its lock file."""
-    directory: int | None = None
+    """Hold a Linux advisory lock on a dedicated non-worktree directory."""
     descriptor: int | None = None
-    handle = None
     try:
-        directory = open_directory(path.parent, create=True)
-        descriptor = open_regular_at(directory, path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND)
-        handle = os.fdopen(descriptor, "a+", encoding="utf-8")
-        descriptor = None
+        descriptor = open_directory(path, create=True)
     except OSError as error:
-        if descriptor is not None:
-            os.close(descriptor)
-        if directory is not None:
-            os.close(directory)
-        raise ControllerError("persistence_failed", f"Cannot create lock file: {path}") from error
-    except BaseException:
-        if descriptor is not None:
-            os.close(descriptor)
-        if directory is not None:
-            os.close(directory)
-        raise
+        raise ControllerError("persistence_failed", f"Cannot create lock directory: {path}") from error
     flags = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
     if not blocking:
         flags |= fcntl.LOCK_NB
     try:
-        fcntl.flock(handle.fileno(), flags)
-        locked = os.fstat(handle.fileno())
-        current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(current.st_mode)
-            or current.st_nlink != 1
-            or (current.st_dev, current.st_ino) != (locked.st_dev, locked.st_ino)
-        ):
-            raise ControllerError("persistence_failed", f"Lock file changed during acquisition: {path}")
+        fcntl.flock(descriptor, flags)
     except BlockingIOError as error:
-        handle.close()
-        os.close(directory)
+        os.close(descriptor)
         raise ControllerError("run_already_active", "Another Sprint Loop Controller process owns this sprint; wait for it to exit or use resume when available") from error
     except BaseException:
-        handle.close()
-        os.close(directory)
+        os.close(descriptor)
         raise
     try:
         yield
     finally:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
-        os.close(directory)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
-def is_exclusively_locked(path: Path) -> bool:
-    """Read Linux lock state without acquiring the run-ownership lock."""
+def exclusive_lock_pid(path: Path) -> int | None:
+    """Return the Linux PID holding an exclusive advisory lock, if any."""
     try:
-        descriptor, directory = open_regular(path, os.O_RDONLY)
+        descriptor = open_directory(path)
     except FileNotFoundError:
-        return False
+        return None
     try:
         details = os.fstat(descriptor)
     finally:
         os.close(descriptor)
-        os.close(directory)
     try:
         records = Path("/proc/locks").read_text(encoding="utf-8").splitlines()
     except OSError as error:
@@ -85,11 +57,17 @@ def is_exclusively_locked(path: Path) -> bool:
         if len(fields) < 6 or fields[1:4] != ["FLOCK", "ADVISORY", "WRITE"]:
             continue
         try:
+            pid = int(fields[4])
             device, inode = fields[5].rsplit(":", 1)
             major, minor = (int(value, 16) for value in device.split(":"))
             inode_value = int(inode)
         except (ValueError, IndexError):
             continue
         if (major, minor, inode_value) == (os.major(details.st_dev), os.minor(details.st_dev), details.st_ino):
-            return True
-    return False
+            return pid
+    return None
+
+
+def is_exclusively_locked(path: Path) -> bool:
+    """Return whether a process holds the anchor's exclusive advisory lock."""
+    return exclusive_lock_pid(path) is not None
