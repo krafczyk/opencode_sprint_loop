@@ -15,7 +15,7 @@ from .config import SprintConfig, load_config
 from .errors import ControllerError
 from .git import validate_preflight, validate_root
 from .locking import advisory_lock
-from .paths import RuntimePaths, canonical_root, runtime_paths
+from .paths import RuntimePaths, canonical_root, ensure_runtime_paths_safe, runtime_paths
 from .state import new_state, process_start_identity
 from .status import format_status, project_status, validate_persistence
 from .transitions import persist_initial, transition
@@ -54,6 +54,7 @@ def _load_root_config(root_value: str) -> tuple[Path, SprintConfig, RuntimePaths
     repository = validate_root(root)
     config = load_config(root)
     paths = runtime_paths(root, config.multisprint, config.sprint)
+    ensure_runtime_paths_safe(root, paths)
     run_lock, persistence_lock = _lock_paths(repository.git_dir)
     return root, config, paths, run_lock, persistence_lock
 

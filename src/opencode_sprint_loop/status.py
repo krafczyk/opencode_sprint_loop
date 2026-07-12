@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .config import SprintConfig
 from .errors import ControllerError
 from .events import load_events
@@ -17,7 +18,7 @@ def _no_run(root: Path) -> dict[str, Any]:
     """Return the stable JSON projection when no persisted run exists."""
     return {
         "schema_version": 1,
-        "controller_version": "0.1.0",
+        "controller_version": __version__,
         "sprint_root": str(root),
         "run_exists": False,
         "process_running": False,
@@ -48,7 +49,7 @@ def project_status(root: Path, config: SprintConfig, paths: RuntimePaths, run_lo
     event = events[-1]
     return {
         "schema_version": 1,
-        "controller_version": "0.1.0",
+        "controller_version": __version__,
         "sprint_root": str(root),
         "run_exists": True,
         "process_running": is_exclusively_locked(run_lock),

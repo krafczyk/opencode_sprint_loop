@@ -117,13 +117,16 @@ def load_config(root: Path) -> SprintConfig:
     document_keys = {"multisprint_spec", "sprint_spec", "sprint_checklist"}
     _expect_keys(documents_data, document_keys, "documents")
     documents: dict[str, Path] = {}
+    document_identities: set[tuple[int, int]] = set()
     for key in document_keys:
         path = resolve_within(root, _string(documents_data[key], f"documents.{key}"), field=f"documents.{key}")
         if not path.is_file() or path.stat().st_size == 0:
             raise ControllerError("missing_required_file", f"documents.{key} must be a non-empty regular file: {path}")
+        identity = (path.stat().st_dev, path.stat().st_ino)
+        if identity in document_identities:
+            raise ControllerError("invalid_config", "documents must resolve to distinct files")
+        document_identities.add(identity)
         documents[key] = path
-    if len(set(documents.values())) != len(documents):
-        raise ControllerError("invalid_config", "documents must resolve to distinct files")
 
     agents_data = data["agents"]
     if not isinstance(agents_data, dict):

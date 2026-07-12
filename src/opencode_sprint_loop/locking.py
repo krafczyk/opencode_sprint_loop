@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -13,6 +14,10 @@ from .errors import ControllerError
 @contextmanager
 def advisory_lock(path: Path, *, exclusive: bool, blocking: bool = True) -> Iterator[None]:
     """Hold a Linux advisory lock or raise ``ControllerError``; creates only its lock file."""
+    if os.path.lexists(path.parent) and path.parent.is_symlink():
+        raise ControllerError("persistence_failed", f"Lock directory must not be a symlink: {path.parent}")
+    if os.path.lexists(path) and path.is_symlink():
+        raise ControllerError("persistence_failed", f"Lock file must not be a symlink: {path}")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = path.open("a+", encoding="utf-8")

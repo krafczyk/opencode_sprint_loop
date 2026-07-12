@@ -209,13 +209,18 @@ def load_state(path: Path) -> dict[str, Any]:
     return validate_state(load_json_object(path, code="corrupt_state"))
 
 
-def write_state_atomic(path: Path, state: dict[str, Any]) -> None:
-    """Atomically replace state or raise ``ControllerError`` without truncating prior state."""
+def serialize_state(state: dict[str, Any]) -> str:
+    """Validate and serialize state before any durable transition write begins."""
     validate_state(state)
     try:
-        serialized = dump_json(state)
+        return dump_json(state)
     except (TypeError, ValueError, RecursionError) as error:
         raise ControllerError("persistence_failed", "State cannot be serialized") from error
+
+
+def write_state_atomic(path: Path, state: dict[str, Any]) -> None:
+    """Atomically replace state or raise ``ControllerError`` without truncating prior state."""
+    serialized = serialize_state(state)
     temporary: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

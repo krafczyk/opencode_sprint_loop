@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import io
 import json
 import multiprocessing
 import os
 import shutil
 import subprocess
+import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 from typing import Any
 
+from opencode_sprint_loop import __version__
 from opencode_sprint_loop.cli import main
 from opencode_sprint_loop.config import load_config
 from opencode_sprint_loop.errors import ControllerError
@@ -395,7 +399,16 @@ class FoundationTests(unittest.TestCase):
         code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 0, stderr)
         data = json.loads(stdout)
+        self.assertEqual(set(data), {
+            "schema_version", "controller_version", "sprint_root", "run_exists", "process_running",
+            "run_id", "sprint", "state", "reason", "active", "commits", "audit", "ci",
+            "counters", "checklist", "last_event", "updated_at",
+        })
+        self.assertEqual(data["schema_version"], 1)
+        self.assertEqual(data["controller_version"], __version__)
+        self.assertEqual(data["sprint_root"], str(self.root.resolve()))
         self.assertFalse(data["run_exists"])
+        self.assertFalse(data["process_running"])
         for field in (
             "run_id", "sprint", "state", "reason", "active", "commits", "audit", "ci",
             "counters", "checklist", "last_event", "updated_at",
@@ -473,12 +486,35 @@ class FoundationTests(unittest.TestCase):
         code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 0, stderr)
         status = json.loads(stdout)
-        self.assertEqual(status["reason"], {
-            "code": "execution_not_implemented",
-            "message": "Sprint execution begins in a later implementation sprint.",
-        })
-        self.assertEqual(set(status["checklist"]), {
-            "satisfied", "partial", "unsatisfied", "not_evaluated", "assessed_at",
+        paths = runtime_paths(self.root, "foundation", 1)
+        state = load_state(paths.state)
+        events = load_events(paths.events)
+        self.assertEqual(status, {
+            "schema_version": 1,
+            "controller_version": __version__,
+            "sprint_root": str(self.root.resolve()),
+            "run_exists": True,
+            "process_running": False,
+            "run_id": state["run_id"],
+            "sprint": {"multisprint": "foundation", "index": 1},
+            "state": "blocked",
+            "reason": {
+                "code": "execution_not_implemented",
+                "message": "Sprint execution begins in a later implementation sprint.",
+            },
+            "active": {"role": None, "invocation_id": None, "session_id": None},
+            "commits": {"local": {"managed": None}, "pushed": {"managed": None}},
+            "audit": {"phase": None, "pre_ci_round": 0, "pre_ci_max_rounds": 2, "remaining_effort": None},
+            "ci": {"status": "not_started", "attempt": 0, "commit_sha": None},
+            "counters": {"implementation_cycles": 0, "ci_fix_attempts": 0},
+            "checklist": {
+                "satisfied": 0, "partial": 0, "unsatisfied": 0, "not_evaluated": 0,
+                "assessed_at": None,
+            },
+            "last_event": {
+                "sequence": 3, "type": "run.blocked", "timestamp": events[-1]["timestamp"],
+            },
+            "updated_at": state["updated_at"],
         })
 
     def test_existing_run_precedes_dirty_worktree_error(self) -> None:
@@ -848,6 +884,53 @@ class FoundationTests(unittest.TestCase):
                 self.assertEqual(paths.state.read_bytes(), before_state)
                 self.assertEqual(paths.events.read_bytes(), before_events)
 
+    def test_invalid_reason_never_appends_an_event(self) -> None:
+        """A malformed transition reason is rejected before durable history changes."""
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
+        state = persist_initial(new_state(config), paths.events, paths.state, persistence_lock)
+        state = transition(state, paths.events, paths.state, persistence_lock, "validating")
+        before_state = paths.state.read_bytes()
+        before_events = paths.events.read_bytes()
+        with self.assertRaises(ControllerError) as context:
+            transition(
+                state,
+                paths.events,
+                paths.state,
+                persistence_lock,
+                "blocked",
+                reason={"code": "", "message": "invalid", "details": {}},
+            )
+        self.assertEqual(context.exception.code, "corrupt_state")
+        self.assertEqual(paths.state.read_bytes(), before_state)
+        self.assertEqual(paths.events.read_bytes(), before_events)
+
+    def test_initial_transition_rejects_non_new_or_existing_state_under_lock(self) -> None:
+        """The first transition cannot overwrite a pair or accept a later state."""
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
+        not_new = new_state(config)
+        not_new["state"] = "validating"
+        with advisory_lock(persistence_lock, exclusive=True):
+            with self.assertRaises(ControllerError) as context:
+                persist_initial(not_new, paths.events, paths.state, persistence_lock, lock_held=True)
+        self.assertEqual(context.exception.code, "internal_error")
+        self.assertFalse(paths.state.exists())
+        self.assertFalse(paths.events.exists())
+
+        with advisory_lock(persistence_lock, exclusive=True):
+            persisted = persist_initial(new_state(config), paths.events, paths.state, persistence_lock, lock_held=True)
+        before_state = paths.state.read_bytes()
+        before_events = paths.events.read_bytes()
+        with advisory_lock(persistence_lock, exclusive=True):
+            with self.assertRaises(ControllerError) as context:
+                persist_initial(persisted, paths.events, paths.state, persistence_lock, lock_held=True)
+        self.assertEqual(context.exception.code, "inconsistent_persistence")
+        self.assertEqual(paths.state.read_bytes(), before_state)
+        self.assertEqual(paths.events.read_bytes(), before_events)
+
     def test_json_input_size_bounds_fail_closed(self) -> None:
         """Configuration, state, and event inputs larger than one MiB are rejected safely."""
         oversized = "x" * (MAX_JSON_BYTES + 1)
@@ -872,6 +955,130 @@ class FoundationTests(unittest.TestCase):
         code, _, stderr = self.invoke(["status", "--root", str(root), "--json"])
         self.assertEqual(code, 2)
         self.assertIn("corrupt_event_log", stderr)
+
+    def test_nonfinite_and_deep_json_inputs_have_stable_errors(self) -> None:
+        """Non-finite values and parser-depth failures remain actionable controller errors."""
+        deep_json = "[" * 1_100 + "0" + "]" * 1_100
+        for contents in ("NaN", "Infinity", "-Infinity", deep_json):
+            with self.subTest(input=contents[:10]):
+                fixture, root = self.variant()
+                (root / "sprint_config.json").write_text(contents, encoding="utf-8")
+                code, stdout, stderr = self.invoke(["status", "--root", str(root), "--json"])
+                self.assertEqual(code, 2)
+                self.assertEqual(stdout, "")
+                self.assertTrue(stderr.startswith("invalid_config:"), stderr)
+
+        fixture, root = self.variant()
+        self.assertEqual(self.invoke(["run", "--root", str(root), "--server-url", "opaque"])[0], 4)
+        paths = runtime_paths(root, "foundation", 1)
+        paths.state.write_text(deep_json, encoding="utf-8")
+        code, stdout, stderr = self.invoke(["status", "--root", str(root), "--json"])
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
+        self.assertTrue(stderr.startswith("corrupt_state:"), stderr)
+
+        fixture, root = self.variant()
+        self.assertEqual(self.invoke(["run", "--root", str(root), "--server-url", "opaque"])[0], 4)
+        paths = runtime_paths(root, "foundation", 1)
+        paths.events.write_text("NaN\n", encoding="utf-8")
+        code, stdout, stderr = self.invoke(["status", "--root", str(root), "--json"])
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
+        self.assertTrue(stderr.startswith("corrupt_event_log:"), stderr)
+
+    def test_hardlinked_configured_documents_are_rejected(self) -> None:
+        """Distinct configured documents cannot alias one filesystem object."""
+        documents = self.root / "docs" / "foundation"
+        checklist = documents / "1" / "sprint_checklist.md"
+        checklist.unlink()
+        os.link(documents / "multisprint_spec.md", checklist)
+        with self.assertRaises(ControllerError) as context:
+            load_config(self.root)
+        self.assertEqual(context.exception.code, "invalid_config")
+
+    def test_runtime_symlinks_are_rejected_without_following_them(self) -> None:
+        """Runtime directories and artifacts, including dangling events, cannot redirect I/O."""
+        for label, prepare in (
+            ("info", lambda root, paths, outside: (root / "info").symlink_to(outside, target_is_directory=True)),
+            (
+                "multisprint",
+                lambda root, paths, outside: (
+                    (root / "info").mkdir(),
+                    (root / "info" / "foundation").symlink_to(outside, target_is_directory=True),
+                ),
+            ),
+            (
+                "sprint",
+                lambda root, paths, outside: (
+                    (root / "info" / "foundation").mkdir(parents=True),
+                    paths.info_dir.symlink_to(outside, target_is_directory=True),
+                ),
+            ),
+            (
+                "state",
+                lambda root, paths, outside: (
+                    paths.info_dir.mkdir(parents=True),
+                    paths.state.symlink_to(outside / "state.json"),
+                ),
+            ),
+            (
+                "dangling_events",
+                lambda root, paths, outside: (
+                    paths.info_dir.mkdir(parents=True),
+                    paths.events.symlink_to(outside / "missing-events.jsonl"),
+                ),
+            ),
+            (
+                "lock_metadata",
+                lambda root, paths, outside: (
+                    paths.info_dir.mkdir(parents=True),
+                    paths.lock_metadata.symlink_to(outside / "lock.json"),
+                ),
+            ),
+        ):
+            with self.subTest(path=label):
+                fixture, root = self.variant()
+                paths = runtime_paths(root, "foundation", 1)
+                outside = fixture.base / "outside"
+                outside.mkdir()
+                prepare(root, paths, outside)
+                code, stdout, stderr = self.invoke(["status", "--root", str(root), "--json"])
+                self.assertEqual(code, 2)
+                self.assertEqual(stdout, "")
+                self.assertIn("inconsistent_persistence", stderr)
+                self.assertEqual(list(outside.iterdir()), [])
+
+    def test_source_distribution_includes_controller_documents(self) -> None:
+        """The packaging manifest carries authoritative documentation in the source archive."""
+        if importlib.util.find_spec("setuptools") is None:
+            self.skipTest("setuptools build backend is unavailable in this test environment")
+        project_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from setuptools.build_meta import build_sdist; import sys; print(build_sdist(sys.argv[1]))",
+                    temporary,
+                ],
+                cwd=project_root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            archives = list(Path(temporary).glob("*.tar.gz"))
+            self.assertEqual(len(archives), 1)
+            with tarfile.open(archives[0]) as archive:
+                names = set(archive.getnames())
+        for document in (
+            "docs/v1_final_software_specification.md",
+            "docs/multi_sprint_plan.md",
+            "docs/controller-v1/1/sprint_spec.md",
+            "docs/controller-v1/1/sprint_checklist.md",
+        ):
+            self.assertTrue(any(name.endswith(f"/{document}") for name in names), document)
 
     def test_ownership_lock_rejects_concurrent_attempt(self) -> None:
         """A held non-worktree ownership lock prevents a second run."""

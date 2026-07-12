@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,3 +53,16 @@ def runtime_paths(root: Path, multisprint: str, sprint: int) -> RuntimePaths:
         events=info_dir / "events.jsonl",
         lock_metadata=info_dir / "lock.json",
     )
+
+
+def ensure_runtime_paths_safe(root: Path, paths: RuntimePaths) -> None:
+    """Reject existing runtime path symlinks or non-directory path components."""
+    components = (root / "info", root / "info" / paths.info_dir.parent.name, paths.info_dir)
+    for component in components:
+        if os.path.lexists(component) and component.is_symlink():
+            raise ControllerError("inconsistent_persistence", f"Runtime path must not be a symlink: {component}")
+        if component.exists() and not component.is_dir():
+            raise ControllerError("inconsistent_persistence", f"Runtime path must be a directory: {component}")
+    for artifact in (paths.state, paths.events, paths.lock_metadata):
+        if os.path.lexists(artifact) and artifact.is_symlink():
+            raise ControllerError("inconsistent_persistence", f"Runtime artifact must not be a symlink: {artifact}")

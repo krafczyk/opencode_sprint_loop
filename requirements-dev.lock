@@ -1,4 +1,5 @@
 build==1.2.2.post1
+setuptools==82.0.1
 mypy==1.16.1
 mypy_extensions==1.1.0
 packaging==26.2

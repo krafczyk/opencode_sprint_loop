@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import copy
+import os
 from pathlib import Path
 from typing import Any
 
 from .errors import ControllerError
 from .events import append_event, load_events, transition_event
 from .locking import advisory_lock
-from .state import load_state, write_state_atomic
+from .state import load_state, serialize_state, validate_state, write_state_atomic
 
 _ALLOWED = {
     ("initializing", "validating"): "state.entered",
@@ -45,11 +46,17 @@ def persist_initial(
 ) -> dict[str, Any]:
     """Persist no-run to initializing while holding the first-transition lock."""
     def persist() -> dict[str, Any]:
+        if os.path.lexists(events_path) or os.path.lexists(state_path):
+            raise ControllerError("inconsistent_persistence", "Initial transition requires no existing state or event log")
+        validate_state(state)
+        if state["state"] != "initializing" or state["last_event_sequence"] != 0 or state["reason"] is not None:
+            raise ControllerError("internal_error", "Initial transition requires a new initializing state")
         next_state = copy.deepcopy(state)
         event = transition_event(next_state, "run.started", "initializing", {"previous_state": None})
-        append_event(events_path, event)
         next_state["last_event_sequence"] = event["sequence"]
         next_state["updated_at"] = event["timestamp"]
+        serialize_state(next_state)
+        append_event(events_path, event)
         write_state_atomic(state_path, next_state)
         return next_state
 
@@ -83,12 +90,13 @@ def transition(
         if reason is not None:
             payload["reason"] = reason
         event = transition_event(next_state, event_type, destination, payload)
-        append_event(events_path, event)
         next_state["state"] = destination
         next_state["reason"] = reason
         next_state["last_event_sequence"] = event["sequence"]
         next_state["updated_at"] = event["timestamp"]
         if destination in {"blocked", "failed"}:
             next_state["process"]["active"] = False
+        serialize_state(next_state)
+        append_event(events_path, event)
         write_state_atomic(state_path, next_state)
         return next_state

@@ -76,8 +76,12 @@ def load_events(path: Path) -> list[dict[str, Any]]:
                         result[key] = value
                     return result
                 try:
-                    event = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
-                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    event = json.loads(
+                        raw.decode("utf-8"),
+                        object_pairs_hook=reject_duplicates,
+                        parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+                    )
+                except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
                     raise ControllerError("corrupt_event_log", f"Malformed event line {number}") from error
                 if not isinstance(event, dict):
                     raise ControllerError("corrupt_event_log", f"Event line {number} is not an object")
@@ -101,12 +105,14 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
     """Durably append one event or raise ``ControllerError`` without rewriting history."""
     validate_event(event, code="persistence_failed")
     try:
-        serialized = json.dumps(event, sort_keys=True, ensure_ascii=True).encode("utf-8") + b"\n"
+        serialized = json.dumps(event, sort_keys=True, ensure_ascii=True, allow_nan=False).encode("utf-8") + b"\n"
     except (TypeError, ValueError, RecursionError) as error:
         raise ControllerError("persistence_failed", "Event cannot be serialized") from error
     if len(serialized) > MAX_JSON_BYTES:
         raise ControllerError("persistence_failed", "Event exceeds 1 MiB")
     try:
+        if os.path.lexists(path) and path.is_symlink():
+            raise ControllerError("persistence_failed", f"Event log must not be a symlink: {path}")
         created = not path.exists()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("ab") as handle:

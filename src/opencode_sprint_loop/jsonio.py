@@ -40,12 +40,16 @@ def load_json_object(path: Path, *, code: str) -> dict[str, Any]:
             result[key] = value
         return result
 
+    def reject_nonfinite(value: str) -> None:
+        raise ValueError(f"Non-finite JSON value {value}")
+
     try:
-        data = json.loads(text, object_pairs_hook=reject_duplicates)
-    except (json.JSONDecodeError, ControllerError) as error:
+        data = json.loads(text, object_pairs_hook=reject_duplicates, parse_constant=reject_nonfinite)
+    except (json.JSONDecodeError, ControllerError, RecursionError, ValueError) as error:
         if isinstance(error, ControllerError):
             raise
-        raise ControllerError(code, f"Malformed JSON in {path}: {error.msg}") from error
+        detail = error.msg if isinstance(error, json.JSONDecodeError) else str(error)
+        raise ControllerError(code, f"Malformed JSON in {path}: {detail}") from error
     if not isinstance(data, dict):
         raise ControllerError(code, f"JSON root must be an object: {path}")
     return data
@@ -53,4 +57,4 @@ def load_json_object(path: Path, *, code: str) -> dict[str, Any]:
 
 def dump_json(data: object) -> str:
     """Serialize JSON deterministically with one trailing newline."""
-    return json.dumps(data, sort_keys=True, indent=2, ensure_ascii=True) + "\n"
+    return json.dumps(data, sort_keys=True, indent=2, ensure_ascii=True, allow_nan=False) + "\n"

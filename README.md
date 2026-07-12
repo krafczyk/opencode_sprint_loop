@@ -19,7 +19,7 @@ It does **not** yet run OpenCode sessions, make commits or pushes, monitor GitHu
 - Python 3.11 or newer.
 - Git.
 
-The package has no runtime dependencies. Pinned build and development tools are declared in the `dev` extra in `pyproject.toml`.
+The package has no runtime dependencies. The exact build backend is pinned in `pyproject.toml`; the `dev` extra and `requirements-dev.lock` pin the development toolchain and its resolved dependencies.
 
 ## Installation
 
@@ -180,14 +180,10 @@ The tests create temporary local Git repositories and submodules. They do not re
 
 ## Sprint 1 Demonstration
 
-The following offline commands exercise the Sprint 1 exit demonstration using real temporary Git repositories and a real submodule created by the tests:
+Run one self-contained demonstration against a real temporary Git repository and initialized submodule:
 
 ```bash
-python3 -m unittest -v tests.test_foundation.FoundationTests.test_no_run_json_status_is_read_only
-python3 -m unittest -v tests.test_foundation.FoundationTests.test_valid_run_persists_placeholder_state
-python3 -m unittest -v tests.test_foundation.FoundationTests.test_separate_process_ownership_lock_rejects_run
-python3 -m unittest -v tests.test_foundation.FoundationTests.test_dirty_managed_repository_fails_without_runtime_artifacts
-python3 -m unittest -v tests.test_foundation.FoundationTests.test_unknown_schema_fails_without_runtime_artifacts
+python3 scripts/demo_sprint1.py --executable sprint-loop
 ```
 
-Together with the installation commands above, these tests demonstrate no-run status, the three persisted placeholder events, concurrent ownership rejection, mutation-free dirty-repository rejection, and mutation-free unsupported-schema rejection without a live OpenCode server or GitHub credentials.
+Pass `--keep /tmp/sprint-loop-demo` to retain the generated repository for manual inspection. The script shows help, version, human and JSON no-run status, the real submodule, placeholder execution, `state.json`, ordered events, and human and JSON post-run status without a live OpenCode server or GitHub credentials.
