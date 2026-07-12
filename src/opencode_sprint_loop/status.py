@@ -43,8 +43,6 @@ def _no_run(root: Path) -> dict[str, Any]:
 
 def _process_running(run_lock: Path, paths: RuntimePaths, state: dict[str, Any]) -> bool:
     """Confirm lock ownership belongs to the persisted run when identity is available."""
-    if not is_exclusively_locked(run_lock):
-        return False
     try:
         descriptor, directory = open_regular(paths.lock_metadata, os.O_RDONLY)
         try:
@@ -67,12 +65,18 @@ def _process_running(run_lock: Path, paths: RuntimePaths, state: dict[str, Any])
     expected_start = metadata["process_start"]
     current_start = process_start_identity(metadata["pid"])
     if expected_start is not None:
-        return isinstance(expected_start, str) and expected_start == current_start
+        return (
+            isinstance(expected_start, str)
+            and expected_start == current_start
+            and is_exclusively_locked(run_lock)
+        )
+    if current_start is not None:
+        return False
     try:
         os.kill(metadata["pid"], 0)
     except OSError:
         return False
-    return True
+    return is_exclusively_locked(run_lock)
 
 
 def project_status(root: Path, config: SprintConfig, paths: RuntimePaths, run_lock: Path) -> dict[str, Any]:

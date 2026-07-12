@@ -320,15 +320,14 @@ class FoundationTests(unittest.TestCase):
                 self.assertEqual(stderr.getvalue(), "")
 
     def test_usage_errors_do_not_write_to_standard_output(self) -> None:
-        """Argument parsing failures are non-zero diagnostics on standard error only."""
+        """Argument parsing failures use the stable controller error contract."""
         stdout = io.StringIO()
         stderr = io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            with self.assertRaises(SystemExit) as context:
-                main(["run"])
-        self.assertEqual(context.exception.code, 2)
+            code = main(["run"])
+        self.assertEqual(code, 2)
         self.assertEqual(stdout.getvalue(), "")
-        self.assertIn("--root", stderr.getvalue())
+        self.assertTrue(stderr.getvalue().startswith("invalid_arguments:"), stderr.getvalue())
 
     def test_configuration_loads(self) -> None:
         """A complete fixture configuration validates into typed fields."""
@@ -727,6 +726,30 @@ class FoundationTests(unittest.TestCase):
         artifacts = b"".join(path.read_bytes() for path in (self.root / "info").rglob("*") if path.is_file())
         self.assertNotIn(opaque.encode(), artifacts)
         self.assertNotIn(b"synthetic-secret", artifacts)
+
+    def test_credential_fields_are_rejected_from_events_and_state_reasons(self) -> None:
+        """Controller artifacts reject explicit credential-bearing payload and reason fields."""
+        state = new_state(load_config(self.root))
+        event = transition_event(
+            state,
+            "run.started",
+            "initializing",
+            {"previous_state": None, "api_token": "synthetic-secret"},
+        )
+        with self.assertRaises(ControllerError) as context:
+            append_event(self.root / "info" / "events.jsonl", event)
+        self.assertEqual(context.exception.code, "persistence_failed")
+        self.assertFalse((self.root / "info").exists())
+
+        state["state"] = "blocked"
+        state["reason"] = {
+            "code": "execution_not_implemented",
+            "message": "safe message",
+            "details": {"authorization": "synthetic-secret"},
+        }
+        with self.assertRaises(ControllerError) as context:
+            validate_state(state)
+        self.assertEqual(context.exception.code, "corrupt_state")
 
     def test_deferred_commands_validate_required_inputs(self) -> None:
         """Reserved controls reject invalid roots and empty resume URLs before feature errors."""
@@ -1216,6 +1239,44 @@ class FoundationTests(unittest.TestCase):
             self.assertEqual(code, 0, stderr)
             self.assertTrue(json.loads(stdout)["process_running"])
         code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 0, stderr)
+        self.assertFalse(json.loads(stdout)["process_running"])
+
+    def test_status_never_acquires_the_exclusive_ownership_lock(self) -> None:
+        """Status uses the shared persistence lock and read-only ownership evidence only."""
+        from opencode_sprint_loop import cli
+
+        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        observed: list[tuple[str, bool]] = []
+        original_lock = cli.advisory_lock
+
+        @contextlib.contextmanager
+        def record_lock(path: Path, **kwargs: object) -> Any:
+            observed.append((path.name, bool(kwargs["exclusive"])))
+            with original_lock(path, **kwargs):  # type: ignore[arg-type]
+                yield
+
+        with patch("opencode_sprint_loop.cli.advisory_lock", side_effect=record_lock):
+            code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(observed, [("persistence.lock", False)])
+
+    def test_status_rejects_pid_only_liveness_when_linux_identity_is_available(self) -> None:
+        """Null persisted process identity cannot fall back to a reusable PID on Linux."""
+        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        state = json.loads(paths.state.read_text(encoding="utf-8"))
+        metadata = json.loads(paths.lock_metadata.read_text(encoding="utf-8"))
+        state["process"]["process_start"] = None
+        metadata["process_start"] = None
+        paths.state.write_text(json.dumps(state), encoding="utf-8")
+        paths.lock_metadata.write_text(json.dumps(metadata), encoding="utf-8")
+        git_dir = Path(git(self.root, "rev-parse", "--git-dir"))
+        if not git_dir.is_absolute():
+            git_dir = (self.root / git_dir).resolve()
+        with advisory_lock(git_dir / "opencode-sprint-loop" / "run.lock", exclusive=True):
+            code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 0, stderr)
         self.assertFalse(json.loads(stdout)["process_running"])
 

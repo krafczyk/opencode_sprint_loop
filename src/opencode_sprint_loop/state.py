@@ -16,6 +16,8 @@ from .errors import ControllerError
 from .jsonio import dump_json, load_json_object_handle
 from .safeio import open_directory, open_regular
 
+_SENSITIVE_FIELD = re.compile(r"(?:credential|password|secret|token|api[_-]?key|authorization)", re.IGNORECASE)
+
 STATE_NAMES = frozenset({
     "initializing", "validating", "implementing", "committing", "pre_ci_auditing", "pushing",
     "waiting_for_ci", "fixing_ci", "final_auditing", "paused", "blocked", "stopping",
@@ -130,6 +132,19 @@ def _validate_reason(reason: Any) -> None:
         raise ControllerError("corrupt_state", "State reason message is invalid")
     if not isinstance(fields["details"], dict):
         raise ControllerError("corrupt_state", "State reason details are invalid")
+    _validate_safe_reason_details(fields["details"])
+
+
+def _validate_safe_reason_details(value: Any) -> None:
+    """Reject credential-bearing field names from durable reason details."""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if not isinstance(key, str) or _SENSITIVE_FIELD.search(key):
+                raise ControllerError("corrupt_state", "State reason details contain credential-bearing fields")
+            _validate_safe_reason_details(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _validate_safe_reason_details(nested)
 
 
 def validate_state(data: dict[str, Any]) -> dict[str, Any]:

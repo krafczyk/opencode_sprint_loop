@@ -316,7 +316,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [ ] **S1-TEST-009** Add repository integration coverage for every managed submodule failure class.
 - [x] **S1-TEST-010** Add mutation-invariant assertions to invalid preflight tests.
 - [x] **S1-TEST-011** Add concurrent ownership coverage using separate processes, not only threads.
-- [ ] **S1-TEST-012** Add stale and malformed metadata plus process-identity coverage.
+- [x] **S1-TEST-012** Add stale and malformed metadata plus process-identity coverage.
 - [x] **S1-TEST-013** Add CLI tests for help, version, usage errors, and deferred controls.
 - [x] **S1-TEST-013A** Prove each deferred control command leaves state, events, lock metadata, worktrees, indexes, branches, and HEADs unchanged.
 - [x] **S1-TEST-014** Add CLI tests for no-run human and JSON status.

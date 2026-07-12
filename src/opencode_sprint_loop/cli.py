@@ -9,7 +9,7 @@ import secrets
 import socket
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import NoReturn, Sequence
 
 from . import __version__
 from .config import SprintConfig, load_config
@@ -23,9 +23,16 @@ from .status import format_status, project_status, validate_persistence
 from .transitions import persist_initial, transition
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    """Translate parser failures into the controller's stable error contract."""
+
+    def error(self, message: str) -> NoReturn:
+        raise ControllerError("invalid_arguments", message)
+
+
 def _parser() -> argparse.ArgumentParser:
     """Build the stable V1 command parser."""
-    parser = argparse.ArgumentParser(prog="sprint-loop")
+    parser = _ArgumentParser(prog="sprint-loop")
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run")
@@ -199,8 +206,8 @@ def _status(root_value: str, as_json: bool) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI and convert expected controller failures to safe diagnostics."""
     parser = _parser()
-    arguments = parser.parse_args(argv)
     try:
+        arguments = parser.parse_args(argv)
         if arguments.command == "run":
             return _run(arguments.root, arguments.server_url)
         if arguments.command == "status":
@@ -214,6 +221,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ControllerError as error:
         sys.stderr.write(f"{error.code}: {error.message}\n")
         return 2
+    except SystemExit:
+        raise
     except Exception:
         sys.stderr.write("internal_error: Unexpected controller failure; inspect local controller logs and retry\n")
         return 2

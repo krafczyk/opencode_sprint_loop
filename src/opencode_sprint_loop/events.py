@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,19 @@ _SPRINT_ONE_TRANSITIONS = {
 }
 
 _EVENT_FIELDS = {"schema_version", "sequence", "timestamp", "run_id", "type", "state", "payload"}
+_SENSITIVE_FIELD = re.compile(r"(?:credential|password|secret|token|api[_-]?key|authorization)", re.IGNORECASE)
+
+
+def _validate_safe_payload(value: Any, *, code: str) -> None:
+    """Reject credential-bearing field names from durable event payloads."""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if not isinstance(key, str) or _SENSITIVE_FIELD.search(key):
+                raise ControllerError(code, "Event payload must not contain credential-bearing fields")
+            _validate_safe_payload(nested, code=code)
+    elif isinstance(value, list):
+        for nested in value:
+            _validate_safe_payload(nested, code=code)
 
 
 def validate_event(event: dict[str, Any], *, code: str = "corrupt_event_log") -> dict[str, Any]:
@@ -58,6 +72,7 @@ def validate_event(event: dict[str, Any], *, code: str = "corrupt_event_log") ->
         raise ControllerError(code, "Event state is invalid")
     if not isinstance(event["payload"], dict):
         raise ControllerError(code, "Event payload must be an object")
+    _validate_safe_payload(event["payload"], code=code)
     return event
 
 
