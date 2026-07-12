@@ -14,9 +14,9 @@ from typing import Any
 from .config import SprintConfig
 from .errors import ControllerError
 from .jsonio import dump_json, load_json_object_handle
-from .safeio import open_directory, open_regular
+from .safeio import open_directory, open_regular_at
+from .security import validate_safe_data
 
-_SENSITIVE_FIELD = re.compile(r"(?:credential|password|secret|token|api[_-]?key|authorization)", re.IGNORECASE)
 
 STATE_NAMES = frozenset({
     "initializing", "validating", "implementing", "committing", "pre_ci_auditing", "pushing",
@@ -132,19 +132,7 @@ def _validate_reason(reason: Any) -> None:
         raise ControllerError("corrupt_state", "State reason message is invalid")
     if not isinstance(fields["details"], dict):
         raise ControllerError("corrupt_state", "State reason details are invalid")
-    _validate_safe_reason_details(fields["details"])
-
-
-def _validate_safe_reason_details(value: Any) -> None:
-    """Reject credential-bearing field names from durable reason details."""
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            if not isinstance(key, str) or _SENSITIVE_FIELD.search(key):
-                raise ControllerError("corrupt_state", "State reason details contain credential-bearing fields")
-            _validate_safe_reason_details(nested)
-    elif isinstance(value, list):
-        for nested in value:
-            _validate_safe_reason_details(nested)
+    validate_safe_data(fields, code="corrupt_state", label="State reason")
 
 
 def validate_state(data: dict[str, Any]) -> dict[str, Any]:
@@ -177,7 +165,7 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
     server = _exact_fields(data["server"], {"url", "version"}, "server")
     _nullable_string(server["url"], "server.url")
     _nullable_string(server["version"], "server.version")
-    if data["active_invocation"] is not None and not isinstance(data["active_invocation"], dict):
+    if data["active_invocation"] is not None:
         raise ControllerError("corrupt_state", "Sprint 1 active_invocation must be null")
 
     commits = _exact_fields(data["commits"], {"local", "pushed"}, "commits")
@@ -227,10 +215,9 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
 def load_state(path: Path) -> dict[str, Any]:
     """Load and validate a current state snapshot."""
     try:
-        descriptor, directory = open_regular(path, os.O_RDONLY)
+        directory = open_directory(path.parent)
         try:
-            with os.fdopen(descriptor, "rb", closefd=True) as handle:
-                return validate_state(load_json_object_handle(handle, path, code="corrupt_state"))
+            return load_state_at(directory, path.name, path)
         finally:
             os.close(directory)
     except FileNotFoundError as error:
@@ -239,24 +226,45 @@ def load_state(path: Path) -> dict[str, Any]:
         raise ControllerError("corrupt_state", f"Cannot read state file: {path}") from error
 
 
+def load_state_at(directory: int, name: str, path: Path) -> dict[str, Any]:
+    """Load state through one already-open runtime directory descriptor."""
+    descriptor = open_regular_at(directory, name, os.O_RDONLY)
+    with os.fdopen(descriptor, "rb", closefd=True) as handle:
+        return validate_state(load_json_object_handle(handle, path, code="corrupt_state"))
+
+
 def serialize_state(state: dict[str, Any]) -> str:
     """Validate and serialize state before any durable transition write begins."""
     validate_state(state)
     try:
-        return dump_json(state)
+        serialized = dump_json(state)
     except (TypeError, ValueError, RecursionError) as error:
         raise ControllerError("persistence_failed", "State cannot be serialized") from error
+    if len(serialized.encode("utf-8")) > 1024 * 1024:
+        raise ControllerError("persistence_failed", "State exceeds 1 MiB")
+    return serialized
 
 
 def write_state_atomic(path: Path, state: dict[str, Any]) -> None:
     """Atomically replace state or raise ``ControllerError`` without truncating prior state."""
     serialized = serialize_state(state)
-    temporary_name: str | None = None
     directory: int | None = None
     try:
         directory = open_directory(path.parent, create=True)
+        write_state_atomic_at(directory, path.name, path, serialized)
+    except OSError as error:
+        raise ControllerError("persistence_failed", f"Could not persist state: {path}") from error
+    finally:
+        if directory is not None:
+            os.close(directory)
+
+
+def write_state_atomic_at(directory: int, name: str, path: Path, serialized: str) -> None:
+    """Atomically replace state through one already-open runtime directory descriptor."""
+    temporary_name: str | None = None
+    try:
         try:
-            existing = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+            existing = os.stat(name, dir_fd=directory, follow_symlinks=False)
             if not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1:
                 raise ControllerError("persistence_failed", f"State file must be an unlinked regular file: {path}")
         except FileNotFoundError:
@@ -275,15 +283,13 @@ def write_state_atomic(path: Path, state: dict[str, Any]) -> None:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        os.replace(temporary_name, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.replace(temporary_name, name, src_dir_fd=directory, dst_dir_fd=directory)
         os.fsync(directory)
     except OSError as error:
         raise ControllerError("persistence_failed", f"Could not persist state: {path}") from error
     finally:
-        if temporary_name is not None and directory is not None:
+        if temporary_name is not None:
             try:
                 os.unlink(temporary_name, dir_fd=directory)
             except FileNotFoundError:
                 pass
-        if directory is not None:
-            os.close(directory)

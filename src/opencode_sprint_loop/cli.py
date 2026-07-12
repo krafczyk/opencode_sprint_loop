@@ -18,6 +18,7 @@ from .git import validate_preflight, validate_root
 from .locking import advisory_lock
 from .paths import RuntimePaths, canonical_root, ensure_runtime_paths_safe, runtime_paths
 from .safeio import open_directory
+from .security import redact_diagnostic
 from .state import new_state, process_start_identity
 from .status import format_status, project_status, validate_persistence
 from .transitions import persist_initial, transition
@@ -73,7 +74,9 @@ def _existing_run(paths: RuntimePaths, config: SprintConfig) -> None:
     state_exists = paths.state.exists()
     events_exists = paths.events.exists()
     if state_exists and events_exists:
-        validate_persistence(paths, config)
+        state, _ = validate_persistence(paths, config)
+        if state is None:
+            raise ControllerError("inconsistent_persistence", "State and event log changed during validation")
         raise ControllerError("run_already_exists", "A persisted Sprint 1 run already exists; resume policy is not implemented")
     if state_exists or events_exists:
         raise ControllerError("inconsistent_persistence", "Incomplete existing state or event artifacts require manual inspection")
@@ -127,6 +130,8 @@ def _persist_best_effort_failure(paths: RuntimePaths, config: SprintConfig, pers
         return
     try:
         state, _ = validate_persistence(paths, config)
+        if state is None:
+            return
         if state["state"] not in {"initializing", "validating"}:
             return
         transition(
@@ -219,7 +224,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _load_root_config(arguments.root)
         raise ControllerError("feature_not_implemented", f"{arguments.command} is not implemented in Sprint 1")
     except ControllerError as error:
-        sys.stderr.write(f"{error.code}: {error.message}\n")
+        sys.stderr.write(f"{error.code}: {redact_diagnostic(error.message)}\n")
         return 2
     except SystemExit:
         raise

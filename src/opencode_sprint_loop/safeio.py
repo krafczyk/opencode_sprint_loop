@@ -51,6 +51,8 @@ def open_regular(
 
     The caller owns and must close both returned descriptors. Rejecting hardlinks
     avoids reading from or appending to a controller artifact aliased elsewhere.
+    A zero link count is a safe, complete snapshot unlinked by a concurrent atomic
+    replacement after this descriptor was opened.
     """
     directory = open_directory(path.parent, create=create_parent)
     try:
@@ -65,7 +67,8 @@ def open_regular_at(directory: int, name: str, flags: int, *, mode: int = 0o600)
     """Open one single-link regular file relative to an anchored directory."""
     descriptor = os.open(name, flags | os.O_NOFOLLOW, mode, dir_fd=directory)
     details = os.fstat(descriptor)
-    if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+    readable_snapshot = flags & os.O_ACCMODE == os.O_RDONLY and details.st_nlink == 0
+    if not stat.S_ISREG(details.st_mode) or (details.st_nlink != 1 and not readable_snapshot):
         os.close(descriptor)
         raise ControllerError("persistence_failed", f"Runtime artifact must be an unlinked regular file: {name}")
     return descriptor
@@ -78,3 +81,17 @@ def path_exists(directory: int, name: str) -> bool:
     except FileNotFoundError:
         return False
     return True
+
+
+def require_current_directory(path: Path, directory: int) -> None:
+    """Fail if a path no longer identifies the directory held by ``directory``."""
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except OSError as error:
+        raise ControllerError("persistence_failed", f"Runtime directory changed during operation: {path}") from error
+    anchored = os.fstat(directory)
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or (current.st_dev, current.st_ino) != (anchored.st_dev, anchored.st_ino)
+    ):
+        raise ControllerError("persistence_failed", f"Runtime directory changed during operation: {path}")

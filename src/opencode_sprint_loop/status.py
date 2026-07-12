@@ -10,12 +10,12 @@ from typing import Any
 from . import __version__
 from .config import SprintConfig
 from .errors import ControllerError
-from .events import load_events, validate_event_history
+from .events import load_events_at, validate_event_history
 from .jsonio import load_json_object_handle
 from .locking import is_exclusively_locked
 from .paths import RuntimePaths
-from .safeio import open_regular
-from .state import load_state, process_start_identity
+from .safeio import open_directory, open_regular, path_exists, require_current_directory
+from .state import RFC3339_UTC, load_state_at, process_start_identity
 
 
 def _no_run(root: Path) -> dict[str, Any]:
@@ -54,7 +54,17 @@ def _process_running(run_lock: Path, paths: RuntimePaths, state: dict[str, Any])
         return False
     process = state["process"]
     required = {"schema_version", "run_id", "pid", "process_start", "hostname", "started_at"}
-    if set(metadata) != required or metadata["schema_version"] != 1:
+    if set(metadata) != required:
+        return False
+    if not isinstance(metadata["schema_version"], int) or isinstance(metadata["schema_version"], bool) or metadata["schema_version"] != 1:
+        return False
+    if not isinstance(metadata["run_id"], str) or not isinstance(metadata["hostname"], str) or not metadata["hostname"]:
+        return False
+    if not isinstance(metadata["started_at"], str) or not RFC3339_UTC.fullmatch(metadata["started_at"]):
+        return False
+    if metadata["process_start"] is not None and (
+        not isinstance(metadata["process_start"], str) or not metadata["process_start"]
+    ):
         return False
     if metadata["run_id"] != state["run_id"] or metadata["hostname"] != socket.gethostname():
         return False
@@ -81,13 +91,9 @@ def _process_running(run_lock: Path, paths: RuntimePaths, state: dict[str, Any])
 
 def project_status(root: Path, config: SprintConfig, paths: RuntimePaths, run_lock: Path) -> dict[str, Any]:
     """Load, validate, and project current state without mutating workflow data."""
-    state_exists = paths.state.exists()
-    events_exists = paths.events.exists()
-    if not state_exists and not events_exists:
-        return _no_run(root)
-    if state_exists != events_exists:
-        raise ControllerError("inconsistent_persistence", "State and event log must either both exist or both be absent")
     state, events = validate_persistence(paths, config)
+    if state is None or events is None:
+        return _no_run(root)
     event = events[-1]
     return {
         "schema_version": 1,
@@ -124,28 +130,48 @@ def project_status(root: Path, config: SprintConfig, paths: RuntimePaths, run_lo
     }
 
 
-def validate_persistence(paths: RuntimePaths, config: SprintConfig) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def validate_persistence(
+    paths: RuntimePaths, config: SprintConfig
+) -> tuple[dict[str, Any], list[dict[str, Any]]] | tuple[None, None]:
     """Load and cross-validate state and events without projecting status."""
-    state = load_state(paths.state)
-    if state["multisprint"] != config.multisprint or state["sprint"] != config.sprint:
-        raise ControllerError("inconsistent_persistence", "Persisted state does not match configured sprint identity")
-    expected_keys = {repository.name for repository in config.repositories}
-    if set(state["commits"]["local"]) != expected_keys or set(state["commits"]["pushed"]) != expected_keys:
-        raise ControllerError("inconsistent_persistence", "Persisted commit maps do not match configured repository")
-    events = load_events(paths.events)
-    if not events:
-        raise ControllerError("corrupt_event_log", "State exists but event log is empty")
-    if events[-1]["sequence"] < state["last_event_sequence"]:
-        raise ControllerError("corrupt_event_log", "Event log is behind persisted state")
-    if events[-1]["sequence"] > state["last_event_sequence"]:
-        raise ControllerError("inconsistent_persistence", "Event log is ahead of persisted state")
-    validate_event_history(events)
-    event = events[-1]
-    if event["run_id"] != state["run_id"] or event["state"] != state["state"]:
-        raise ControllerError("inconsistent_persistence", "State does not match its last event")
-    if event["timestamp"] != state["updated_at"]:
-        raise ControllerError("inconsistent_persistence", "State update timestamp does not match its last event")
-    return state, events
+    try:
+        directory = open_directory(paths.info_dir)
+    except FileNotFoundError:
+        return None, None
+    except OSError as error:
+        raise ControllerError("corrupt_state", f"Cannot inspect runtime directory: {paths.info_dir}") from error
+    try:
+        state_exists = path_exists(directory, paths.state.name)
+        events_exists = path_exists(directory, paths.events.name)
+        if not state_exists and not events_exists:
+            return None, None
+        if state_exists != events_exists:
+            raise ControllerError("inconsistent_persistence", "State and event log must either both exist or both be absent")
+        state = load_state_at(directory, paths.state.name, paths.state)
+        if state["multisprint"] != config.multisprint or state["sprint"] != config.sprint:
+            raise ControllerError("inconsistent_persistence", "Persisted state does not match configured sprint identity")
+        expected_keys = {repository.name for repository in config.repositories}
+        if set(state["commits"]["local"]) != expected_keys or set(state["commits"]["pushed"]) != expected_keys:
+            raise ControllerError("inconsistent_persistence", "Persisted commit maps do not match configured repository")
+        events = load_events_at(directory, paths.events.name, paths.events)
+        if not events:
+            raise ControllerError("corrupt_event_log", "State exists but event log is empty")
+        if events[-1]["sequence"] < state["last_event_sequence"]:
+            raise ControllerError("corrupt_event_log", "Event log is behind persisted state")
+        if events[-1]["sequence"] > state["last_event_sequence"]:
+            raise ControllerError("inconsistent_persistence", "Event log is ahead of persisted state")
+        validate_event_history(events)
+        event = events[-1]
+        if event["run_id"] != state["run_id"] or event["state"] != state["state"]:
+            raise ControllerError("inconsistent_persistence", "State does not match its last event")
+        if event["timestamp"] != state["updated_at"]:
+            raise ControllerError("inconsistent_persistence", "State update timestamp does not match its last event")
+        if event["payload"].get("reason") != state["reason"]:
+            raise ControllerError("inconsistent_persistence", "State reason does not match its last event")
+        require_current_directory(paths.info_dir, directory)
+        return state, events
+    finally:
+        os.close(directory)
 
 
 def format_status(status: dict[str, Any]) -> str:

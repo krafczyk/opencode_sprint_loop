@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import re
+import os
+import stat
 from types import MappingProxyType
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 from .errors import ControllerError
-from .jsonio import load_json_object
+from .jsonio import load_json_object_handle
 from .paths import resolve_within
+from .safeio import open_directory
 
 IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 ZERO_CHECKS = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -77,13 +80,31 @@ def _identifier(value: Any, field: str) -> str:
 def load_config(root: Path) -> SprintConfig:
     """Load immutable Sprint 1 configuration or raise ``ControllerError`` without mutation."""
     config_path = root / "sprint_config.json"
-    if config_path.is_symlink() or not config_path.is_file():
+    try:
+        directory = open_directory(root)
+        try:
+            descriptor = os.open(config_path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+            try:
+                details = os.fstat(descriptor)
+                if not stat.S_ISREG(details.st_mode):
+                    raise ControllerError("invalid_config", f"sprint_config.json must be a regular file: {config_path}")
+                handle = os.fdopen(descriptor, "rb", closefd=True)
+                descriptor = -1
+                with handle:
+                    data = load_json_object_handle(handle, config_path, code="invalid_config")
+            finally:
+                if descriptor != -1:
+                    os.close(descriptor)
+        finally:
+            os.close(directory)
+    except FileNotFoundError:
         raise ControllerError("invalid_config", f"sprint_config.json must be a regular file: {config_path}")
-    data = load_json_object(config_path, code="invalid_config")
+    except OSError as error:
+        raise ControllerError("invalid_config", f"sprint_config.json must be a regular file: {config_path}") from error
     if "schema_version" not in data:
         raise ControllerError("invalid_config", "Missing field in sprint_config.json: schema_version")
     if not isinstance(data["schema_version"], int) or isinstance(data["schema_version"], bool) or data["schema_version"] != 1:
-        raise ControllerError("unsupported_config_schema", "schema_version must equal integer 1")
+        raise ControllerError("unsupported_config_schema", "schema_version must equal integer 1; migrate configuration to the supported schema")
     _expect_keys(
         data,
         {

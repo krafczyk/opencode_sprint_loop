@@ -27,6 +27,7 @@ from opencode_sprint_loop.events import append_event, load_events, transition_ev
 from opencode_sprint_loop.jsonio import MAX_JSON_BYTES
 from opencode_sprint_loop.locking import advisory_lock
 from opencode_sprint_loop.paths import runtime_paths
+from opencode_sprint_loop.security import redact_diagnostic
 from opencode_sprint_loop.state import load_state, new_state, validate_state, write_state_atomic
 from opencode_sprint_loop.transitions import persist_initial, transition
 
@@ -59,17 +60,56 @@ def pause_transition_in_child(
     """Pause a transition after event sync to exercise concurrent status safely."""
     from opencode_sprint_loop import transitions
 
-    real_write_state = transitions.write_state_atomic
+    real_write_state = transitions.write_state_atomic_at
 
-    def pause_before_state_replace(path: Path, replacement: dict[str, Any]) -> None:
+    def pause_before_state_replace(*arguments: object) -> None:
         state_write_started.set()
         if not release_state_write.wait(timeout=10):
             raise RuntimeError("timed out waiting to complete transition")
-        real_write_state(path, replacement)
+        real_write_state(*arguments)  # type: ignore[arg-type]
 
     try:
-        with patch("opencode_sprint_loop.transitions.write_state_atomic", side_effect=pause_before_state_replace):
+        with patch("opencode_sprint_loop.transitions.write_state_atomic_at", side_effect=pause_before_state_replace):
             transition(state, events_path, state_path, persistence_lock, "validating")
+    except Exception as error:
+        results.put(repr(error))
+    else:
+        results.put(None)
+
+
+def pause_initial_transition_in_child(
+    state: dict[str, Any], events_path: Path, state_path: Path, persistence_lock: Path,
+    state_write_started: multiprocessing.synchronize.Event,
+    release_state_write: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue[str | None],
+) -> None:
+    """Pause the first state replacement while retaining the exclusive persistence lock."""
+    from opencode_sprint_loop import transitions
+
+    real_write_state = transitions.write_state_atomic_at
+
+    def pause_before_state_replace(*arguments: object) -> None:
+        state_write_started.set()
+        if not release_state_write.wait(timeout=10):
+            raise RuntimeError("timed out waiting to complete initial transition")
+        real_write_state(*arguments)  # type: ignore[arg-type]
+
+    try:
+        with patch("opencode_sprint_loop.transitions.write_state_atomic_at", side_effect=pause_before_state_replace):
+            persist_initial(state, events_path, state_path, persistence_lock)
+    except Exception as error:
+        results.put(repr(error))
+    else:
+        results.put(None)
+
+
+def read_state_until_stopped(
+    path: Path, stop: multiprocessing.synchronize.Event, results: multiprocessing.queues.Queue[str | None]
+) -> None:
+    """Continuously validate atomic state snapshots from a separate process."""
+    try:
+        while not stop.is_set():
+            load_state(path)
     except Exception as error:
         results.put(repr(error))
     else:
@@ -424,6 +464,17 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("dirty_sprint_repository", stderr)
         self.assertEqual((git_dir / "index").read_bytes(), before)
 
+    def test_git_preflight_disables_configured_filesystem_monitor(self) -> None:
+        """Read-only preflight never executes a repository-configured fsmonitor program."""
+        sentinel = self.fixture.base / "fsmonitor-ran"
+        monitor = self.fixture.base / "fsmonitor"
+        monitor.write_text(f"#!/bin/sh\ntouch {sentinel}\n", encoding="utf-8")
+        monitor.chmod(0o700)
+        git(self.root, "config", "core.fsmonitor", str(monitor))
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 4, stderr)
+        self.assertFalse(sentinel.exists())
+
     def test_submodule_path_with_spaces_is_registered_correctly(self) -> None:
         """NUL-delimited .gitmodules parsing preserves a valid path containing spaces."""
         git(self.root, "mv", "repositories/managed", "repositories/managed repo")
@@ -600,6 +651,21 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("uninitialized_submodule", stderr)
         self.assertFalse((self.root / "info").exists())
 
+    def test_old_form_registered_submodule_is_accepted(self) -> None:
+        """A registered submodule with an embedded Git directory remains valid."""
+        module_dir = Path(git(self.fixture.managed, "rev-parse", "--git-dir"))
+        if not module_dir.is_absolute():
+            module_dir = (self.fixture.managed / module_dir).resolve()
+        (self.fixture.managed / ".git").unlink()
+        shutil.move(str(module_dir), self.fixture.managed / ".git")
+        config_path = self.fixture.managed / ".git" / "config"
+        config_path.write_text(
+            "\n".join(line for line in config_path.read_text(encoding="utf-8").splitlines() if "worktree" not in line) + "\n",
+            encoding="utf-8",
+        )
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 4, stderr)
+
     def test_managed_branch_and_remote_failures_preserve_git_snapshots(self) -> None:
         """Managed branch, detached-head, and remote failures do not alter either repository."""
         variants = (
@@ -751,6 +817,34 @@ class FoundationTests(unittest.TestCase):
             validate_state(state)
         self.assertEqual(context.exception.code, "corrupt_state")
 
+    def test_credential_values_are_rejected_and_diagnostics_are_redacted(self) -> None:
+        """Benign fields cannot hide credentials in durable values or command diagnostics."""
+        state = new_state(load_config(self.root))
+        event = transition_event(
+            state,
+            "run.started",
+            "initializing",
+            {"previous_state": None, "note": "Authorization: Bearer synthetic-secret"},
+        )
+        with self.assertRaises(ControllerError) as context:
+            append_event(self.root / "info" / "events.jsonl", event)
+        self.assertEqual(context.exception.code, "persistence_failed")
+        self.assertFalse((self.root / "info").exists())
+
+        state["state"] = "blocked"
+        state["reason"] = {
+            "code": "test",
+            "message": "https://user:synthetic-secret@example.invalid/?token=synthetic-secret",
+            "details": {},
+        }
+        with self.assertRaises(ControllerError) as context:
+            validate_state(state)
+        self.assertEqual(context.exception.code, "corrupt_state")
+
+        diagnostic = redact_diagnostic("https://user:synthetic-secret@example.invalid/?token=synthetic-secret")
+        self.assertNotIn("synthetic-secret", diagnostic)
+        self.assertIn("[REDACTED]", diagnostic)
+
     def test_deferred_commands_validate_required_inputs(self) -> None:
         """Reserved controls reject invalid roots and empty resume URLs before feature errors."""
         code, _, stderr = self.invoke(["pause", "--root", str(self.root / "missing")])
@@ -868,6 +962,47 @@ class FoundationTests(unittest.TestCase):
         write_state_atomic(paths.state, replacement)
         self.assertEqual(load_state(paths.state)["state"], "blocked")
 
+    def test_atomic_state_readers_observe_only_complete_snapshots(self) -> None:
+        """A concurrent reader validates every snapshot during atomic replacements."""
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        initial = new_state(config)
+        write_state_atomic(paths.state, initial)
+        context = multiprocessing.get_context("fork")
+        stop = context.Event()
+        results = context.Queue()
+        reader = context.Process(target=read_state_until_stopped, args=(paths.state, stop, results))
+        reader.start()
+        try:
+            for index in range(50):
+                replacement = dict(initial)
+                replacement["state"] = "blocked"
+                replacement["reason"] = {"code": "test", "message": f"test {index}", "details": {}}
+                write_state_atomic(paths.state, replacement)
+                write_state_atomic(paths.state, initial)
+            stop.set()
+            reader.join(timeout=5)
+            self.assertFalse(reader.is_alive())
+            self.assertIsNone(results.get(timeout=1))
+        finally:
+            stop.set()
+            if reader.is_alive():
+                reader.terminate()
+                reader.join(timeout=5)
+            results.close()
+
+    def test_oversized_state_is_rejected_before_creating_runtime_paths(self) -> None:
+        """The writer cannot persist state that exceeds the bounded reader contract."""
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        state = new_state(config)
+        state["state"] = "blocked"
+        state["reason"] = {"code": "test", "message": "test", "details": {"note": "x" * MAX_JSON_BYTES}}
+        with self.assertRaises(ControllerError) as context:
+            write_state_atomic(paths.state, state)
+        self.assertEqual(context.exception.code, "persistence_failed")
+        self.assertFalse(paths.info_dir.exists())
+
     def test_atomic_state_replace_failure_preserves_previous_state(self) -> None:
         """A replace failure leaves the prior complete state readable."""
         config = load_config(self.root)
@@ -930,7 +1065,7 @@ class FoundationTests(unittest.TestCase):
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         state = new_state(config)
         persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
-        with patch("opencode_sprint_loop.transitions.write_state_atomic", side_effect=OSError("injected")):
+        with patch("opencode_sprint_loop.transitions.write_state_atomic_at", side_effect=OSError("injected")):
             with self.assertRaises(OSError):
                 persist_initial(state, paths.events, paths.state, persistence_lock)
         self.assertFalse(paths.state.exists())
@@ -938,6 +1073,31 @@ class FoundationTests(unittest.TestCase):
         code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 2)
         self.assertIn("inconsistent_persistence", stderr)
+
+    def test_runtime_directory_replacement_cannot_split_transition_artifacts(self) -> None:
+        """A directory swap cannot redirect the event/state pair to different locations."""
+        from opencode_sprint_loop import transitions
+
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
+        state = persist_initial(new_state(config), paths.events, paths.state, persistence_lock)
+        original = transitions.write_state_atomic_at
+        displaced = self.fixture.base / "displaced-runtime"
+
+        def replace_runtime_directory(directory: int, name: str, path: Path, serialized: str) -> None:
+            paths.info_dir.rename(displaced)
+            paths.info_dir.mkdir(parents=True)
+            original(directory, name, path, serialized)
+
+        with patch("opencode_sprint_loop.transitions.write_state_atomic_at", side_effect=replace_runtime_directory):
+            with self.assertRaises(ControllerError) as context:
+                transition(state, paths.events, paths.state, persistence_lock, "validating")
+        self.assertEqual(context.exception.code, "persistence_failed")
+        self.assertFalse((paths.info_dir / "events.jsonl").exists())
+        self.assertFalse((paths.info_dir / "state.json").exists())
+        self.assertEqual(load_state(displaced / "state.json")["state"], "validating")
+        self.assertEqual(load_events(displaced / "events.jsonl")[-1]["state"], "validating")
 
     def test_transition_guards_preserve_durable_pair_on_invalid_requests(self) -> None:
         """Missing reasons and unsupported destinations cannot append partial transitions."""
@@ -1280,6 +1440,21 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         self.assertFalse(json.loads(stdout)["process_running"])
 
+    def test_status_ignores_malformed_lock_metadata(self) -> None:
+        """Only fully valid metadata can corroborate a held ownership lock."""
+        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        paths = runtime_paths(self.root, "foundation", 1)
+        metadata = json.loads(paths.lock_metadata.read_text(encoding="utf-8"))
+        metadata["schema_version"] = True
+        paths.lock_metadata.write_text(json.dumps(metadata), encoding="utf-8")
+        git_dir = Path(git(self.root, "rev-parse", "--git-dir"))
+        if not git_dir.is_absolute():
+            git_dir = (self.root / git_dir).resolve()
+        with advisory_lock(git_dir / "opencode-sprint-loop" / "run.lock", exclusive=True):
+            code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 0, stderr)
+        self.assertFalse(json.loads(stdout)["process_running"])
+
     def test_separate_process_ownership_lock_rejects_run(self) -> None:
         """Ownership is enforced across controller processes, not only threads."""
         git_dir = Path(git(self.root, "rev-parse", "--git-dir"))
@@ -1424,6 +1599,55 @@ class FoundationTests(unittest.TestCase):
             transition_results.close()
             status_results.close()
 
+    def test_status_observes_a_complete_first_transition(self) -> None:
+        """Concurrent status sees no run or a complete initialized run during creation."""
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
+        context = multiprocessing.get_context("fork")
+        state_write_started = context.Event()
+        release_state_write = context.Event()
+        transition_results = context.Queue()
+        transition_process = context.Process(
+            target=pause_initial_transition_in_child,
+            args=(
+                new_state(config), paths.events, paths.state, persistence_lock, state_write_started,
+                release_state_write, transition_results,
+            ),
+        )
+        transition_process.start()
+        self.assertTrue(state_write_started.wait(timeout=5))
+        status_started = context.Event()
+        status_results = context.Queue()
+        status_process = context.Process(
+            target=invoke_in_child,
+            args=(["status", "--root", str(self.root), "--json"], status_started, status_results),
+        )
+        status_process.start()
+        try:
+            self.assertTrue(status_started.wait(timeout=5))
+            with self.assertRaises(queue.Empty):
+                status_results.get(timeout=0.25)
+            release_state_write.set()
+            transition_process.join(timeout=5)
+            self.assertFalse(transition_process.is_alive())
+            self.assertIsNone(transition_results.get(timeout=1))
+            status_process.join(timeout=5)
+            self.assertFalse(status_process.is_alive())
+            code, stdout, stderr = status_results.get(timeout=1)
+            self.assertEqual(code, 0, stderr)
+            status = json.loads(stdout)
+            self.assertTrue(status["run_exists"])
+            self.assertEqual(status["state"], "initializing")
+        finally:
+            release_state_write.set()
+            for process in (transition_process, status_process):
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=5)
+            transition_results.close()
+            status_results.close()
+
     def test_status_rejects_state_for_different_sprint(self) -> None:
         """Persisted state cannot be projected for a different configured sprint."""
         self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
@@ -1431,6 +1655,17 @@ class FoundationTests(unittest.TestCase):
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         state = json.loads(paths.state.read_text(encoding="utf-8"))
         state["sprint"] = 2
+        paths.state.write_text(json.dumps(state), encoding="utf-8")
+        code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 2)
+        self.assertIn("inconsistent_persistence", stderr)
+
+    def test_status_rejects_reason_that_differs_from_last_event(self) -> None:
+        """Mutable state cannot replace the append-only transition reason."""
+        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        paths = runtime_paths(self.root, "foundation", 1)
+        state = json.loads(paths.state.read_text(encoding="utf-8"))
+        state["reason"]["message"] = "different reason"
         paths.state.write_text(json.dumps(state), encoding="utf-8")
         code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 2)
@@ -1512,15 +1747,17 @@ class FoundationTests(unittest.TestCase):
             append_event(self.root / "info" / "events.jsonl", event)
         self.assertEqual(context.exception.code, "persistence_failed")
 
-    def test_state_accepts_additive_schema_version_one_fields(self) -> None:
-        """Later Sprint 1-compatible fields do not invalidate the stable state schema."""
+    def test_state_reserves_null_active_invocation_in_sprint_one(self) -> None:
+        """Sprint 1 rejects active invocation data it cannot represent in status."""
         state = new_state(load_config(self.root))
         state["future"] = {"value": True}
         state["server"]["future"] = "reserved"
         state["server"]["url"] = "http://later.example.invalid"
         state["active_invocation"] = {"role": "builder"}
         state["ci"]["checks"] = [{"name": "later"}]
-        validate_state(state)
+        with self.assertRaises(ControllerError) as context:
+            validate_state(state)
+        self.assertEqual(context.exception.code, "corrupt_state")
 
     def test_unknown_state_schema_precedes_version_one_shape_validation(self) -> None:
         """Future state schemas receive the stable unsupported-schema reason."""
@@ -1570,14 +1807,14 @@ class FoundationTests(unittest.TestCase):
         """An internal transition error records failed when the prior pair is durable."""
         from opencode_sprint_loop import transitions
 
-        original = transitions.append_event
+        original = transitions.append_event_at
 
-        def fail_validating(path: Path, event: dict[str, object]) -> None:
+        def fail_validating(directory: int, name: str, path: Path, event: dict[str, object]) -> None:
             if event["state"] == "validating":
                 raise OSError("injected")
-            original(path, event)  # type: ignore[arg-type]
+            original(directory, name, path, event)  # type: ignore[arg-type]
 
-        with patch("opencode_sprint_loop.transitions.append_event", side_effect=fail_validating):
+        with patch("opencode_sprint_loop.transitions.append_event_at", side_effect=fail_validating):
             code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
         self.assertEqual(code, 2)
         self.assertIn("internal_error", stderr)

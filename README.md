@@ -75,7 +75,7 @@ sprint-repo/
     `-- <managed-repository>/       # initialized Git submodule
 ```
 
-V1 configuration is collection-shaped but Sprint 1 accepts exactly one managed repository. The sprint repository and managed repository must have no staged, unstaged, untracked (including ignored), or in-progress Git operation state. Dirty nested submodules also block the managed repository preflight. The configured managed branch must be checked out, its configured remote must exist, and its HEAD must match the sprint repository gitlink.
+V1 configuration is collection-shaped but Sprint 1 accepts exactly one managed repository. The sprint repository and managed repository must have no staged, unstaged, untracked (including ignored), or in-progress Git operation state. Dirty nested submodules also block the managed repository preflight. The configured managed branch must be checked out, its configured remote must exist, and its HEAD must match the sprint repository gitlink. Preflight disables Git filesystem-monitor hooks and accepts both absorbed and old-form initialized submodules.
 
 ## Configuration
 
@@ -155,6 +155,8 @@ info/<multisprint>/<sprint>/
 ```
 
 The event log records `run.started`, `state.entered`, and `run.blocked`; state ends at `blocked` with reason code `execution_not_implemented`. Sprint 1 does not create checkpoint commits, so these controller-owned runtime files remain uncommitted until Sprint 4 introduces checkpoint commits.
+
+Runtime readers and writers use descriptor-anchored paths. State/event payloads reject credential-bearing keys and common credential-bearing values, and CLI diagnostics redact URL user-info, sensitive query parameters, and HTTP authorization values.
 
 Use `status --json` for integrations. It emits one JSON object and writes diagnostics only to standard error. Its stable top-level fields are `schema_version`, `controller_version`, `sprint_root`, `run_exists`, `process_running`, `run_id`, `sprint`, `state`, `reason`, `active`, `commits`, `audit`, `ci`, `counters`, `checklist`, `last_event`, and `updated_at`. The complete V1 Sprint 1 JSON schema is defined in [the status contract](docs/controller-v1/1/sprint_spec.md#12-status-json-contract).
 

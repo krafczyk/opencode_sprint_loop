@@ -16,12 +16,26 @@ from .safeio import open_directory, open_regular, open_regular_at
 @contextmanager
 def advisory_lock(path: Path, *, exclusive: bool, blocking: bool = True) -> Iterator[None]:
     """Hold a Linux advisory lock or raise ``ControllerError``; creates only its lock file."""
+    directory: int | None = None
+    descriptor: int | None = None
+    handle = None
     try:
         directory = open_directory(path.parent, create=True)
         descriptor = open_regular_at(directory, path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND)
         handle = os.fdopen(descriptor, "a+", encoding="utf-8")
+        descriptor = None
     except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory is not None:
+            os.close(directory)
         raise ControllerError("persistence_failed", f"Cannot create lock file: {path}") from error
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory is not None:
+            os.close(directory)
+        raise
     flags = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
     if not blocking:
         flags |= fcntl.LOCK_NB
@@ -38,7 +52,7 @@ def advisory_lock(path: Path, *, exclusive: bool, blocking: bool = True) -> Iter
     except BlockingIOError as error:
         handle.close()
         os.close(directory)
-        raise ControllerError("run_already_active", "Another Sprint Loop Controller process owns this sprint") from error
+        raise ControllerError("run_already_active", "Another Sprint Loop Controller process owns this sprint; wait for it to exit or use resume when available") from error
     except BaseException:
         handle.close()
         os.close(directory)

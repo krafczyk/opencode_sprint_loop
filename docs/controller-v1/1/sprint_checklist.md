@@ -187,7 +187,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S1-ATOM-006** `fsync` the containing directory where supported.
 - [x] **S1-ATOM-007** Clean up handled abandoned temporary files when safe.
 - [x] **S1-ATOM-008** Inject failures before write, during write, before replace, and after replace.
-- [ ] **S1-ATOM-009** Verify readers observe either the complete previous state or complete next state, never truncated JSON.
+- [x] **S1-ATOM-009** Verify readers observe either the complete previous state or complete next state, never truncated JSON.
 
 ## 13. Event Log
 
@@ -327,7 +327,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S1-TEST-018A** Add a test proving any existing persisted run is rejected before worktree cleanliness and remains unchanged.
 - [x] **S1-TEST-018B** Add a two-process race test proving post-lock revalidation prevents a second run from writing.
 - [x] **S1-TEST-018C** Add a concurrent status test proving the persistence lock prevents transient event/state inconsistency during a normal transition.
-- [ ] **S1-TEST-018C1** Add a concurrent no-run/first-transition status test proving status observes either a complete no-run view or a complete initialized-run view.
+- [x] **S1-TEST-018C1** Add a concurrent no-run/first-transition status test proving status observes either a complete no-run view or a complete initialized-run view.
 - [x] **S1-TEST-018D** Add event short-write and partial-final-line tests with no automatic truncation.
 - [x] **S1-TEST-018E** Test that the opaque server URL is neither parsed, logged, nor persisted.
 - [x] **S1-TEST-018F** Test process activity while ownership is held and after release, including final persisted inactive intent.
