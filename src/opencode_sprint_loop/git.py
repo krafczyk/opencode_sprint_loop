@@ -70,15 +70,35 @@ def _ensure_clean(repository: GitRepository, code: str, label: str, *, allowed_u
         "-z",
         "--untracked-files=all",
         "--ignored=matching",
+        "--ignore-submodules=none",
     )
     records = [record for record in status.split("\0") if record]
     disallowed = []
     for record in records:
         if record.startswith("? ") and allowed_untracked is not None and record[2:] in allowed_untracked:
             continue
+        if record.startswith("! ") and allowed_untracked is not None:
+            ignored_path = record[2:].rstrip("/")
+            if record[2:] in allowed_untracked or _ignored_tree_contains_only(repository.root, ignored_path, allowed_untracked):
+                continue
         disallowed.append(record)
     if disallowed:
         raise ControllerError(code, f"{label} must be clean; commit, stash, or discard its changes first: {repository.root}")
+
+
+def _ignored_tree_contains_only(root: Path, relative: str, allowed: set[str]) -> bool:
+    """Allow Git's aggregate ignored record only for the stale metadata exception."""
+    tree = root / relative
+    if not tree.is_dir() or tree.is_symlink():
+        return False
+    for current, directories, files in os.walk(tree, followlinks=False):
+        if any((Path(current) / directory).is_symlink() for directory in directories):
+            return False
+        for filename in files:
+            candidate = Path(current) / filename
+            if candidate.is_symlink() or candidate.relative_to(root).as_posix() not in allowed:
+                return False
+    return True
 
 
 def _ensure_no_operation(repository: GitRepository, label: str) -> None:
@@ -98,15 +118,16 @@ def _ensure_no_operation(repository: GitRepository, label: str) -> None:
 
 def _ensure_submodule(root: GitRepository, config: SprintConfig) -> GitRepository:
     """Validate the configured managed repository as an initialized gitlink."""
-    relative = config.repository.path.relative_to(root.root).as_posix()
+    repository = config.repositories[0]
+    relative = repository.path.relative_to(root.root).as_posix()
     stage = _run(root.root, "ls-files", "--stage", "--", relative).strip()
     fields = stage.split(maxsplit=3)
     if len(fields) < 3 or fields[0] != "160000":
-        raise ControllerError("invalid_submodule", f"Managed repository is not a tracked gitlink: {config.repository.path}")
+        raise ControllerError("invalid_submodule", f"Managed repository is not a tracked gitlink: {repository.path}")
     gitlink_sha = fields[1]
     modules = root.root / ".gitmodules"
     if modules.is_symlink() or not modules.is_file():
-        raise ControllerError("invalid_submodule", f"Missing .gitmodules for managed repository: {config.repository.path}")
+        raise ControllerError("invalid_submodule", f"Missing .gitmodules for managed repository: {repository.path}")
     registered = _run(
         root.root,
         "config",
@@ -119,15 +140,19 @@ def _ensure_submodule(root: GitRepository, config: SprintConfig) -> GitRepositor
     )
     registered_paths = [record.partition("\n")[2] for record in registered.split("\0") if record]
     if relative not in registered_paths:
-        raise ControllerError("invalid_submodule", f"Managed repository is not registered in .gitmodules: {config.repository.path}")
-    if not config.repository.path.exists():
-        raise ControllerError("uninitialized_submodule", f"Managed submodule is not initialized: {config.repository.path}")
+        raise ControllerError("invalid_submodule", f"Managed repository is not registered in .gitmodules: {repository.path}")
+    if not repository.path.exists():
+        raise ControllerError("uninitialized_submodule", f"Managed submodule is not initialized: {repository.path}")
     try:
-        managed = inspect_worktree(config.repository.path, expected_root=config.repository.path, error_code="uninitialized_submodule")
+        managed = inspect_worktree(repository.path, expected_root=repository.path, error_code="uninitialized_submodule")
     except ControllerError as error:
         if error.code == "uninitialized_submodule":
             raise
-        raise ControllerError("uninitialized_submodule", f"Managed submodule is not a usable worktree: {config.repository.path}") from error
+        raise ControllerError("uninitialized_submodule", f"Managed submodule is not a usable worktree: {repository.path}") from error
+    try:
+        managed.git_dir.relative_to(root.git_dir / "modules")
+    except ValueError:
+        raise ControllerError("uninitialized_submodule", f"Managed repository is not the registered submodule: {repository.path}")
     if managed.head != gitlink_sha:
         raise ControllerError("submodule_sha_mismatch", f"Managed HEAD {managed.head} differs from gitlink {gitlink_sha}")
     return managed
@@ -149,12 +174,13 @@ def validate_preflight(root: Path, config: SprintConfig, *, require_clean: bool,
     _ensure_no_operation(managed, "Managed repository")
     branch = _run(managed.root, "symbolic-ref", "--quiet", "--short", "HEAD", allow_failure=True).strip()
     if not branch:
-        raise ControllerError("wrong_branch", f"Managed repository is detached; expected branch {config.repository.branch}")
-    if branch != config.repository.branch:
-        raise ControllerError("wrong_branch", f"Managed repository branch is {branch}; expected {config.repository.branch}")
-    remote = _run(managed.root, "remote", "get-url", config.repository.remote, allow_failure=True).strip()
+        raise ControllerError("wrong_branch", f"Managed repository is detached; expected branch {config.repositories[0].branch}")
+    repository = config.repositories[0]
+    if branch != repository.branch:
+        raise ControllerError("wrong_branch", f"Managed repository branch is {branch}; expected {repository.branch}")
+    remote = _run(managed.root, "remote", "get-url", repository.remote, allow_failure=True).strip()
     if not remote:
-        raise ControllerError("missing_remote", f"Managed repository has no remote {config.repository.remote}")
+        raise ControllerError("missing_remote", f"Managed repository has no remote {repository.remote}")
     if require_clean:
         _ensure_clean(managed, "dirty_managed_repository", "Managed repository")
         # A dirty submodule also marks its parent gitlink dirty. Validate the

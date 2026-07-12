@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import os
+import socket
 from pathlib import Path
 from typing import Any
 
 from . import __version__
 from .config import SprintConfig
 from .errors import ControllerError
-from .events import load_events
+from .events import load_events, validate_event_history
+from .jsonio import load_json_object_handle
 from .locking import is_exclusively_locked
 from .paths import RuntimePaths
-from .state import load_state
+from .safeio import open_regular
+from .state import load_state, process_start_identity
 
 
 def _no_run(root: Path) -> dict[str, Any]:
@@ -37,6 +41,40 @@ def _no_run(root: Path) -> dict[str, Any]:
     }
 
 
+def _process_running(run_lock: Path, paths: RuntimePaths, state: dict[str, Any]) -> bool:
+    """Confirm lock ownership belongs to the persisted run when identity is available."""
+    if not is_exclusively_locked(run_lock):
+        return False
+    try:
+        descriptor, directory = open_regular(paths.lock_metadata, os.O_RDONLY)
+        try:
+            with os.fdopen(descriptor, "rb", closefd=True) as handle:
+                metadata = load_json_object_handle(handle, paths.lock_metadata, code="corrupt_state")
+        finally:
+            os.close(directory)
+    except (ControllerError, FileNotFoundError):
+        return False
+    process = state["process"]
+    required = {"schema_version", "run_id", "pid", "process_start", "hostname", "started_at"}
+    if set(metadata) != required or metadata["schema_version"] != 1:
+        return False
+    if metadata["run_id"] != state["run_id"] or metadata["hostname"] != socket.gethostname():
+        return False
+    if metadata["pid"] != process["pid"] or metadata["process_start"] != process["process_start"]:
+        return False
+    if not isinstance(metadata["pid"], int) or isinstance(metadata["pid"], bool) or metadata["pid"] <= 0:
+        return False
+    expected_start = metadata["process_start"]
+    current_start = process_start_identity(metadata["pid"])
+    if expected_start is not None:
+        return isinstance(expected_start, str) and expected_start == current_start
+    try:
+        os.kill(metadata["pid"], 0)
+    except OSError:
+        return False
+    return True
+
+
 def project_status(root: Path, config: SprintConfig, paths: RuntimePaths, run_lock: Path) -> dict[str, Any]:
     """Load, validate, and project current state without mutating workflow data."""
     state_exists = paths.state.exists()
@@ -52,7 +90,7 @@ def project_status(root: Path, config: SprintConfig, paths: RuntimePaths, run_lo
         "controller_version": __version__,
         "sprint_root": str(root),
         "run_exists": True,
-        "process_running": is_exclusively_locked(run_lock),
+        "process_running": _process_running(run_lock, paths, state),
         "run_id": state["run_id"],
         "sprint": {"multisprint": state["multisprint"], "index": state["sprint"]},
         "state": state["state"],
@@ -87,7 +125,7 @@ def validate_persistence(paths: RuntimePaths, config: SprintConfig) -> tuple[dic
     state = load_state(paths.state)
     if state["multisprint"] != config.multisprint or state["sprint"] != config.sprint:
         raise ControllerError("inconsistent_persistence", "Persisted state does not match configured sprint identity")
-    expected_keys = {config.repository.name}
+    expected_keys = {repository.name for repository in config.repositories}
     if set(state["commits"]["local"]) != expected_keys or set(state["commits"]["pushed"]) != expected_keys:
         raise ControllerError("inconsistent_persistence", "Persisted commit maps do not match configured repository")
     events = load_events(paths.events)
@@ -97,9 +135,12 @@ def validate_persistence(paths: RuntimePaths, config: SprintConfig) -> tuple[dic
         raise ControllerError("corrupt_event_log", "Event log is behind persisted state")
     if events[-1]["sequence"] > state["last_event_sequence"]:
         raise ControllerError("inconsistent_persistence", "Event log is ahead of persisted state")
+    validate_event_history(events)
     event = events[-1]
     if event["run_id"] != state["run_id"] or event["state"] != state["state"]:
         raise ControllerError("inconsistent_persistence", "State does not match its last event")
+    if event["timestamp"] != state["updated_at"]:
+        raise ControllerError("inconsistent_persistence", "State update timestamp does not match its last event")
     return state, events
 
 

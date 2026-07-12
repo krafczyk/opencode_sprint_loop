@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ControllerError
-from .events import append_event, load_events, transition_event
+from .events import append_event, load_events, transition_event, validate_event_history
 from .locking import advisory_lock
 from .state import load_state, serialize_state, validate_state, write_state_atomic
 
@@ -31,8 +31,11 @@ def _load_durable_pair(events_path: Path, state_path: Path) -> dict[str, Any]:
         raise ControllerError("corrupt_event_log", "Event log is behind persisted state")
     if event["sequence"] > state["last_event_sequence"]:
         raise ControllerError("inconsistent_persistence", "Event log is ahead of persisted state")
+    validate_event_history(events)
     if event["run_id"] != state["run_id"] or event["state"] != state["state"]:
         raise ControllerError("inconsistent_persistence", "State does not match its last event")
+    if event["timestamp"] != state["updated_at"]:
+        raise ControllerError("inconsistent_persistence", "State update timestamp does not match its last event")
     return state
 
 

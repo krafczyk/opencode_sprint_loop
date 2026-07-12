@@ -334,7 +334,9 @@ class FoundationTests(unittest.TestCase):
         """A complete fixture configuration validates into typed fields."""
         config = load_config(self.root)
         self.assertEqual(config.multisprint, "foundation")
-        self.assertEqual(config.repository.path, self.root / "repositories" / "managed")
+        self.assertEqual(config.repositories[0].path, self.root / "repositories" / "managed")
+        with self.assertRaises(TypeError):
+            config.limits["max_ci_fix_attempts"] = 0  # type: ignore[index]
 
     def test_duplicate_config_keys_are_rejected(self) -> None:
         """Duplicate JSON keys do not silently overwrite configuration."""
@@ -561,6 +563,43 @@ class FoundationTests(unittest.TestCase):
                 (repository / "ignored.txt").write_text("user work\n", encoding="utf-8")
                 expected = "dirty_sprint_repository" if repository_name == "sprint" else "dirty_managed_repository"
                 self.assert_preflight_preserves_snapshot(fixture, expected)
+                self.assertEqual((repository / "ignored.txt").read_text(encoding="utf-8"), "user work\n")
+
+    def test_nested_submodule_dirtiness_cannot_be_hidden_by_git_configuration(self) -> None:
+        """Managed preflight overrides submodule ignore settings when checking cleanliness."""
+        nested = self.fixture.managed / "nested"
+        git(
+            self.fixture.managed,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-b",
+            "main",
+            str(self.fixture.remote),
+            "nested",
+        )
+        git(self.fixture.managed, "config", "user.email", "fixture@example.invalid")
+        git(self.fixture.managed, "config", "user.name", "Fixture")
+        git(self.fixture.managed, "add", ".gitmodules", "nested")
+        git(self.fixture.managed, "commit", "-m", "Add nested submodule")
+        git(self.root, "add", "repositories/managed")
+        git(self.root, "commit", "-m", "Update managed gitlink")
+        git(self.fixture.managed, "config", "submodule.nested.ignore", "all")
+        (nested / "nested-dirty.txt").write_text("dirty\n", encoding="utf-8")
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 2)
+        self.assertIn("dirty_managed_repository", stderr)
+        self.assertFalse((self.root / "info").exists())
+
+    def test_replacement_clone_is_not_accepted_as_registered_submodule(self) -> None:
+        """A same-HEAD repository cannot impersonate the registered submodule checkout."""
+        shutil.rmtree(self.fixture.managed)
+        git(self.fixture.base, "clone", "--branch", "main", str(self.fixture.remote), str(self.fixture.managed))
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 2)
+        self.assertIn("uninitialized_submodule", stderr)
+        self.assertFalse((self.root / "info").exists())
 
     def test_managed_branch_and_remote_failures_preserve_git_snapshots(self) -> None:
         """Managed branch, detached-head, and remote failures do not alter either repository."""
@@ -1058,6 +1097,21 @@ class FoundationTests(unittest.TestCase):
                 self.assertIn("inconsistent_persistence", stderr)
                 self.assertEqual(list(outside.iterdir()), [])
 
+    def test_runtime_reader_rejects_ancestor_replacement_after_preflight(self) -> None:
+        """Descriptor-anchored reads do not follow an `info/` symlink installed after checks."""
+        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        outside = self.fixture.base / "outside-info"
+        (self.root / "info").rename(outside)
+        (self.root / "info").symlink_to(outside, target_is_directory=True)
+        before = {path.relative_to(outside): path.read_bytes() for path in outside.rglob("*") if path.is_file()}
+        with patch("opencode_sprint_loop.cli.ensure_runtime_paths_safe"):
+            code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("corrupt_state", stderr)
+        after = {path.relative_to(outside): path.read_bytes() for path in outside.rglob("*") if path.is_file()}
+        self.assertEqual(after, before)
+
     def test_fifo_runtime_artifacts_are_rejected_without_blocking(self) -> None:
         """Status uses metadata checks and never opens non-regular runtime artifacts."""
         for label, artifact_name in (("state", "state"), ("events", "events"), ("lock", "lock_metadata")):
@@ -1196,6 +1250,21 @@ class FoundationTests(unittest.TestCase):
         metadata = json.loads(paths.lock_metadata.read_text(encoding="utf-8"))
         self.assertEqual(metadata["schema_version"], 1)
 
+    def test_ignored_stale_lock_metadata_does_not_block_first_run(self) -> None:
+        """An aggregate ignored `info/` record still permits only stale lock metadata."""
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        paths.lock_metadata.parent.mkdir(parents=True)
+        paths.lock_metadata.write_text("not-json\n", encoding="utf-8")
+        exclude = Path(git(self.root, "rev-parse", "--git-path", "info/exclude"))
+        if not exclude.is_absolute():
+            exclude = self.root / exclude
+        with exclude.open("a", encoding="utf-8") as handle:
+            handle.write("info/\n")
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 4, stderr)
+        self.assertEqual(json.loads(paths.lock_metadata.read_text(encoding="utf-8"))["schema_version"], 1)
+
     def test_post_lock_revalidation_rejects_a_run_created_by_a_racing_process(self) -> None:
         """A run that passed initial preflight cannot overwrite a later completed run."""
         from opencode_sprint_loop import cli
@@ -1305,6 +1374,46 @@ class FoundationTests(unittest.TestCase):
         code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 2)
         self.assertIn("inconsistent_persistence", stderr)
+
+    def test_status_rejects_semantically_forged_event_history(self) -> None:
+        """Matching sequence and final state cannot disguise an impossible transition history."""
+        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        paths = runtime_paths(self.root, "foundation", 1)
+        events = [json.loads(line) for line in paths.events.read_text(encoding="utf-8").splitlines()]
+        events[0]["type"] = "state.entered"
+        paths.events.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+        code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 2)
+        self.assertIn("corrupt_event_log", stderr)
+
+    def test_hardlinked_runtime_artifacts_and_locks_are_rejected(self) -> None:
+        """Controller writes cannot target runtime or lock inodes aliased outside their roots."""
+        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        paths = runtime_paths(self.root, "foundation", 1)
+        outside_event = self.fixture.base / "outside-events"
+        outside_event.write_text("outside\n", encoding="utf-8")
+        paths.events.unlink()
+        os.link(outside_event, paths.events)
+        code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 2)
+        self.assertIn("persistence_failed", stderr)
+        self.assertEqual(outside_event.read_text(encoding="utf-8"), "outside\n")
+
+        git_dir = Path(git(self.root, "rev-parse", "--git-dir"))
+        if not git_dir.is_absolute():
+            git_dir = (self.root / git_dir).resolve()
+        lock = git_dir / "opencode-sprint-loop" / "run.lock"
+        outside_lock = self.fixture.base / "outside-lock"
+        outside_lock.write_text("outside\n", encoding="utf-8")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        if lock.exists():
+            lock.unlink()
+        os.link(outside_lock, lock)
+        with self.assertRaises(ControllerError) as context:
+            with advisory_lock(lock, exclusive=True):
+                pass
+        self.assertEqual(context.exception.code, "persistence_failed")
+        self.assertEqual(outside_lock.read_text(encoding="utf-8"), "outside\n")
 
     def test_state_validation_rejects_contract_invalid_values(self) -> None:
         """Persisted state fails closed for invalid fields and unknown schema members."""

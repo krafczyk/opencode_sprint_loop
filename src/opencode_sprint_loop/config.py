@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+from types import MappingProxyType
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .errors import ControllerError
 from .jsonio import load_json_object
@@ -31,14 +32,14 @@ class SprintConfig:
 
     multisprint: str
     sprint: int
-    repository: RepositoryConfig
-    documents: dict[str, Path]
-    agents: dict[str, str]
-    models: dict[str, str]
+    repositories: tuple[RepositoryConfig, ...]
+    documents: Mapping[str, Path]
+    agents: Mapping[str, str]
+    models: Mapping[str, str]
     pre_ci_enabled: bool
     pre_ci_max_rounds: int
-    limits: dict[str, int]
-    ci: dict[str, Any]
+    limits: Mapping[str, int]
+    ci: Mapping[str, Any]
 
 
 def _expect_keys(data: dict[str, Any], expected: set[str], field: str) -> None:
@@ -189,6 +190,14 @@ def load_config(root: Path) -> SprintConfig:
         "zero_checks": zero_checks,
     }
     return SprintConfig(
-        multisprint, sprint, repository, documents, agents, models,
-        audit_data["enabled"], _positive_int(audit_data["max_rounds"], "pre_ci_audit.max_rounds"), limits, ci,
+        multisprint,
+        sprint,
+        (repository,),
+        MappingProxyType(documents),
+        MappingProxyType(agents),
+        MappingProxyType(models),
+        audit_data["enabled"],
+        _positive_int(audit_data["max_rounds"], "pre_ci_audit.max_rounds"),
+        MappingProxyType(limits),
+        MappingProxyType(ci),
     )

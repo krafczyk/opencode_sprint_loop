@@ -4,23 +4,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from .errors import ControllerError
 
 MAX_JSON_BYTES = 1024 * 1024
 
 
-def load_json_object(path: Path, *, code: str) -> dict[str, Any]:
-    """Load one bounded UTF-8 JSON object while rejecting duplicate keys."""
+def load_json_object_handle(handle: BinaryIO, path: Path, *, code: str) -> dict[str, Any]:
+    """Load one bounded UTF-8 JSON object from an already-safe file handle."""
     try:
-        with path.open("rb") as handle:
-            if handle.seek(0, 2) > MAX_JSON_BYTES:
-                raise ControllerError(code, f"JSON input exceeds 1 MiB: {path}")
-            handle.seek(0)
-            raw = handle.read(MAX_JSON_BYTES + 1)
-    except FileNotFoundError as error:
-        raise ControllerError("missing_required_file", f"Required file is missing: {path}") from error
+        if handle.seek(0, 2) > MAX_JSON_BYTES:
+            raise ControllerError(code, f"JSON input exceeds 1 MiB: {path}")
+        handle.seek(0)
+        raw = handle.read(MAX_JSON_BYTES + 1)
     except OSError as error:
         raise ControllerError(code, f"Cannot inspect JSON input: {path}") from error
     if len(raw) > MAX_JSON_BYTES:
@@ -53,6 +50,17 @@ def load_json_object(path: Path, *, code: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ControllerError(code, f"JSON root must be an object: {path}")
     return data
+
+
+def load_json_object(path: Path, *, code: str) -> dict[str, Any]:
+    """Load one bounded UTF-8 JSON object while rejecting duplicate keys."""
+    try:
+        with path.open("rb") as handle:
+            return load_json_object_handle(handle, path, code=code)
+    except FileNotFoundError as error:
+        raise ControllerError("missing_required_file", f"Required file is missing: {path}") from error
+    except OSError as error:
+        raise ControllerError(code, f"Cannot inspect JSON input: {path}") from error
 
 
 def dump_json(data: object) -> str:

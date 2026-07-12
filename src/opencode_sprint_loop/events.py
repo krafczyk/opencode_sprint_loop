@@ -11,6 +11,7 @@ from typing import Any
 
 from .errors import ControllerError
 from .jsonio import MAX_JSON_BYTES
+from .safeio import open_directory, open_regular, open_regular_at
 from .state import RFC3339_UTC, STATE_NAMES, utc_now
 
 EVENT_TYPES = frozenset({
@@ -18,6 +19,13 @@ EVENT_TYPES = frozenset({
     "agent.interrupted", "git.committed", "git.pushed", "ci.discovered", "ci.completed",
     "audit.completed", "run.paused", "run.blocked", "run.stopped", "run.finished",
 })
+
+_SPRINT_ONE_TRANSITIONS = {
+    ("initializing", "validating"): "state.entered",
+    ("validating", "blocked"): "run.blocked",
+    ("initializing", "failed"): "state.entered",
+    ("validating", "failed"): "state.entered",
+}
 
 _EVENT_FIELDS = {"schema_version", "sequence", "timestamp", "run_id", "type", "state", "payload"}
 
@@ -55,39 +63,47 @@ def validate_event(event: dict[str, Any], *, code: str = "corrupt_event_log") ->
 
 def load_events(path: Path) -> list[dict[str, Any]]:
     """Load and validate an append-only JSONL event log."""
-    if not path.exists():
-        return []
     events: list[dict[str, Any]] = []
     try:
-        with path.open("rb") as handle:
-            number = 0
-            while True:
-                raw = handle.readline(MAX_JSON_BYTES + 1)
-                if not raw:
-                    break
-                number += 1
-                if len(raw) > MAX_JSON_BYTES:
-                    raise ControllerError("corrupt_event_log", f"Event line {number} exceeds 1 MiB")
-                if not raw.endswith(b"\n"):
-                    raise ControllerError("corrupt_event_log", f"Event line {number} is partial")
-                def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-                    result: dict[str, Any] = {}
-                    for key, value in pairs:
-                        if key in result:
-                            raise ControllerError("corrupt_event_log", f"Duplicate JSON key {key!r} in event line {number}")
-                        result[key] = value
-                    return result
-                try:
-                    event = json.loads(
-                        raw.decode("utf-8"),
-                        object_pairs_hook=reject_duplicates,
-                        parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
-                    )
-                except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
-                    raise ControllerError("corrupt_event_log", f"Malformed event line {number}") from error
-                if not isinstance(event, dict):
-                    raise ControllerError("corrupt_event_log", f"Event line {number} is not an object")
-                events.append(event)
+        descriptor, directory = open_regular(path, os.O_RDONLY)
+        try:
+            with os.fdopen(descriptor, "rb", closefd=True) as handle:
+                number = 0
+                while True:
+                    raw = handle.readline(MAX_JSON_BYTES + 1)
+                    if not raw:
+                        break
+                    number += 1
+                    if len(raw) > MAX_JSON_BYTES:
+                        raise ControllerError("corrupt_event_log", f"Event line {number} exceeds 1 MiB")
+                    if not raw.endswith(b"\n"):
+                        raise ControllerError("corrupt_event_log", f"Event line {number} is partial")
+
+                    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                        result: dict[str, Any] = {}
+                        for key, value in pairs:
+                            if key in result:
+                                raise ControllerError(
+                                    "corrupt_event_log", f"Duplicate JSON key {key!r} in event line {number}"
+                                )
+                            result[key] = value
+                        return result
+
+                    try:
+                        event = json.loads(
+                            raw.decode("utf-8"),
+                            object_pairs_hook=reject_duplicates,
+                            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+                        )
+                    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
+                        raise ControllerError("corrupt_event_log", f"Malformed event line {number}") from error
+                    if not isinstance(event, dict):
+                        raise ControllerError("corrupt_event_log", f"Event line {number} is not an object")
+                    events.append(event)
+        finally:
+            os.close(directory)
+    except FileNotFoundError:
+        return []
     except OSError as error:
         raise ControllerError("corrupt_event_log", f"Cannot read event log: {path}") from error
     expected = 1
@@ -103,6 +119,31 @@ def load_events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+def validate_event_history(events: list[dict[str, Any]]) -> None:
+    """Require persisted Sprint 1 events to describe a reachable history."""
+    if not events:
+        raise ControllerError("corrupt_event_log", "State exists but event log is empty")
+    first = events[0]
+    if first["type"] != "run.started" or first["state"] != "initializing":
+        raise ControllerError("corrupt_event_log", "First event must start an initializing run")
+    if first["payload"] != {"previous_state": None}:
+        raise ControllerError("corrupt_event_log", "Initial event payload is invalid")
+    previous = "initializing"
+    for event in events[1:]:
+        destination = event["state"]
+        expected_type = _SPRINT_ONE_TRANSITIONS.get((previous, destination))
+        if event["type"] != expected_type:
+            raise ControllerError("corrupt_event_log", "Event does not describe an allowed Sprint 1 transition")
+        payload = event["payload"]
+        if payload.get("previous_state") != previous:
+            raise ControllerError("corrupt_event_log", "Event prior state is inconsistent")
+        if destination in {"blocked", "failed"}:
+            reason = payload.get("reason")
+            if not isinstance(reason, dict) or not reason.get("code") or not reason.get("message"):
+                raise ControllerError("corrupt_event_log", "Blocked or failed event requires a reason")
+        previous = destination
+
+
 def append_event(path: Path, event: dict[str, Any]) -> None:
     """Durably append one event or raise ``ControllerError`` without rewriting history."""
     validate_event(event, code="persistence_failed")
@@ -113,18 +154,9 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
     if len(serialized) > MAX_JSON_BYTES:
         raise ControllerError("persistence_failed", "Event exceeds 1 MiB")
     try:
-        if os.path.lexists(path) and path.is_symlink():
-            raise ControllerError("persistence_failed", f"Event log must not be a symlink: {path}")
-        created = not path.exists()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        directory = open_directory(path.parent, create=True)
         try:
-            descriptor = os.open(
-                path.name,
-                os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
-                0o600,
-                dir_fd=directory,
-            )
+            descriptor = open_regular_at(directory, path.name, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
             try:
                 written = os.write(descriptor, serialized)
                 if written != len(serialized):
@@ -132,14 +164,9 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
+            os.fsync(directory)
         finally:
             os.close(directory)
-        if created:
-            directory_descriptor = os.open(path.parent, os.O_DIRECTORY)
-            try:
-                os.fsync(directory_descriptor)
-            finally:
-                os.close(directory_descriptor)
     except OSError as error:
         raise ControllerError("persistence_failed", f"Could not append event: {path}") from error
 

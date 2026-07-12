@@ -17,6 +17,7 @@ from .errors import ControllerError
 from .git import validate_preflight, validate_root
 from .locking import advisory_lock
 from .paths import RuntimePaths, canonical_root, ensure_runtime_paths_safe, runtime_paths
+from .safeio import open_directory
 from .state import new_state, process_start_identity
 from .status import format_status, project_status, validate_persistence
 from .transitions import persist_initial, transition
@@ -84,8 +85,7 @@ def _write_lock_metadata(path: Path, state: dict[str, object]) -> None:
     temporary_name: str | None = None
     directory: int | None = None
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        directory = open_directory(path.parent, create=True)
         temporary_name = f".lock-{secrets.token_hex(16)}.tmp"
         descriptor = os.open(
             temporary_name,
@@ -177,7 +177,7 @@ def _run(root_value: str, server_url: str) -> int:
                     "details": {},
                 },
             )
-        except Exception:
+        except BaseException:
             _persist_best_effort_failure(paths, config, persistence_lock)
             raise
     sys.stderr.write("execution_not_implemented: Sprint execution begins in a later implementation sprint.\n")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import socket
+import stat
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +13,8 @@ from typing import Any
 
 from .config import SprintConfig
 from .errors import ControllerError
-from .jsonio import dump_json, load_json_object
+from .jsonio import dump_json, load_json_object_handle
+from .safeio import open_directory, open_regular
 
 STATE_NAMES = frozenset({
     "initializing", "validating", "implementing", "committing", "pre_ci_auditing", "pushing",
@@ -57,7 +59,7 @@ def process_start_identity(pid: int) -> str | None:
 def new_state(config: SprintConfig) -> dict[str, Any]:
     """Build a complete initial state with all Sprint 1 status fields reserved."""
     timestamp = utc_now()
-    repository = config.repository.name
+    repositories = {repository.name: None for repository in config.repositories}
     return {
         "schema_version": 1,
         "run_id": str(uuid.uuid4()),
@@ -73,7 +75,7 @@ def new_state(config: SprintConfig) -> dict[str, Any]:
         },
         "server": {"url": None, "version": None},
         "active_invocation": None,
-        "commits": {"local": {repository: None}, "pushed": {repository: None}},
+        "commits": {"local": dict(repositories), "pushed": dict(repositories)},
         "audit": {
             "phase": None,
             "pre_ci_round": 0,
@@ -209,7 +211,17 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
 
 def load_state(path: Path) -> dict[str, Any]:
     """Load and validate a current state snapshot."""
-    return validate_state(load_json_object(path, code="corrupt_state"))
+    try:
+        descriptor, directory = open_regular(path, os.O_RDONLY)
+        try:
+            with os.fdopen(descriptor, "rb", closefd=True) as handle:
+                return validate_state(load_json_object_handle(handle, path, code="corrupt_state"))
+        finally:
+            os.close(directory)
+    except FileNotFoundError as error:
+        raise ControllerError("corrupt_state", f"State file is missing: {path}") from error
+    except OSError as error:
+        raise ControllerError("corrupt_state", f"Cannot read state file: {path}") from error
 
 
 def serialize_state(state: dict[str, Any]) -> str:
@@ -227,10 +239,13 @@ def write_state_atomic(path: Path, state: dict[str, Any]) -> None:
     temporary_name: str | None = None
     directory: int | None = None
     try:
-        if os.path.lexists(path) and path.is_symlink():
-            raise ControllerError("persistence_failed", f"State file must not be a symlink: {path}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        directory = open_directory(path.parent, create=True)
+        try:
+            existing = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+            if not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1:
+                raise ControllerError("persistence_failed", f"State file must be an unlinked regular file: {path}")
+        except FileNotFoundError:
+            pass
         temporary_name = f".state-{uuid.uuid4().hex}.tmp"
         descriptor = os.open(
             temporary_name,
