@@ -15,6 +15,16 @@ Read these before changing behavior:
 
 The V1 final software specification is authoritative. If an implementation decision changes a durable schema, CLI contract, Git ownership rule, CI success rule, or terminal-state rule, update the specification deliberately rather than allowing code and documentation to diverge.
 
+## Finding the Current Sprint
+
+- Sprint implementation documents live under `docs/controller-v1/<sprint_number>/`.
+- An explicit sprint named by the user takes precedence over repository inference.
+- Otherwise, inspect numbered sprint directories in ascending numeric order. The current sprint is the first one whose `sprint_checklist.md` Completion Gate is not fully checked.
+- A sprint directory is valid only when it contains both `sprint_spec.md` and `sprint_checklist.md`. If the inferred directory is incomplete or sprint ordering is ambiguous, stop and ask rather than guessing.
+- Before implementing, read the current sprint's specification and checklist together with both authoritative documents above.
+- Do not begin work from a future sprint merely because it appears in `docs/multi_sprint_plan.md`; detailed sprint documents must exist and all earlier sprint Completion Gates must be complete.
+- Keep checklist boxes synchronized with verified implementation. Do not mark an item complete before its code, tests, documentation, and required verification are finished.
+
 ## Architecture Boundaries
 
 - The Python controller owns workflow state, transitions, persistence, Git commits and pushes, GitHub CI evaluation, and recovery decisions.
