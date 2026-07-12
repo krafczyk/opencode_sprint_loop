@@ -414,6 +414,15 @@ class FoundationTests(unittest.TestCase):
             load_config(self.root)
         self.assertEqual(context.exception.code, "invalid_config")
 
+    def test_nested_duplicate_config_keys_are_rejected(self) -> None:
+        """Duplicate keys below the configuration root cannot silently override a value."""
+        path = self.root / "sprint_config.json"
+        contents = path.read_text(encoding="utf-8")
+        path.write_text(contents.replace('"provider": "github"', '"provider": "github", "provider": "github"', 1), encoding="utf-8")
+        with self.assertRaises(ControllerError) as context:
+            load_config(self.root)
+        self.assertEqual(context.exception.code, "invalid_config")
+
     def test_unknown_schema_fails_without_runtime_artifacts(self) -> None:
         """Unsupported configuration schema fails before controller artifacts exist."""
         write_config(self.root, schema_version=2)
@@ -1212,6 +1221,26 @@ class FoundationTests(unittest.TestCase):
         self.assertNotIn("synthetic-secret", diagnostic)
         self.assertIn("[REDACTED]", diagnostic)
 
+        for value in ("password: synthetic-secret", "token=synthetic-secret", "https://example.invalid/#token=synthetic-secret"):
+            with self.subTest(value=value):
+                event = transition_event(new_state(load_config(self.root)), "run.started", "initializing", {"previous_state": None, "note": value})
+                with self.assertRaises(ControllerError) as context:
+                    append_event(self.root / "info" / "events.jsonl", event)
+                self.assertEqual(context.exception.code, "persistence_failed")
+                self.assertNotIn("synthetic-secret", redact_diagnostic(value))
+
+    def test_configured_remote_secret_is_redacted_from_diagnostics(self) -> None:
+        """Configuration-derived Git diagnostics cannot expose sensitive remote values."""
+        data = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
+        data["repositories"][0]["remote"] = "token=synthetic-secret"
+        (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 2)
+        self.assertIn("missing_remote", stderr)
+        self.assertNotIn("synthetic-secret", stderr)
+        self.assertIn("[REDACTED]", stderr)
+        self.assertFalse((self.root / "info").exists())
+
     def test_deferred_commands_validate_required_inputs(self) -> None:
         """Reserved controls reject invalid roots and empty resume URLs before feature errors."""
         code, _, stderr = self.invoke(["pause", "--root", str(self.root / "missing")])
@@ -1264,6 +1293,24 @@ class FoundationTests(unittest.TestCase):
                     load_events(paths.events)
                 self.assertEqual(context.exception.code, "corrupt_event_log")
         paths.events.write_text("".join(json.dumps(event) + "\n" for event in original[:2]), encoding="utf-8")
+        code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 2)
+        self.assertIn("corrupt_event_log", stderr)
+
+    def test_duplicate_state_and_event_json_keys_fail_closed(self) -> None:
+        """Duplicate state and event keys cannot be hidden behind otherwise valid persistence."""
+        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        paths = runtime_paths(self.root, "foundation", 1)
+        state = paths.state.read_text(encoding="utf-8")
+        paths.state.write_text(state.replace('"state": "blocked"', '"state": "blocked", "state": "blocked"', 1), encoding="utf-8")
+        code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 2)
+        self.assertIn("corrupt_state", stderr)
+
+        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 2)
+        paths.state.write_text(state, encoding="utf-8")
+        events = paths.events.read_text(encoding="utf-8")
+        paths.events.write_text(events.replace('"sequence": 1', '"sequence": 1, "sequence": 1', 1), encoding="utf-8")
         code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 2)
         self.assertIn("corrupt_event_log", stderr)
@@ -1954,6 +2001,22 @@ class FoundationTests(unittest.TestCase):
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
         self.assertEqual(code, 4, stderr)
         self.assertEqual(json.loads(paths.lock_metadata.read_text(encoding="utf-8"))["schema_version"], 1)
+
+    def test_ignored_stale_lock_metadata_cannot_hide_extra_directories(self) -> None:
+        """The stale-lock exception rejects ignored controller trees with any extra content."""
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        paths.lock_metadata.parent.mkdir(parents=True)
+        paths.lock_metadata.write_text("not-json\n", encoding="utf-8")
+        (paths.info_dir / "unexpected").mkdir()
+        exclude = Path(git(self.root, "rev-parse", "--git-path", "info/exclude"))
+        if not exclude.is_absolute():
+            exclude = self.root / exclude
+        with exclude.open("a", encoding="utf-8") as handle:
+            handle.write("info/\n")
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 2)
+        self.assertIn("dirty_sprint_repository", stderr)
 
     def test_post_lock_revalidation_rejects_a_run_created_by_a_racing_process(self) -> None:
         """A run that passed initial preflight cannot overwrite a later completed run."""

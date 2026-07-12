@@ -182,10 +182,13 @@ The tests create temporary local Git repositories and submodules. They do not re
 
 ## Sprint 1 Demonstration
 
-Run one self-contained demonstration against a real temporary Git repository and initialized submodule:
+Build and install a wheel in a clean environment, then run the demonstration against a real temporary Git repository and initialized submodule:
 
 ```bash
-python3 scripts/demo_sprint1.py --executable sprint-loop
+python3 -m build
+python3 -m venv /tmp/sprint-loop-demo-venv
+/tmp/sprint-loop-demo-venv/bin/python -m pip install --no-deps dist/opencode_sprint_loop-0.1.0-py3-none-any.whl
+/tmp/sprint-loop-demo-venv/bin/python scripts/demo_sprint1.py --executable /tmp/sprint-loop-demo-venv/bin/sprint-loop
 ```
 
 Pass `--keep /tmp/sprint-loop-demo` to retain the generated repository for manual inspection. The script shows help, version, human and JSON no-run status, a real controller paused in `validating` with cross-process status, explicit OS-lock rejection, the real submodule, placeholder execution, `state.json`, ordered events, and human and JSON post-run status without a live OpenCode server or GitHub credentials.

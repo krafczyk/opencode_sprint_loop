@@ -12,7 +12,8 @@ _SENSITIVE_FIELD = re.compile(r"(?:credential|password|secret|token|api[_-]?key|
 _CREDENTIAL_VALUE = re.compile(
     r"(?:\b(?:authorization|proxy-authorization)\s*:\s*(?:basic|bearer)\s+\S+|"
     r"https?://[^/\s@]+@|"
-    r"[?&](?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)=[^&#\s]+|"
+    r"[?&#](?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)=[^&#\s]+|"
+    r"(?<![a-z0-9_-])(?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)\s*(?:=|:)\s*\S+|"
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----)",
     re.IGNORECASE,
 )
@@ -39,14 +40,19 @@ def validate_safe_data(value: Any, *, code: str, label: str) -> None:
 
 def redact_diagnostic(message: str) -> str:
     """Redact common credentials from diagnostics before writing standard error."""
+    message = re.sub(
+        r"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*(?:basic|bearer)\s+)\S+",
+        r"\1[REDACTED]",
+        message,
+    )
     message = re.sub(r"(?i)(https?://)[^/\s@]+@", r"\1[REDACTED]@", message)
     message = re.sub(
-        r"(?i)([?&](?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)=)[^&#\s]+",
+        r"(?i)([?&#](?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)=)[^&#\s]+",
         r"\1[REDACTED]",
         message,
     )
     return re.sub(
-        r"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*(?:basic|bearer)\s+)\S+",
+        r"(?i)((?<![a-z0-9_-])(?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)\s*(?:=|:)\s*)\S+",
         r"\1[REDACTED]",
         message,
     )

@@ -51,7 +51,8 @@ def validate_event(event: dict[str, Any], *, code: str = "corrupt_event_log") ->
     if not isinstance(event["timestamp"], str) or not RFC3339_UTC.fullmatch(event["timestamp"]):
         raise ControllerError(code, "Event timestamp is invalid")
     try:
-        parsed = datetime.fromisoformat(event["timestamp"].removesuffix("Z") + "+00:00")
+        timestamp = event["timestamp"]
+        parsed = datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00" if timestamp.endswith("Z") else timestamp)
     except ValueError as error:
         raise ControllerError(code, "Event timestamp is invalid") from error
     if parsed.tzinfo is None:

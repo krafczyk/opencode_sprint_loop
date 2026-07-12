@@ -95,14 +95,21 @@ def _ignored_tree_contains_only(root: Path, relative: str, allowed: set[str]) ->
     tree = root / relative
     if not tree.is_dir() or tree.is_symlink():
         return False
-    for current, directories, files in os.walk(tree, followlinks=False):
-        if any((Path(current) / directory).is_symlink() for directory in directories):
-            return False
+    errors: list[OSError] = []
+    for current, directories, files in os.walk(tree, followlinks=False, onerror=errors.append):
+        for directory in directories:
+            candidate = Path(current) / directory
+            try:
+                candidate_relative = candidate.relative_to(root).as_posix()
+            except ValueError:
+                return False
+            if candidate.is_symlink() or not any(path.startswith(f"{candidate_relative}/") for path in allowed):
+                return False
         for filename in files:
             candidate = Path(current) / filename
             if candidate.is_symlink() or candidate.relative_to(root).as_posix() not in allowed:
                 return False
-    return True
+    return not errors
 
 
 def _ensure_no_operation(repository: GitRepository, label: str) -> None:
