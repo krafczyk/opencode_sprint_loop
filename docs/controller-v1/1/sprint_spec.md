@@ -420,7 +420,7 @@ A PID file or `lock.json` alone is insufficient.
 
 ### 9.2 Lock Location
 
-The run-ownership and persistence lock files should reside under the sprint repository's Git metadata or another local non-versioned path derived from the canonical root. They must not require the sprint repository worktree to be dirty merely to hold an OS lock. Creating these local lock artifacts is not a workflow-state mutation and is permitted for no-run status; status must not create `info/`, state, events, or any other worktree file.
+The run-ownership and persistence advisory locks must use distinct stable files under the sprint repository's Git metadata or another local non-versioned path derived from the canonical root. They must not require the sprint repository worktree to be dirty merely to hold an OS lock. Controller-created replaceable lock pathnames must not be used as the sole ownership rendezvous, because replacement would sever the pathname from an already-held advisory lock. Status must not create `info/`, state, events, or any other worktree file.
 
 `lock.json` is written under the active sprint information directory only after all preflight checks succeed and ownership is acquired.
 

@@ -1,1 +1,1 @@
-"""Sprint Loop Controller tests."""
+"""Sprint Loop Controller test package."""

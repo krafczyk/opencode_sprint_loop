@@ -21,7 +21,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S1-PKG-002** Register the `sprint-loop` console entry point.
 - [x] **S1-PKG-003** Create the Python package under `src/opencode_sprint_loop/`.
 - [x] **S1-PKG-004** Expose a package version used by `sprint-loop --version` and status output.
-- [ ] **S1-PKG-005** Add a test package with separate unit and integration-oriented areas or equivalent clear organization.
+- [x] **S1-PKG-005** Add a test package with separate unit and integration-oriented areas or equivalent clear organization.
 - [x] **S1-PKG-006** Ensure a clean editable or wheel installation exposes `sprint-loop` without relying on the repository working directory.
 - [x] **S1-PKG-007** Configure the default test command so it runs without network access, credentials, OpenCode, GitHub, or global Git identity.
 - [x] **S1-PKG-008** Add formatting, linting, and type-check configuration selected for the project, or document why a category is intentionally deferred.
@@ -151,7 +151,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S1-SAFE-006** Compare branches before and after failure.
 - [x] **S1-SAFE-007** Compare index identities or staged diffs before and after failure.
 - [x] **S1-SAFE-008** Compare porcelain status before and after failure.
-- [ ] **S1-SAFE-009** Verify no commit, stash, reset, clean, checkout, switch, add, or push command is invoked.
+- [x] **S1-SAFE-009** Verify no commit, stash, reset, clean, checkout, switch, add, or push command is invoked.
 - [x] **S1-SAFE-010** Check for existing state and event artifacts before worktree cleanliness so valid controller-owned runtime files produce `run_already_exists` and malformed/incomplete artifacts produce persistence errors rather than `dirty_sprint_repository`.
 - [x] **S1-SAFE-011** Repeat existing-state and concurrency-sensitive repository checks after acquiring ownership and before runtime mutation.
 - [x] **S1-SAFE-012** Prove a post-lock revalidation failure creates no runtime files and releases ownership.
@@ -305,15 +305,15 @@ An item may be checked only when its implementation, tests, and required documen
 
 ## 20. Automated Verification
 
-- [ ] **S1-TEST-001** Add unit coverage for every configuration rule.
+- [x] **S1-TEST-001** Add unit coverage for every configuration rule.
 - [x] **S1-TEST-002** Add unit coverage for duplicate-key JSON detection.
-- [ ] **S1-TEST-003** Add unit coverage for path containment and symlink escape.
+- [x] **S1-TEST-003** Add unit coverage for path containment and symlink escape.
 - [x] **S1-TEST-004** Add unit coverage for state and event model validation.
 - [x] **S1-TEST-005** Add unit coverage for every allowed and representative rejected transition.
 - [x] **S1-TEST-006** Add atomic-write fault-injection coverage.
 - [x] **S1-TEST-007** Add append-only event and consistency fault coverage.
-- [ ] **S1-TEST-008** Add repository integration coverage for every sprint root failure class.
-- [ ] **S1-TEST-009** Add repository integration coverage for every managed submodule failure class.
+- [x] **S1-TEST-008** Add repository integration coverage for every sprint root failure class.
+- [x] **S1-TEST-009** Add repository integration coverage for every managed submodule failure class.
 - [x] **S1-TEST-010** Add mutation-invariant assertions to invalid preflight tests.
 - [x] **S1-TEST-011** Add concurrent ownership coverage using separate processes, not only threads.
 - [x] **S1-TEST-012** Add stale and malformed metadata plus process-identity coverage.
@@ -395,10 +395,10 @@ An item may be checked only when its implementation, tests, and required documen
 
 ## 25. Completion Gate
 
-- [ ] **S1-DONE-001** Every applicable checklist item above is checked.
-- [ ] **S1-DONE-002** All Sprint 1 acceptance criteria in `sprint_spec.md` are demonstrably satisfied.
+- [x] **S1-DONE-001** Every applicable checklist item above is checked.
+- [x] **S1-DONE-002** All Sprint 1 acceptance criteria in `sprint_spec.md` are demonstrably satisfied.
 - [x] **S1-DONE-003** The narrow test suites pass during development.
-- [ ] **S1-DONE-004** The complete default test suite passes.
+- [x] **S1-DONE-004** The complete default test suite passes.
 - [x] **S1-DONE-005** Formatting, linting, type checking, package build, and clean-install smoke tests pass.
 - [x] **S1-DONE-006** `git diff --check` passes.
 - [x] **S1-DONE-007** Final repository status contains only intended Sprint 1 changes.

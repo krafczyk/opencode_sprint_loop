@@ -34,14 +34,19 @@ def utc_now() -> str:
 
 def _timestamp(value: Any, field: str) -> None:
     """Validate one timezone-aware RFC 3339 timestamp."""
-    if not isinstance(value, str) or not RFC3339_UTC.fullmatch(value):
+    if not is_rfc3339_utc(value):
         raise ControllerError("corrupt_state", f"State {field} is not an RFC 3339 UTC timestamp")
+
+
+def is_rfc3339_utc(value: Any) -> bool:
+    """Return whether ``value`` is a complete RFC 3339 UTC timestamp."""
+    if not isinstance(value, str) or not RFC3339_UTC.fullmatch(value):
+        return False
     try:
         parsed = datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
-    except ValueError as error:
-        raise ControllerError("corrupt_state", f"State {field} is not an RFC 3339 UTC timestamp") from error
-    if parsed.tzinfo != UTC:
-        raise ControllerError("corrupt_state", f"State {field} is not an RFC 3339 UTC timestamp")
+    except ValueError:
+        return False
+    return parsed.tzinfo == UTC
 
 
 def process_start_identity(pid: int) -> str | None:
@@ -163,33 +168,34 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
     if process["process_start"] is not None and (not isinstance(process["process_start"], str) or not process["process_start"]):
         raise ControllerError("corrupt_state", "State process_start is invalid")
     server = _exact_fields(data["server"], {"url", "version"}, "server")
-    _nullable_string(server["url"], "server.url")
-    _nullable_string(server["version"], "server.version")
+    if server["url"] is not None or server["version"] is not None:
+        raise ControllerError("corrupt_state", "Sprint 1 server fields must be null")
     if data["active_invocation"] is not None:
         raise ControllerError("corrupt_state", "Sprint 1 active_invocation must be null")
 
     commits = _exact_fields(data["commits"], {"local", "pushed"}, "commits")
     if not isinstance(commits["local"], dict) or not isinstance(commits["pushed"], dict):
         raise ControllerError("corrupt_state", "State commit maps are invalid")
-    if any(not isinstance(key, str) or not key or value is not None and not isinstance(value, str) for commit_map in commits.values() for key, value in commit_map.items()):
+    if any(not isinstance(key, str) or not key or value is not None for commit_map in commits.values() for key, value in commit_map.items()):
         raise ControllerError("corrupt_state", "State commit values are invalid")
 
     audit = _exact_fields(data["audit"], {"phase", "pre_ci_round", "pre_ci_max_rounds", "latest_report", "remaining_effort"}, "audit")
     if _nonnegative_int(audit["pre_ci_round"], "audit.pre_ci_round") < 0 or not isinstance(audit["pre_ci_max_rounds"], int) or isinstance(audit["pre_ci_max_rounds"], bool) or audit["pre_ci_max_rounds"] <= 0:
         raise ControllerError("corrupt_state", "State audit counters are invalid")
-    _nullable_string(audit["phase"], "audit.phase")
-    _nullable_string(audit["latest_report"], "audit.latest_report")
-    _nullable_string(audit["remaining_effort"], "audit.remaining_effort")
+    if audit["pre_ci_round"] != 0 or any(audit[field] is not None for field in ("phase", "latest_report", "remaining_effort")):
+        raise ControllerError("corrupt_state", "Sprint 1 audit fields must be reserved")
 
     ci = _exact_fields(data["ci"], {"attempt", "commit_sha", "status", "checks"}, "ci")
     if _nonnegative_int(ci["attempt"], "ci.attempt") < 0 or not isinstance(ci["checks"], list):
         raise ControllerError("corrupt_state", "State CI fields are invalid")
-    if not isinstance(ci["status"], str) or ci["commit_sha"] is not None and not isinstance(ci["commit_sha"], str):
+    if ci["attempt"] != 0 or ci["commit_sha"] is not None or ci["status"] != "not_started" or ci["checks"] != []:
         raise ControllerError("corrupt_state", "State CI metadata is invalid")
 
     counters = _exact_fields(data["counters"], {"implementation_cycles", "ci_fix_attempts"}, "counters")
     _nonnegative_int(counters["implementation_cycles"], "counters.implementation_cycles")
     _nonnegative_int(counters["ci_fix_attempts"], "counters.ci_fix_attempts")
+    if counters["implementation_cycles"] != 0 or counters["ci_fix_attempts"] != 0:
+        raise ControllerError("corrupt_state", "Sprint 1 counters must be zero")
 
     checklist = _exact_fields(data["checklist"], {"satisfied", "partial", "unsatisfied", "not_evaluated", "assessed_at", "items"}, "checklist")
     if not isinstance(checklist["items"], list):
@@ -198,17 +204,17 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
         _nonnegative_int(checklist[field], f"checklist.{field}")
     if checklist["assessed_at"] is not None:
         _timestamp(checklist["assessed_at"], "checklist.assessed_at")
+    if any(checklist[field] != 0 for field in ("satisfied", "partial", "unsatisfied", "not_evaluated")) or checklist["assessed_at"] is not None or checklist["items"] != []:
+        raise ControllerError("corrupt_state", "Sprint 1 checklist fields must be reserved")
 
     control = _exact_fields(data["control"], {"requested", "requested_at", "resume_state"}, "control")
-    _nullable_string(control["requested"], "control.requested")
-    if control["requested_at"] is not None:
-        _timestamp(control["requested_at"], "control.requested_at")
-    if control["resume_state"] is not None and control["resume_state"] not in STATE_NAMES:
-        raise ControllerError("corrupt_state", "State control resume_state is invalid")
-    if data["state"] not in TERMINAL_STATES and data["terminal_result"] is not None:
-        raise ControllerError("corrupt_state", "State terminal_result must be null for non-terminal states")
-    if data["terminal_result"] is not None and not isinstance(data["terminal_result"], dict):
-        raise ControllerError("corrupt_state", "State terminal_result is invalid")
+    if any(control[field] is not None for field in ("requested", "requested_at", "resume_state")):
+        raise ControllerError("corrupt_state", "Sprint 1 control fields must be null")
+    if data["terminal_result"] is not None:
+        raise ControllerError("corrupt_state", "Sprint 1 terminal_result must be null")
+    if data["state"] in {"blocked", "failed"} and process["active"]:
+        raise ControllerError("corrupt_state", "Blocked and failed Sprint 1 states must be inactive")
+    validate_safe_data(data, code="corrupt_state", label="State")
     return data
 
 

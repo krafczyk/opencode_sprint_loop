@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from opencode_sprint_loop import __version__
-from opencode_sprint_loop.cli import main
+from opencode_sprint_loop.cli import _lock_paths, main
 from opencode_sprint_loop.config import load_config
 from opencode_sprint_loop.errors import ControllerError
 from opencode_sprint_loop.events import append_event, load_events, transition_event
@@ -134,6 +134,14 @@ def git_optional(path: Path, *arguments: str) -> str:
         env={"PATH": os.environ["PATH"], "LC_ALL": "C"},
     )
     return result.stdout.strip()
+
+
+def controller_locks(root: Path) -> tuple[Path, Path]:
+    """Return the controller's actual stable advisory lock anchors for a fixture."""
+    git_dir = Path(git(root, "rev-parse", "--git-dir"))
+    if not git_dir.is_absolute():
+        git_dir = (root / git_dir).resolve()
+    return _lock_paths(git_dir)
 
 
 def repository_snapshot(path: Path) -> dict[str, object]:
@@ -428,6 +436,159 @@ class FoundationTests(unittest.TestCase):
             load_config(self.root)
         self.assertEqual(context.exception.code, "invalid_config")
 
+    def test_configuration_rejects_every_required_field_and_integer_boolean(self) -> None:
+        """Every required field reports its path, and booleans never satisfy integer fields."""
+        original = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
+        required_paths = (
+            ("schema_version",), ("multisprint",), ("sprint",), ("repositories",),
+            ("repositories", 0, "name"), ("repositories", 0, "path"), ("repositories", 0, "branch"), ("repositories", 0, "remote"),
+            *( ("documents", field) for field in ("multisprint_spec", "sprint_spec", "sprint_checklist") ),
+            *( ("agents", field) for field in ("builder", "auditor", "ci_fixer") ),
+            *( ("models", field) for field in ("builder", "auditor", "ci_fixer") ),
+            ("pre_ci_audit", "enabled"), ("pre_ci_audit", "max_rounds"),
+            *( ("limits", field) for field in ("max_implementation_cycles", "max_ci_fix_attempts", "invocation_timeout_seconds", "server_unavailable_grace_seconds") ),
+            ("ci", "provider"), ("ci", "poll_interval_seconds"), ("ci", "allow_skipped"), ("ci", "allow_neutral"), ("ci", "zero_checks"),
+        )
+        integer_paths = (
+            ("schema_version",), ("sprint",), ("pre_ci_audit", "max_rounds"),
+            *( ("limits", field) for field in ("max_implementation_cycles", "max_ci_fix_attempts", "invocation_timeout_seconds", "server_unavailable_grace_seconds") ),
+            ("ci", "poll_interval_seconds"),
+        )
+        for path in required_paths:
+            with self.subTest(missing=path):
+                data = json.loads(json.dumps(original))
+                target: object = data
+                for key in path[:-1]:
+                    target = target[key]  # type: ignore[index]
+                del target[path[-1]]  # type: ignore[index]
+                (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(ControllerError) as context:
+                    load_config(self.root)
+                self.assertEqual(context.exception.code, "invalid_config")
+        for path in integer_paths:
+            with self.subTest(boolean=path):
+                data = json.loads(json.dumps(original))
+                target: object = data
+                for key in path[:-1]:
+                    target = target[key]  # type: ignore[index]
+                target[path[-1]] = True  # type: ignore[index]
+                (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(ControllerError) as context:
+                    load_config(self.root)
+                self.assertIn(context.exception.code, {"invalid_config", "unsupported_config_schema"})
+
+    def test_configuration_path_escapes_are_rejected_for_repository_and_documents(self) -> None:
+        """Configured repository and document paths cannot leave the sprint root directly or by symlink."""
+        original = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
+        outside = self.fixture.base / "outside"
+        outside.mkdir()
+        (outside / "document.md").write_text("outside\n", encoding="utf-8")
+        link = self.root / "outside-link"
+        link.symlink_to(outside, target_is_directory=True)
+        paths = (("repositories", 0, "path"), *( ("documents", field) for field in original["documents"] ))
+        for path in paths:
+            for value in ("../outside", "outside-link/document.md"):
+                with self.subTest(path=path, value=value):
+                    data = json.loads(json.dumps(original))
+                    target: object = data
+                    for key in path[:-1]:
+                        target = target[key]  # type: ignore[index]
+                    target[path[-1]] = value  # type: ignore[index]
+                    (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+                    with self.assertRaises(ControllerError) as context:
+                        load_config(self.root)
+                    self.assertEqual(context.exception.code, "invalid_config")
+
+    def test_configuration_rejects_invalid_identifiers_models_and_ci_values(self) -> None:
+        """Every constrained configuration value rejects malformed identifiers, types, and semantic values."""
+        original = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
+        cases: list[tuple[tuple[str | int, ...], object]] = [
+            (("multisprint",), "Uppercase"),
+            (("sprint",), 0),
+            (("repositories",), {}),
+            (("repositories", 0, "name"), "not valid"),
+            (("repositories", 0, "branch"), "main\nnext"),
+            (("repositories", 0, "remote"), ""),
+            (("documents",), []),
+            (("agents", "builder"), "Builder"),
+            (("models", "auditor"), "provider only"),
+            (("pre_ci_audit", "enabled"), 1),
+            (("pre_ci_audit", "max_rounds"), 0),
+            (("limits", "max_ci_fix_attempts"), 0),
+            (("ci", "provider"), "other"),
+            (("ci", "poll_interval_seconds"), 0),
+            (("ci", "allow_skipped"), "true"),
+            (("ci", "allow_neutral"), 1),
+            (("ci", "zero_checks"), "Not-valid"),
+        ]
+        for path, value in cases:
+            with self.subTest(path=path, value=value):
+                data = json.loads(json.dumps(original))
+                target: object = data
+                for key in path[:-1]:
+                    target = target[key]  # type: ignore[index]
+                target[path[-1]] = value  # type: ignore[index]
+                (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(ControllerError) as context:
+                    load_config(self.root)
+                self.assertEqual(context.exception.code, "invalid_config")
+
+    def test_configuration_rejects_wrong_container_types_and_nested_unknown_fields(self) -> None:
+        """Every nested configuration object rejects incompatible collection types and extra fields."""
+        original = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
+        container_paths = (
+            ("repositories",), ("documents",), ("agents",), ("models",), ("pre_ci_audit",), ("limits",), ("ci",),
+        )
+        for path in container_paths:
+            with self.subTest(container=path):
+                data = json.loads(json.dumps(original))
+                data[path[0]] = []
+                (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(ControllerError) as context:
+                    load_config(self.root)
+                self.assertEqual(context.exception.code, "invalid_config")
+        for path in (("repositories", 0), ("documents",), ("agents",), ("models",), ("pre_ci_audit",), ("limits",), ("ci",)):
+            with self.subTest(unknown=path):
+                data = json.loads(json.dumps(original))
+                target: object = data
+                for key in path:
+                    target = target[key]  # type: ignore[index]
+                target["unexpected"] = True  # type: ignore[index]
+                (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(ControllerError) as context:
+                    load_config(self.root)
+                self.assertEqual(context.exception.code, "invalid_config")
+
+    def test_configuration_requires_nonempty_documents_and_local_agents(self) -> None:
+        """Every configured document and agent definition must remain usable local input."""
+        original = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
+        for field, relative in original["documents"].items():
+            with self.subTest(document=field, failure="missing"):
+                path = self.root / relative
+                contents = path.read_text(encoding="utf-8")
+                path.unlink()
+                with self.assertRaises(ControllerError) as context:
+                    load_config(self.root)
+                self.assertEqual(context.exception.code, "missing_required_file")
+                path.write_text(contents, encoding="utf-8")
+            with self.subTest(document=field, failure="empty"):
+                path = self.root / relative
+                contents = path.read_text(encoding="utf-8")
+                path.write_text("", encoding="utf-8")
+                with self.assertRaises(ControllerError) as context:
+                    load_config(self.root)
+                self.assertEqual(context.exception.code, "missing_required_file")
+                path.write_text(contents, encoding="utf-8")
+        for name in original["agents"].values():
+            with self.subTest(agent=name):
+                path = self.root / ".opencode" / "agents" / f"{name}.md"
+                contents = path.read_text(encoding="utf-8")
+                path.unlink()
+                with self.assertRaises(ControllerError) as context:
+                    load_config(self.root)
+                self.assertEqual(context.exception.code, "invalid_agent_definition")
+                path.write_text(contents, encoding="utf-8")
+
     def test_no_run_json_status_is_read_only(self) -> None:
         """Status returns a stable no-run projection without worktree artifacts."""
         code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
@@ -474,6 +635,24 @@ class FoundationTests(unittest.TestCase):
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
         self.assertEqual(code, 4, stderr)
         self.assertFalse(sentinel.exists())
+
+    def test_git_preflight_never_uses_mutating_commands(self) -> None:
+        """The Git adapter command set excludes all prohibited mutation commands."""
+        from opencode_sprint_loop import git as controller_git
+
+        observed: list[tuple[str, ...]] = []
+        original = controller_git.subprocess.run
+
+        def record(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            observed.append(tuple(arguments))
+            return original(arguments, **kwargs)  # type: ignore[arg-type]
+
+        with patch("opencode_sprint_loop.git.subprocess.run", side_effect=record):
+            code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 4, stderr)
+        prohibited = {"add", "commit", "stash", "reset", "checkout", "switch", "clean", "push"}
+        self.assertTrue(observed)
+        self.assertTrue(all(prohibited.isdisjoint(command) for command in observed))
 
     def test_submodule_path_with_spaces_is_registered_correctly(self) -> None:
         """NUL-delimited .gitmodules parsing preserves a valid path containing spaces."""
@@ -524,6 +703,35 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual([event["type"] for event in events], ["run.started", "state.entered", "run.blocked"])
         self.assertIsNone(state["server"]["url"])
         self.assertIn("execution_not_implemented", stderr)
+
+    def test_sprint_one_state_rejects_populated_reserved_fields_and_credentials(self) -> None:
+        """Persisted state cannot claim deferred Sprint 1 work or expose credential-bearing data."""
+        config = load_config(self.root)
+        cases: list[tuple[tuple[str, ...], object]] = [
+            (("server", "url"), "https://user:secret@example.invalid"),
+            (("server", "version"), "later"),
+            (("commits", "local", "managed"), "Authorization: Bearer secret"),
+            (("audit", "phase"), "pre_ci"),
+            (("audit", "pre_ci_round"), 1),
+            (("ci", "attempt"), 1),
+            (("ci", "commit_sha"), "deadbeef"),
+            (("ci", "checks"), [{"name": "later"}]),
+            (("counters", "implementation_cycles"), 1),
+            (("checklist", "satisfied"), 1),
+            (("checklist", "items"), [{"id": "later"}]),
+            (("control", "requested"), "pause"),
+            (("terminal_result",), {"status": "finished"}),
+        ]
+        for path, value in cases:
+            with self.subTest(path=path):
+                state = new_state(config)
+                target: object = state
+                for key in path[:-1]:
+                    target = target[key]  # type: ignore[index]
+                target[path[-1]] = value  # type: ignore[index]
+                with self.assertRaises(ControllerError) as context:
+                    validate_state(state)
+                self.assertEqual(context.exception.code, "corrupt_state")
 
     def test_placeholder_status_matches_stable_projection(self) -> None:
         """Persisted status exposes only the documented status projection fields."""
@@ -576,6 +784,40 @@ class FoundationTests(unittest.TestCase):
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
         self.assertEqual(code, 2)
         self.assertIn("dirty_managed_repository", stderr)
+        self.assertFalse((self.root / "info").exists())
+
+    def test_root_identity_failures_create_no_runtime_paths(self) -> None:
+        """Missing, non-Git, child, and bare roots fail before any controller runtime mutation."""
+        non_git = self.fixture.base / "non-git"
+        non_git.mkdir()
+        regular = self.fixture.base / "regular-file"
+        regular.write_text("not a directory\n", encoding="utf-8")
+        bare = self.fixture.base / "bare.git"
+        git(self.fixture.base, "init", "--bare", str(bare))
+        cases = (self.root / "missing", non_git, regular, self.root / "docs", bare)
+        for root in cases:
+            with self.subTest(root=root):
+                info_existed = (root / "info").exists()
+                code, _, stderr = self.invoke(["run", "--root", str(root), "--server-url", "opaque"])
+                self.assertEqual(code, 2)
+                self.assertTrue(stderr)
+                self.assertEqual((root / "info").exists(), info_existed)
+
+    def test_sprint_root_without_a_resolvable_head_is_rejected_without_runtime_artifacts(self) -> None:
+        """A worktree whose current HEAD does not resolve cannot enter controller preflight."""
+        git(self.root, "update-ref", "-d", "HEAD")
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 2)
+        self.assertIn("root_not_git_worktree", stderr)
+        self.assertFalse((self.root / "info").exists())
+
+    def test_bare_managed_repository_is_rejected_without_runtime_artifacts(self) -> None:
+        """A bare repository cannot replace the configured initialized submodule checkout."""
+        shutil.rmtree(self.fixture.managed)
+        git(self.fixture.base, "init", "--bare", str(self.fixture.managed))
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 2)
+        self.assertIn("uninitialized_submodule", stderr)
         self.assertFalse((self.root / "info").exists())
 
     def test_dirty_sprint_repository_fails_without_runtime_artifacts(self) -> None:
@@ -666,6 +908,21 @@ class FoundationTests(unittest.TestCase):
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
         self.assertEqual(code, 4, stderr)
 
+    def test_worktree_backed_by_another_submodule_is_rejected(self) -> None:
+        """An absorbed checkout must use the Git directory for its own .gitmodules entry."""
+        other = self.root / "repositories" / "other"
+        git(self.root, "-c", "protocol.file.allow=always", "submodule", "add", "-b", "main", str(self.fixture.remote), str(other.relative_to(self.root)))
+        git(self.root, "add", ".gitmodules", "repositories")
+        git(self.root, "commit", "-m", "Add second submodule")
+        other_git_dir = Path(git(other, "rev-parse", "--git-dir"))
+        if not other_git_dir.is_absolute():
+            other_git_dir = (other / other_git_dir).resolve()
+        shutil.rmtree(self.fixture.managed)
+        git(self.fixture.base, f"--git-dir={other_git_dir}", "worktree", "add", "--force", str(self.fixture.managed), "main")
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 2)
+        self.assertIn("uninitialized_submodule", stderr)
+
     def test_managed_branch_and_remote_failures_preserve_git_snapshots(self) -> None:
         """Managed branch, detached-head, and remote failures do not alter either repository."""
         variants = (
@@ -730,6 +987,22 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("missing_remote", stderr)
         self.assertFalse((self.root / "info").exists())
+
+    def test_git_failure_diagnostics_include_path_and_expected_values(self) -> None:
+        """Git preflight errors report the repository, expected setting, and observed condition."""
+        variants = (
+            (lambda fixture: fixture.set_managed_branch(), ("main", "wrong")),
+            (lambda fixture: fixture.remove_managed_remote(), ("origin",)),
+            (lambda fixture: fixture.make_gitlink_mismatch(), ("expected gitlink",)),
+        )
+        for mutate, expected in variants:
+            with self.subTest(expected=expected):
+                fixture, _ = self.variant()
+                mutate(fixture)
+                code, _, stderr = self.invoke(["run", "--root", str(fixture.root), "--server-url", "opaque"])
+                self.assertEqual(code, 2)
+                for text in (str(fixture.managed), *expected):
+                    self.assertIn(text, stderr)
 
     def test_deferred_commands_do_not_mutate(self) -> None:
         """Reserved controls return clear errors without creating runtime state."""
@@ -959,6 +1232,7 @@ class FoundationTests(unittest.TestCase):
         replacement = dict(state)
         replacement["state"] = "blocked"
         replacement["reason"] = {"code": "test", "message": "test", "details": {}}
+        replacement["process"] = dict(state["process"], active=False)
         write_state_atomic(paths.state, replacement)
         self.assertEqual(load_state(paths.state)["state"], "blocked")
 
@@ -978,6 +1252,7 @@ class FoundationTests(unittest.TestCase):
                 replacement = dict(initial)
                 replacement["state"] = "blocked"
                 replacement["reason"] = {"code": "test", "message": f"test {index}", "details": {}}
+                replacement["process"] = dict(initial["process"], active=False)
                 write_state_atomic(paths.state, replacement)
                 write_state_atomic(paths.state, initial)
             stop.set()
@@ -998,6 +1273,7 @@ class FoundationTests(unittest.TestCase):
         state = new_state(config)
         state["state"] = "blocked"
         state["reason"] = {"code": "test", "message": "test", "details": {"note": "x" * MAX_JSON_BYTES}}
+        state["process"]["active"] = False
         with self.assertRaises(ControllerError) as context:
             write_state_atomic(paths.state, state)
         self.assertEqual(context.exception.code, "persistence_failed")
@@ -1012,6 +1288,7 @@ class FoundationTests(unittest.TestCase):
         replacement = dict(original)
         replacement["state"] = "blocked"
         replacement["reason"] = {"code": "test", "message": "test", "details": {}}
+        replacement["process"] = dict(original["process"], active=False)
         with patch("opencode_sprint_loop.state.os.replace", side_effect=OSError("injected")):
             with self.assertRaises(ControllerError) as context:
                 write_state_atomic(paths.state, replacement)
@@ -1027,6 +1304,7 @@ class FoundationTests(unittest.TestCase):
         replacement = dict(original)
         replacement["state"] = "blocked"
         replacement["reason"] = {"code": "test", "message": "test", "details": {}}
+        replacement["process"] = dict(original["process"], active=False)
 
         real_open = os.open
 
@@ -1064,7 +1342,7 @@ class FoundationTests(unittest.TestCase):
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         state = new_state(config)
-        persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
+        _, persistence_lock = controller_locks(self.root)
         with patch("opencode_sprint_loop.transitions.write_state_atomic_at", side_effect=OSError("injected")):
             with self.assertRaises(OSError):
                 persist_initial(state, paths.events, paths.state, persistence_lock)
@@ -1080,7 +1358,7 @@ class FoundationTests(unittest.TestCase):
 
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
-        persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
+        _, persistence_lock = controller_locks(self.root)
         state = persist_initial(new_state(config), paths.events, paths.state, persistence_lock)
         original = transitions.write_state_atomic_at
         displaced = self.fixture.base / "displaced-runtime"
@@ -1103,7 +1381,7 @@ class FoundationTests(unittest.TestCase):
         """Missing reasons and unsupported destinations cannot append partial transitions."""
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
-        persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
+        _, persistence_lock = controller_locks(self.root)
         state = persist_initial(new_state(config), paths.events, paths.state, persistence_lock)
         state = transition(state, paths.events, paths.state, persistence_lock, "validating")
         before_state = paths.state.read_bytes()
@@ -1120,7 +1398,7 @@ class FoundationTests(unittest.TestCase):
         """A malformed transition reason is rejected before durable history changes."""
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
-        persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
+        _, persistence_lock = controller_locks(self.root)
         state = persist_initial(new_state(config), paths.events, paths.state, persistence_lock)
         state = transition(state, paths.events, paths.state, persistence_lock, "validating")
         before_state = paths.state.read_bytes()
@@ -1142,7 +1420,7 @@ class FoundationTests(unittest.TestCase):
         """The first transition cannot overwrite a pair or accept a later state."""
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
-        persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
+        _, persistence_lock = controller_locks(self.root)
         not_new = new_state(config)
         not_new["state"] = "validating"
         with advisory_lock(persistence_lock, exclusive=True):
@@ -1347,7 +1625,7 @@ class FoundationTests(unittest.TestCase):
         """The packaging manifest carries authoritative documentation in the source archive."""
         if importlib.util.find_spec("setuptools") is None:
             self.skipTest("setuptools build backend is unavailable in this test environment")
-        project_root = Path(__file__).resolve().parents[1]
+        project_root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as temporary:
             result = subprocess.run(
                 [
@@ -1380,12 +1658,20 @@ class FoundationTests(unittest.TestCase):
         git_dir = Path(git(self.root, "rev-parse", "--git-dir"))
         if not git_dir.is_absolute():
             git_dir = (self.root / git_dir).resolve()
-        run_lock = git_dir / "opencode-sprint-loop" / "run.lock"
+        run_lock, _ = _lock_paths(git_dir)
         with advisory_lock(run_lock, exclusive=True):
             code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
         self.assertEqual(code, 2)
         self.assertIn("run_already_active", stderr)
         self.assertFalse((self.root / "info").exists())
+
+    def test_controller_locks_use_stable_git_metadata_anchors(self) -> None:
+        """Ownership and persistence locks never depend on replaceable controller lock files."""
+        run_lock, persistence_lock = controller_locks(self.root)
+        self.assertEqual((run_lock.name, persistence_lock.name), ("HEAD", "config"))
+        self.assertTrue(run_lock.is_file())
+        self.assertTrue(persistence_lock.is_file())
+        self.assertFalse((run_lock.parent / "opencode-sprint-loop").exists())
 
     def test_status_reports_live_ownership_without_trusting_persisted_intent(self) -> None:
         """Status remains readable and derives activity from the held ownership lock."""
@@ -1393,7 +1679,7 @@ class FoundationTests(unittest.TestCase):
         git_dir = Path(git(self.root, "rev-parse", "--git-dir"))
         if not git_dir.is_absolute():
             git_dir = (self.root / git_dir).resolve()
-        run_lock = git_dir / "opencode-sprint-loop" / "run.lock"
+        run_lock, _ = _lock_paths(git_dir)
         with advisory_lock(run_lock, exclusive=True):
             code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
             self.assertEqual(code, 0, stderr)
@@ -1419,7 +1705,7 @@ class FoundationTests(unittest.TestCase):
         with patch("opencode_sprint_loop.cli.advisory_lock", side_effect=record_lock):
             code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 0, stderr)
-        self.assertEqual(observed, [("persistence.lock", False)])
+        self.assertEqual(observed, [("config", False)])
 
     def test_status_rejects_pid_only_liveness_when_linux_identity_is_available(self) -> None:
         """Null persisted process identity cannot fall back to a reusable PID on Linux."""
@@ -1435,7 +1721,8 @@ class FoundationTests(unittest.TestCase):
         git_dir = Path(git(self.root, "rev-parse", "--git-dir"))
         if not git_dir.is_absolute():
             git_dir = (self.root / git_dir).resolve()
-        with advisory_lock(git_dir / "opencode-sprint-loop" / "run.lock", exclusive=True):
+        run_lock, _ = _lock_paths(git_dir)
+        with advisory_lock(run_lock, exclusive=True):
             code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 0, stderr)
         self.assertFalse(json.loads(stdout)["process_running"])
@@ -1450,7 +1737,21 @@ class FoundationTests(unittest.TestCase):
         git_dir = Path(git(self.root, "rev-parse", "--git-dir"))
         if not git_dir.is_absolute():
             git_dir = (self.root / git_dir).resolve()
-        with advisory_lock(git_dir / "opencode-sprint-loop" / "run.lock", exclusive=True):
+        run_lock, _ = _lock_paths(git_dir)
+        with advisory_lock(run_lock, exclusive=True):
+            code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 0, stderr)
+        self.assertFalse(json.loads(stdout)["process_running"])
+
+    def test_status_ignores_semantically_invalid_lock_timestamp(self) -> None:
+        """Lock metadata needs a real RFC 3339 UTC timestamp before it corroborates ownership."""
+        self.assertEqual(self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4)
+        paths = runtime_paths(self.root, "foundation", 1)
+        metadata = json.loads(paths.lock_metadata.read_text(encoding="utf-8"))
+        metadata["started_at"] = "2026-99-99T99:99:99Z"
+        paths.lock_metadata.write_text(json.dumps(metadata), encoding="utf-8")
+        run_lock, _ = controller_locks(self.root)
+        with advisory_lock(run_lock, exclusive=True):
             code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 0, stderr)
         self.assertFalse(json.loads(stdout)["process_running"])
@@ -1460,7 +1761,7 @@ class FoundationTests(unittest.TestCase):
         git_dir = Path(git(self.root, "rev-parse", "--git-dir"))
         if not git_dir.is_absolute():
             git_dir = (self.root / git_dir).resolve()
-        run_lock = git_dir / "opencode-sprint-loop" / "run.lock"
+        run_lock, _ = _lock_paths(git_dir)
         ready = multiprocessing.Event()
         process = multiprocessing.Process(target=hold_lock, args=(str(run_lock), ready))
         process.start()
@@ -1514,7 +1815,7 @@ class FoundationTests(unittest.TestCase):
 
         @contextlib.contextmanager
         def delay_child_ownership(path: Path, **kwargs: object) -> Any:
-            if os.getpid() != parent_pid and path.name == "run.lock":
+            if os.getpid() != parent_pid and path.name == "HEAD":
                 waiting_for_ownership.set()
                 if not release_ownership.wait(timeout=10):
                     raise RuntimeError("timed out waiting to continue ownership race")
@@ -1555,7 +1856,10 @@ class FoundationTests(unittest.TestCase):
         """Status cannot expose the event-ahead snapshot during a locked transition."""
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
-        persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
+        git_dir = Path(git(self.root, "rev-parse", "--git-dir"))
+        if not git_dir.is_absolute():
+            git_dir = (self.root / git_dir).resolve()
+        _, persistence_lock = _lock_paths(git_dir)
         initial = persist_initial(new_state(config), paths.events, paths.state, persistence_lock)
         context = multiprocessing.get_context("fork")
         state_write_started = context.Event()
@@ -1603,7 +1907,10 @@ class FoundationTests(unittest.TestCase):
         """Concurrent status sees no run or a complete initialized run during creation."""
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
-        persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
+        git_dir = Path(git(self.root, "rev-parse", "--git-dir"))
+        if not git_dir.is_absolute():
+            git_dir = (self.root / git_dir).resolve()
+        _, persistence_lock = _lock_paths(git_dir)
         context = multiprocessing.get_context("fork")
         state_write_started = context.Event()
         release_state_write = context.Event()
@@ -1698,7 +2005,7 @@ class FoundationTests(unittest.TestCase):
         git_dir = Path(git(self.root, "rev-parse", "--git-dir"))
         if not git_dir.is_absolute():
             git_dir = (self.root / git_dir).resolve()
-        lock = git_dir / "opencode-sprint-loop" / "run.lock"
+        lock = self.fixture.base / "controller.lock"
         outside_lock = self.fixture.base / "outside-lock"
         outside_lock.write_text("outside\n", encoding="utf-8")
         lock.parent.mkdir(parents=True, exist_ok=True)
@@ -1772,6 +2079,7 @@ class FoundationTests(unittest.TestCase):
         state = new_state(config)
         state["state"] = "blocked"
         state["reason"] = {"code": "test", "message": "test", "details": {"bad": object()}}
+        state["process"]["active"] = False
         with self.assertRaises(ControllerError) as context:
             write_state_atomic(paths.state, state)
         self.assertEqual(context.exception.code, "persistence_failed")
@@ -1790,7 +2098,7 @@ class FoundationTests(unittest.TestCase):
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         state = new_state(config)
-        persistence_lock = self.root / ".git" / "opencode-sprint-loop" / "persistence.lock"
+        _, persistence_lock = controller_locks(self.root)
         state = persist_initial(state, paths.events, paths.state, persistence_lock)
         transition(
             state,

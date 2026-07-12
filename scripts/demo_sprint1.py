@@ -96,9 +96,9 @@ def create_fixture(base: Path) -> Path:
 @contextlib.contextmanager
 def hold_run_lock(root: Path) -> object:
     """Hold the controller's ownership lock for the lock-rejection demonstration."""
-    lock_path = root / ".git" / "opencode-sprint-loop" / "run.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    # Sprint 1 locks the stable Git HEAD metadata file, rather than a
+    # controller-created path that could be replaced while locked.
+    descriptor = os.open(root / ".git" / "HEAD", os.O_RDONLY)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield

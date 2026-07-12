@@ -15,7 +15,7 @@ from .jsonio import load_json_object_handle
 from .locking import is_exclusively_locked
 from .paths import RuntimePaths
 from .safeio import open_directory, open_regular, path_exists, require_current_directory
-from .state import RFC3339_UTC, load_state_at, process_start_identity
+from .state import is_rfc3339_utc, load_state_at, process_start_identity
 
 
 def _no_run(root: Path) -> dict[str, Any]:
@@ -60,7 +60,7 @@ def _process_running(run_lock: Path, paths: RuntimePaths, state: dict[str, Any])
         return False
     if not isinstance(metadata["run_id"], str) or not isinstance(metadata["hostname"], str) or not metadata["hostname"]:
         return False
-    if not isinstance(metadata["started_at"], str) or not RFC3339_UTC.fullmatch(metadata["started_at"]):
+    if not is_rfc3339_utc(metadata["started_at"]):
         return False
     if metadata["process_start"] is not None and (
         not isinstance(metadata["process_start"], str) or not metadata["process_start"]
