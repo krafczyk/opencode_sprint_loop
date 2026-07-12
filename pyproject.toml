@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools==82.0.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opencode-sprint-loop"
+version = "0.1.0"
+description = "Durable controller for OpenCode development sprints"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "opencode_sprint_loop contributors" }]
+dependencies = []
+
+[project.scripts]
+sprint-loop = "opencode_sprint_loop.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.unittest]
+start-directory = "tests"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
