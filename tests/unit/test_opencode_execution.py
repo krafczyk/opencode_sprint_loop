@@ -54,6 +54,7 @@ class _Handler(BaseHTTPRequestHandler):
     root = "/tmp"
     mode = "complete"
     abort_requests = 0
+    last_prompt: dict[str, object] | None = None
     preflight_started = threading.Event()
 
     def log_message(self, format: str, *args: object) -> None:
@@ -80,9 +81,14 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path == "/agent":
             self._json([{"name": "builder"}, {"name": "auditor"}, {"name": "ci-fixer"}])
         elif self.path == "/config/providers":
-            self._json({"providers": ["test"]})
+            self._json({"providers": [{"id": "test", "models": {"medium": {}, "strong": {}}}]})
         elif self.path == "/provider":
-            self._json([{"id": "test", "connected": True, "models": {"medium": {}, "strong": {}}}])
+            self._json(
+                {
+                    "all": [{"id": "test", "models": {"medium": {}, "strong": {}}}],
+                    "connected": ["test"],
+                }
+            )
         elif self.path == "/session":
             self._json([])
         elif self.path == "/session/status":
@@ -152,6 +158,7 @@ class _Handler(BaseHTTPRequestHandler):
             type(self).mode = "complete"
             self._json({"acknowledged": True})
         elif self.path.endswith("/prompt_async"):
+            type(self).last_prompt = json.loads(raw.decode())
             self._json({"accepted": True})
         else:
             self.send_error(404)
@@ -278,6 +285,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
             _Handler.root = str(Path(temporary).resolve())
             _Handler.mode = "complete"
             _Handler.abort_requests = 0
+            _Handler.last_prompt = None
             server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
             thread = threading.Thread(target=server.serve_forever)
             thread.start()
@@ -313,6 +321,8 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 self.assertEqual(runner.existing_session_ids(), set())
                 session = runner.create_session(request)
                 runner.submit_prompt(session, request)
+                self.assertNotIn("retryCount", _Handler.last_prompt)  # type: ignore[operator]
+                self.assertNotIn("retryCount", _Handler.last_prompt["format"])  # type: ignore[index]
                 observation = runner.observe(session)
                 self.assertEqual(observation.structured_result["status"], "completed")
                 _Handler.mode = "terminal_message_error"
@@ -366,14 +376,13 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     {"name": "auditor"},
                     {"name": "ci-fixer"},
                 ],
-                "/config/providers": {"providers": ["test"]},
-                "/provider": [
-                    {
-                        "id": "test",
-                        "connected": True,
-                        "models": {"medium": {}, "strong": {}},
-                    }
-                ],
+                "/config/providers": {
+                    "providers": [{"id": "test", "models": {"medium": {}, "strong": {}}}]
+                },
+                "/provider": {
+                    "all": [{"id": "test", "models": {"medium": {}, "strong": {}}}],
+                    "connected": ["test"],
+                },
             }
             cases = (
                 ("/global/health", {"healthy": False, "version": "1.17.18"}, "server_unhealthy"),
@@ -418,7 +427,12 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 ("/agent", [{"name": "builder", "disable": 1}], "malformed_server_response"),
                 (
                     "/config/providers",
-                    {"providers": ["test", "test"]},
+                    {
+                        "providers": [
+                            {"id": "test", "models": {"strong": {}}},
+                            {"id": "test", "models": {"medium": {}}},
+                        ]
+                    },
                     "malformed_server_response",
                 ),
                 (
@@ -426,50 +440,50 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     {"providers": [1]},
                     "malformed_server_response",
                 ),
-                ("/provider", [], "configured_model_unavailable"),
+                ("/provider", {"all": [], "connected": []}, "configured_model_unavailable"),
                 (
                     "/provider",
-                    [{"id": "test", "models": {"medium": {}, "strong": {}}}],
+                    {"all": [{"id": "test", "models": {"medium": {}, "strong": {}}}]},
                     "malformed_server_response",
                 ),
                 (
                     "/provider",
-                    [
-                        {
-                            "id": "test",
-                            "connected": "yes",
-                            "models": {"medium": {}, "strong": {}},
-                        }
-                    ],
+                    {
+                        "all": [{"id": "test", "models": {"medium": {}, "strong": {}}}],
+                        "connected": "test",
+                    },
                     "malformed_server_response",
                 ),
                 (
                     "/provider",
-                    [{"id": "test", "connected": True, "models": ["medium", "strong"]}],
+                    {
+                        "all": [{"id": "test", "models": ["medium", "strong"]}],
+                        "connected": ["test"],
+                    },
                     "malformed_server_response",
                 ),
                 (
                     "/provider",
-                    [{"id": "test", "connected": True, "models": {"strong": None}}],
+                    {"all": [{"id": "test", "models": {"strong": None}}], "connected": ["test"]},
                     "malformed_server_response",
                 ),
                 (
                     "/provider",
-                    [
-                        {"id": "test", "connected": True, "models": {"strong": {}}},
-                        {"id": "test", "connected": True, "models": {"medium": {}}},
-                    ],
+                    {
+                        "all": [
+                            {"id": "test", "models": {"strong": {}}},
+                            {"id": "test", "models": {"medium": {}}},
+                        ],
+                        "connected": ["test"],
+                    },
                     "malformed_server_response",
                 ),
                 (
                     "/provider",
-                    [
-                        {
-                            "id": "test",
-                            "connected": False,
-                            "models": {"medium": {}, "strong": {}},
-                        }
-                    ],
+                    {
+                        "all": [{"id": "test", "models": {"medium": {}, "strong": {}}}],
+                        "connected": [],
+                    },
                     "configured_model_unavailable",
                 ),
             )
@@ -1665,14 +1679,13 @@ class OpenCodeExecutionTests(unittest.TestCase):
             valid = {
                 "/global/health": {"healthy": True, "version": "1.17.18"},
                 "/agent": [{"name": "builder"}, {"name": "auditor"}, {"name": "ci-fixer"}],
-                "/config/providers": {"providers": ["test"]},
-                "/provider": [
-                    {
-                        "id": "test",
-                        "connected": True,
-                        "models": {"medium": {}, "strong": {}},
-                    }
-                ],
+                "/config/providers": {
+                    "providers": [{"id": "test", "models": {"medium": {}, "strong": {}}}]
+                },
+                "/provider": {
+                    "all": [{"id": "test", "models": {"medium": {}, "strong": {}}}],
+                    "connected": ["test"],
+                },
             }
             runner = OpenCodeServerRunner("http://127.0.0.1:4096")
             responses = {

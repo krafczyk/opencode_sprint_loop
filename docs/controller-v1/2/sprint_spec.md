@@ -92,6 +92,12 @@ These exclusions do not permit controller-authored credential exposure, destruct
 - `SIGKILL`, container loss, or host loss may prevent a final abort or metadata update. The session ID must already be durable before prompt submission so later diagnosis is possible.
 - The controller validates configured model presence, not provider billing, quota, credential expiry, or successful inference before the probe.
 - Transcript sanitization recognizes conventional credential patterns. Protection against secrets encoded specifically to evade those rules is outside the current trusted-user threat model.
+- The installed OpenCode `1.17.18` build exercised on 2026-07-13 accepts a
+  `json_schema` prompt but injects a default `format.retryCount` into the stored
+  user message and then rejects that same field while serving `GET
+  /session/<id>/message`. The controller omits the optional hint, fails closed on
+  the server's HTTP 400 response, and cannot complete the required real-server
+  result/transcript gate until the server response contract is corrected.
 
 ## 4. Scope
 
@@ -297,6 +303,13 @@ GET /provider
 
 Each configured `provider/model` value is split at the first `/` into OpenCode `providerID` and `modelID`. The provider must be connected/configured and the model must appear in its model map. A malformed or unavailable capability response fails closed.
 
+For supported OpenCode `1.17.x`, `GET /config/providers` supplies configured
+provider records under `providers`, while `GET /provider` supplies catalog
+records under `all` and connected provider IDs under `connected`. Provider
+records advertise models as object maps. The controller validates these
+documented collection shapes and requires every configured provider/model in
+both advertised record sets and the connected-ID collection.
+
 This check proves only advertised configuration. The real probe is the evidence that the selected Auditor model accepted and completed the request.
 
 ## 8. `AgentRunner` Contract
@@ -386,7 +399,7 @@ Product specifications, checklist contents, managed source files, prior findings
 
 ### 9.4 Structured Result
 
-The OpenCode request uses `format.type = "json_schema"` and `additionalProperties: false`. It may send the documented `retryCount: 2` request hint, but Sprint 2 does not claim that supported OpenCode `1.17.x` releases honor that field. The controller does not submit a corrective prompt, create another session, or otherwise retry an invalid structured result. A server-reported `StructuredOutputError`, including any server-reported retry count, is treated as `invalid_agent_result`.
+The OpenCode request uses `format.type = "json_schema"` and `additionalProperties: false`. It does not send the optional `format.retryCount` hint because OpenCode `1.17.18` accepts and persists that input but then rejects its own message-list response containing the field. The controller does not submit a corrective prompt, create another session, or otherwise retry an invalid structured result. A server-reported `StructuredOutputError`, including any server-reported retry count, is treated as `invalid_agent_result`.
 
 The result shape is:
 

@@ -99,6 +99,12 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S2-CAP-008** Treat provider/model presence as preflight evidence rather than proof of quota, billing, or inference success.
 - [x] **S2-CAP-009** Use only the configured Auditor agent and model for the Sprint 2 probe.
 
+Real-server verification on 2026-07-13 confirmed that supported OpenCode
+`1.17.18` reports configured provider records through
+`/config/providers.providers`, catalog records through `/provider.all`, and
+connection state through `/provider.connected`; the adapter and deterministic
+fixtures use those documented shapes.
+
 ## 9. Fake Runner and Fake Server
 
 - [x] **S2-FAKE-001** Implement a deterministic fake satisfying the `AgentRunner` protocol.
@@ -120,7 +126,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S2-PROBE-004** Exclude irrelevant product specifications, source content, findings, and commit-message paths from the probe prompt.
 - [x] **S2-PROBE-005** Keep server URL, credentials, and environment data out of the prompt.
 - [x] **S2-RESULT-001** Request `json_schema` structured output with exact fields and no additional properties.
-- [x] **S2-RESULT-002** Optionally send documented `retryCount: 2` only as a request hint; do not claim supported OpenCode `1.17.x` releases honor it.
+- [x] **S2-RESULT-002** Do not send optional `format.retryCount`: real OpenCode `1.17.18` accepts and persists it but then rejects the resulting message-list response; do not claim the release honors the hint.
 - [x] **S2-RESULT-003** Independently validate schema version, status, summary, checks, and blocking-reason rules.
 - [x] **S2-RESULT-004** Require an empty checks array because no substantive verification tool ran; do not count the built-in structured-output mechanism as a check.
 - [x] **S2-RESULT-005** Accept only `completed`, `blocked`, and `failed` statuses.
@@ -419,6 +425,20 @@ were identical, runtime paths remained absent, and the server's session-ID set
 was unchanged. The successful execution-probe items and **S2-DONE-011** remain
 unchecked because the supplied server could not be re-rooted without changing
 its externally managed configuration.
+
+Later on 2026-07-13, an authenticated temporary server was successfully rooted
+at a clean real-submodule fixture on localhost port `59659`. Health, workspace,
+agents, connected providers, `openai/gpt-5.6-sol`, opt-in preflight, and the
+mutation-free wrong-workspace check passed. The controller durably exposed a
+fresh `0001-auditor` session while active, and the session appeared in the
+ordinary OpenCode session client. OpenCode accepted the structured prompt but
+then returned HTTP 400 from `GET /session/<id>/message`: it had injected default
+`format.retryCount: 2` into the stored user message and its own response validator
+rejected that field. The controller failed closed at `blocked/server_unavailable`,
+preserved interruption evidence, produced no result or transcript, and left both
+repositories unchanged except expected runtime records. The temporary server was
+stopped and its health endpoint became unreachable. Successful-result demo items
+and **S2-DONE-011** remain unchecked.
 
 ## 30. Completion Gate
 

@@ -83,9 +83,10 @@ optionally, `OPENCODE_SERVER_USERNAME` (default `opencode` with a password).
 Never put credentials in argv, configuration, or artifacts. Before creating a
 runtime path or session, the controller validates health, default workspace, all
 configured agents, and configured provider/model pairs. Provider capability
-records must explicitly report `connected: true` and advertise models through
-the documented object map; missing or non-boolean connection state and list-shaped
-model collections are rejected as malformed server responses.
+records must appear in the configured-provider collection, advertise models
+through the documented object map, and have their provider ID in the documented
+connected-provider list. Malformed provider records or model collections fail
+closed.
 
 `pause`, `resume`, and `stop` are reserved command names and return `feature_not_implemented` without changing state or Git repositories.
 
@@ -256,6 +257,12 @@ These variables contain no credentials; Basic authentication remains inherited
 through the OpenCode variables documented above. The complete real-server exit
 demonstration additionally runs `sprint-loop run`, observes its fresh session in
 an ordinary OpenCode client, and checks the invocation records and final block.
+The installed OpenCode `1.17.18` build tested on 2026-07-13 accepted a structured
+probe but then returned HTTP 400 from its message-list endpoint because its own
+persisted `json_schema` format included a default `retryCount` rejected by its
+response validator. That upstream incompatibility currently blocks the complete
+real-server demonstration; the controller does not send the optional hint and
+still fails closed without treating missing result/transcript evidence as success.
 Builder handoff, commits, audits, CI, functional controls/recovery, and Neovim
 remain deliberately unimplemented.
 

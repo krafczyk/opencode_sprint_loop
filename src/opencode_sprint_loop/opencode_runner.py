@@ -287,59 +287,72 @@ class OpenCodeServerRunner:
 
     def _validate_models(self, models: dict[str, str]) -> None:
         """Check all configured provider/model pairs against documented capabilities."""
-        configured = self._request("GET", "/config/providers")
-        providers_response = self._request("GET", "/provider")
-        providers = (
-            providers_response.get("providers")
-            if isinstance(providers_response, dict)
-            else providers_response
+        configured = self._object(
+            self._request("GET", "/config/providers"), "provider configuration"
         )
-        configured_names = (
-            configured.get("providers", configured) if isinstance(configured, dict) else configured
-        )
-        if not isinstance(providers, list) or not isinstance(configured_names, (list, dict)):
+        provider_state = self._object(self._request("GET", "/provider"), "provider")
+        configured_records = configured.get("providers")
+        all_records = provider_state.get("all")
+        connected = provider_state.get("connected")
+        if (
+            not isinstance(configured_records, list)
+            or not isinstance(all_records, list)
+            or not isinstance(connected, list)
+        ):
             raise ControllerError(
                 "malformed_server_response", "OpenCode provider response is invalid"
             )
-        configured_ids = list(configured_names)
         if any(
-            not isinstance(provider_id, str) or not provider_id for provider_id in configured_ids
-        ) or len(set(configured_ids)) != len(configured_ids):
+            not isinstance(provider_id, str) or not provider_id for provider_id in connected
+        ) or len(set(connected)) != len(connected):
             raise ControllerError(
                 "malformed_server_response", "OpenCode provider configuration is invalid"
             )
-        available: dict[str, Any] = {}
-        for provider in providers:
+        configured_providers = self._provider_records(configured_records)
+        available = self._provider_records(all_records)
+        connected_ids = set(connected)
+        for value in models.values():
+            provider_id, _, model_id = value.partition("/")
+            configured_provider = configured_providers.get(provider_id)
+            available_provider = available.get(provider_id)
+            configured_models: dict[str, Any] = (
+                configured_provider["models"] if configured_provider is not None else {}
+            )
+            available_models: dict[str, Any] = (
+                available_provider["models"] if available_provider is not None else {}
+            )
+            if (
+                configured_provider is None
+                or available_provider is None
+                or provider_id not in connected_ids
+                or model_id not in configured_models
+                or model_id not in available_models
+            ):
+                raise ControllerError(
+                    "configured_model_unavailable", "A configured OpenCode model is unavailable"
+                )
+
+    @staticmethod
+    def _provider_records(records: list[Any]) -> dict[str, dict[str, Any]]:
+        """Validate documented provider records and index them by provider ID."""
+        indexed: dict[str, dict[str, Any]] = {}
+        for provider in records:
             if (
                 not isinstance(provider, dict)
                 or not isinstance(provider.get("id"), str)
                 or not provider["id"]
-                or not isinstance(provider.get("connected"), bool)
                 or not isinstance(provider.get("models"), dict)
                 or any(
                     not isinstance(model_id, str) or not model_id or not isinstance(model, dict)
                     for model_id, model in provider["models"].items()
                 )
-                or provider["id"] in available
+                or provider["id"] in indexed
             ):
                 raise ControllerError(
                     "malformed_server_response", "OpenCode provider record is invalid"
                 )
-            available[provider["id"]] = provider
-        configured_id_set = set(configured_ids)
-        for value in models.values():
-            provider_id, _, model_id = value.partition("/")
-            provider = available.get(provider_id)
-            advertised: dict[str, Any] = provider["models"] if provider is not None else {}
-            if (
-                provider_id not in configured_id_set
-                or provider is None
-                or provider["connected"] is not True
-                or model_id not in advertised
-            ):
-                raise ControllerError(
-                    "configured_model_unavailable", "A configured OpenCode model is unavailable"
-                )
+            indexed[provider["id"]] = provider
+        return indexed
 
     def existing_session_ids(self) -> set[str]:
         """Return the default-workspace session identifiers before a create request."""
@@ -435,7 +448,6 @@ class OpenCodeServerRunner:
                     "model": {"providerID": provider_id, "modelID": model_id},
                     "parts": [{"type": "text", "text": request.prompt}],
                     "format": {"type": "json_schema", "schema": schema},
-                    "retryCount": 2,
                 },
                 http_error_code="prompt_submission_failed",
             )
