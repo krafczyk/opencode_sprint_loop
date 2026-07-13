@@ -45,17 +45,18 @@ def validate_safe_data(value: Any, *, code: str, label: str) -> None:
 
 
 def redact_diagnostic(message: str) -> str:
-    """Redact credentials plus all HTTP URL query values and fragments."""
+    """Redact credentials plus all URI query values and fragments."""
     message = re.sub(
         r"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*(?:basic|bearer)\s+)\S+",
         r"\1[REDACTED]",
         message,
     )
-    message = re.sub(r"(?i)(https?://)[^/\s@]+@", r"\1[REDACTED]@", message)
+    uri = r"[a-z][a-z0-9+.-]*://"
+    message = re.sub(rf"(?i)({uri})[^/\s@]+@", r"\1[REDACTED]@", message)
     # Query keys are not a reliable secret classifier, so no query value or
     # fragment may reach diagnostics even when it uses an unfamiliar name.
-    message = re.sub(r"(?i)(https?://[^\s?#]+)\?[^#\s]*", r"\1?[REDACTED]", message)
-    message = re.sub(r"(?i)(https?://[^\s#]+)#[^\s]*", r"\1#[REDACTED]", message)
+    message = re.sub(rf"(?i)({uri}[^\s?#]+)\?[^#\s]*", r"\1?[REDACTED]", message)
+    message = re.sub(rf"(?i)({uri}[^\s#]+)#[^\s]*", r"\1#[REDACTED]", message)
     message = re.sub(
         r"(?i)([?&#](?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)=)[^&#\s]+",
         r"\1[REDACTED]",

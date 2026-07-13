@@ -400,7 +400,7 @@ def write_state_atomic_at(
     *,
     expected_identity: tuple[int, int] | None = None,
     require_absent: bool = False,
-) -> None:
+) -> tuple[int, int]:
     """Atomically replace validated state without overwriting a swapped path.
 
     The first state is installed by an exclusive hard link. Later replacements
@@ -408,6 +408,7 @@ def write_state_atomic_at(
     reporting the persistence failure.
     """
     temporary_name: str | None = None
+    exchange_pending = False
     try:
         existing_identity: tuple[int, int] | None = None
         try:
@@ -439,6 +440,8 @@ def write_state_atomic_at(
             if os.write(descriptor, payload) != len(payload):
                 raise OSError("Short write while persisting state")
             os.fsync(descriptor)
+            installed = os.fstat(descriptor)
+            installed_identity = (installed.st_dev, installed.st_ino)
         finally:
             os.close(descriptor)
         if existing_identity is None:
@@ -450,17 +453,86 @@ def write_state_atomic_at(
                 ) from error
         else:
             _rename_exchange(directory, temporary_name, name)
+            exchange_pending = True
             displaced = os.stat(temporary_name, dir_fd=directory, follow_symlinks=False)
             if (displaced.st_dev, displaced.st_ino) != existing_identity:
                 _rename_exchange(directory, temporary_name, name)
+                exchange_pending = False
                 raise ControllerError(
                     "persistence_failed", f"State file changed during transition: {path}"
                 )
+            exchange_pending = False
         os.fsync(directory)
+        os.unlink(temporary_name, dir_fd=directory)
+        temporary_name = None
+        os.fsync(directory)
+        return installed_identity
     except OSError as error:
         raise ControllerError("persistence_failed", f"Could not persist state: {path}") from error
     finally:
+        if exchange_pending and temporary_name is not None:
+            try:
+                _rename_exchange(directory, temporary_name, name)
+            except (OSError, ControllerError):
+                temporary_name = None
         if temporary_name is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+            else:
+                try:
+                    os.fsync(directory)
+                except OSError:
+                    pass
+
+
+def remove_state_atomic_at(
+    directory: int,
+    name: str,
+    path: Path,
+    *,
+    expected_identity: tuple[int, int],
+) -> None:
+    """Remove an exclusively created state without deleting a substituted path."""
+    temporary_name = f".state-rollback-{uuid.uuid4().hex}.tmp"
+    descriptor = -1
+    exchanged = False
+    try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory,
+        )
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        _rename_exchange(directory, temporary_name, name)
+        exchanged = True
+        displaced = os.stat(temporary_name, dir_fd=directory, follow_symlinks=False)
+        if (displaced.st_dev, displaced.st_ino) != expected_identity:
+            _rename_exchange(directory, temporary_name, name)
+            exchanged = False
+            raise ControllerError(
+                "persistence_failed", f"State file changed during transition rollback: {path}"
+            )
+        os.unlink(temporary_name, dir_fd=directory)
+        exchanged = False
+        temporary_name = ""
+        os.unlink(name, dir_fd=directory)
+        os.fsync(directory)
+    except OSError as error:
+        raise ControllerError("persistence_failed", f"Could not roll back state: {path}") from error
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        if exchanged:
+            try:
+                _rename_exchange(directory, temporary_name, name)
+            except (OSError, ControllerError):
+                temporary_name = ""
+        if temporary_name:
             try:
                 os.unlink(temporary_name, dir_fd=directory)
             except FileNotFoundError:

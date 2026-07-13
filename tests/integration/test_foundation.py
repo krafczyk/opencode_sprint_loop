@@ -87,11 +87,11 @@ def run_paused_before_initial_state(
 
     real_write_state = transitions.write_state_atomic_at
 
-    def pause_before_state_replace(*write_arguments: object, **keywords: object) -> None:
+    def pause_before_state_replace(*write_arguments: object, **keywords: object) -> object:
         ready.set()
         if not release.wait(timeout=10):
             raise RuntimeError("timed out waiting to complete initial transition")
-        real_write_state(*write_arguments, **keywords)  # type: ignore[arg-type]
+        return real_write_state(*write_arguments, **keywords)  # type: ignore[arg-type]
 
     with patch(
         "opencode_sprint_loop.transitions.write_state_atomic_at",
@@ -114,11 +114,11 @@ def pause_transition_in_child(
 
     real_write_state = transitions.write_state_atomic_at
 
-    def pause_before_state_replace(*arguments: object, **keywords: object) -> None:
+    def pause_before_state_replace(*arguments: object, **keywords: object) -> object:
         state_write_started.set()
         if not release_state_write.wait(timeout=10):
             raise RuntimeError("timed out waiting to complete transition")
-        real_write_state(*arguments, **keywords)  # type: ignore[arg-type]
+        return real_write_state(*arguments, **keywords)  # type: ignore[arg-type]
 
     try:
         with patch(
@@ -146,11 +146,11 @@ def pause_initial_transition_in_child(
 
     real_write_state = transitions.write_state_atomic_at
 
-    def pause_before_state_replace(*arguments: object, **keywords: object) -> None:
+    def pause_before_state_replace(*arguments: object, **keywords: object) -> object:
         state_write_started.set()
         if not release_state_write.wait(timeout=10):
             raise RuntimeError("timed out waiting to complete initial transition")
-        real_write_state(*arguments, **keywords)  # type: ignore[arg-type]
+        return real_write_state(*arguments, **keywords)  # type: ignore[arg-type]
 
     try:
         with patch(
@@ -1224,6 +1224,27 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("root_not_git_worktree", stderr)
         self.assertFalse((self.root / "info").exists())
 
+    def test_sprint_and_managed_heads_must_resolve_to_commits(self) -> None:
+        """A HEAD naming a non-commit Git object cannot satisfy preflight."""
+        for target in ("sprint", "managed"):
+            with self.subTest(target=target):
+                fixture, root = self.variant()
+                repository = root if target == "sprint" else fixture.managed
+                tree = git(repository, "rev-parse", "HEAD^{tree}")
+                git_dir = Path(git(repository, "rev-parse", "--git-dir"))
+                if not git_dir.is_absolute():
+                    git_dir = repository / git_dir
+                (git_dir / "HEAD").write_text(tree + "\n", encoding="utf-8")
+                code, _, stderr = self.invoke(
+                    ["run", "--root", str(root), "--server-url", "opaque"]
+                )
+                self.assertEqual(code, 2)
+                self.assertIn(
+                    "root_not_git_worktree" if target == "sprint" else "uninitialized_submodule",
+                    stderr,
+                )
+                self.assertFalse((root / "info").exists())
+
     def test_bare_managed_repository_is_rejected_without_runtime_artifacts(self) -> None:
         """A bare repository cannot replace the configured initialized submodule checkout."""
         shutil.rmtree(self.fixture.managed)
@@ -1664,6 +1685,21 @@ class FoundationTests(unittest.TestCase):
         self.assertNotIn("synthetic-secret", stderr)
         self.assertNotIn("private-fragment", stderr)
 
+    def test_non_http_uri_credentials_are_redacted_from_diagnostics(self) -> None:
+        """URI redaction is independent of the configured remote's scheme."""
+        data = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
+        data["repositories"][0]["remote"] = (
+            "ssh://user:synthetic-secret@example.invalid/repository"
+            "?session=synthetic-secret#private-fragment"
+        )
+        (self.root / "sprint_config.json").write_text(json.dumps(data), encoding="utf-8")
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 2)
+        self.assertIn("missing_remote", stderr)
+        self.assertNotIn("synthetic-secret", stderr)
+        self.assertNotIn("private-fragment", stderr)
+        self.assertIn("[REDACTED]", stderr)
+
     def test_deferred_commands_validate_required_inputs(self) -> None:
         """Reserved controls reject invalid roots and empty resume URLs before feature errors."""
         code, _, stderr = self.invoke(["pause", "--root", str(self.root / "missing")])
@@ -1953,13 +1989,36 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(load_state(paths.state)["state"], "initializing")
         self.assertEqual(list(paths.info_dir.glob(".state-*.tmp")), [])
 
-        with patch("opencode_sprint_loop.state.os.fsync", side_effect=[None, OSError("injected")]):
+        with patch(
+            "opencode_sprint_loop.state.os.fsync",
+            side_effect=[None, OSError("injected"), None],
+        ):
             with self.assertRaises(ControllerError) as context:
                 write_state_atomic(paths.state, replacement)
         self.assertEqual(context.exception.code, "persistence_failed")
         self.assertEqual(load_state(paths.state)["state"], "blocked")
         self.assertEqual(list(paths.info_dir.glob(".state-*.tmp")), [])
         self.assertEqual(paths.state.stat().st_mode & 0o077, 0)
+
+        with patch(
+            "opencode_sprint_loop.state.os.fsync",
+            side_effect=[None, None, OSError("injected")],
+        ):
+            with self.assertRaises(ControllerError) as context:
+                write_state_atomic(paths.state, original)
+        self.assertEqual(context.exception.code, "persistence_failed")
+        self.assertEqual(load_state(paths.state)["state"], "initializing")
+        self.assertEqual(list(paths.info_dir.glob(".state-*.tmp")), [])
+
+    def test_initial_state_cleanup_is_synced_after_temporary_unlink(self) -> None:
+        """Initial installation durably removes the temporary hard-link name."""
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        with patch("opencode_sprint_loop.state.os.fsync", wraps=os.fsync) as sync:
+            write_state_atomic(paths.state, new_state(config))
+        self.assertEqual(sync.call_count, 3)
+        self.assertEqual(paths.state.stat().st_nlink, 1)
+        self.assertEqual(list(paths.info_dir.glob(".state-*.tmp")), [])
 
     def test_interrupted_transition_leaves_event_ahead_of_state_inconsistent(self) -> None:
         """An interruption after event sync is detected and is never automatically replayed."""
@@ -2414,6 +2473,102 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(context.exception.code, "persistence_failed")
         self.assertEqual(event_paths.events.read_text(encoding="utf-8"), "user replacement\n")
 
+    def test_event_replacement_after_append_is_detected(self) -> None:
+        """An append cannot succeed after its visible event path is replaced."""
+        from opencode_sprint_loop import events
+
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        _, persistence_lock = controller_locks(self.root)
+        state = persist_initial(new_state(config), paths.events, paths.state, persistence_lock)
+        event = transition_event(
+            state, "state.entered", "validating", {"previous_state": "initializing"}
+        )
+        replacement = self.fixture.base / "post-append-events.jsonl"
+        replacement.write_text("user replacement\n", encoding="utf-8")
+        real_fsync = events.os.fsync
+        swapped = False
+
+        def replace_after_descriptor_sync(descriptor: int) -> None:
+            nonlocal swapped
+            real_fsync(descriptor)
+            if not swapped:
+                os.replace(replacement, paths.events)
+                swapped = True
+
+        with patch(
+            "opencode_sprint_loop.events.os.fsync", side_effect=replace_after_descriptor_sync
+        ):
+            with self.assertRaises(ControllerError) as context:
+                append_event(paths.events, event)
+        self.assertTrue(swapped)
+        self.assertEqual(context.exception.code, "persistence_failed")
+        self.assertEqual(paths.events.read_text(encoding="utf-8"), "user replacement\n")
+
+    def test_event_replacement_during_state_install_rolls_state_back(self) -> None:
+        """A transition restores prior state if its event path changes during state commit."""
+        from opencode_sprint_loop import transitions
+
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        _, persistence_lock = controller_locks(self.root)
+        state = persist_initial(new_state(config), paths.events, paths.state, persistence_lock)
+        previous_events = paths.events.read_bytes()
+        replacement = self.fixture.base / "during-state-events.jsonl"
+        replacement.write_bytes(previous_events)
+        real_write_state = transitions.write_state_atomic_at
+        swapped = False
+
+        def replace_during_state_commit(*arguments: object, **keywords: object) -> object:
+            nonlocal swapped
+            installed = real_write_state(*arguments, **keywords)  # type: ignore[arg-type]
+            if not swapped:
+                os.replace(replacement, paths.events)
+                swapped = True
+            return installed
+
+        with patch(
+            "opencode_sprint_loop.transitions.write_state_atomic_at",
+            side_effect=replace_during_state_commit,
+        ):
+            with self.assertRaises(ControllerError) as context:
+                transition(state, paths.events, paths.state, persistence_lock, "validating")
+        self.assertTrue(swapped)
+        self.assertEqual(context.exception.code, "persistence_failed")
+        self.assertEqual(load_state(paths.state)["state"], "initializing")
+        self.assertEqual(paths.events.read_bytes(), previous_events)
+
+    def test_event_replacement_during_initial_state_install_removes_state(self) -> None:
+        """The first transition removes its state if the initial event path changes."""
+        from opencode_sprint_loop import transitions
+
+        config = load_config(self.root)
+        paths = runtime_paths(self.root, config.multisprint, config.sprint)
+        _, persistence_lock = controller_locks(self.root)
+        replacement = self.fixture.base / "initial-state-events.jsonl"
+        replacement.write_text("user replacement\n", encoding="utf-8")
+        real_write_state = transitions.write_state_atomic_at
+        swapped = False
+
+        def replace_during_initial_state(*arguments: object, **keywords: object) -> object:
+            nonlocal swapped
+            installed = real_write_state(*arguments, **keywords)  # type: ignore[arg-type]
+            if not swapped:
+                os.replace(replacement, paths.events)
+                swapped = True
+            return installed
+
+        with patch(
+            "opencode_sprint_loop.transitions.write_state_atomic_at",
+            side_effect=replace_during_initial_state,
+        ):
+            with self.assertRaises(ControllerError) as context:
+                persist_initial(new_state(config), paths.events, paths.state, persistence_lock)
+        self.assertTrue(swapped)
+        self.assertEqual(context.exception.code, "persistence_failed")
+        self.assertFalse(paths.state.exists())
+        self.assertEqual(paths.events.read_text(encoding="utf-8"), "user replacement\n")
+
     def test_lock_metadata_temporary_symlink_is_not_followed(self) -> None:
         """Lock metadata replacement refuses a preexisting temporary-file symlink."""
         from opencode_sprint_loop.cli import _write_lock_metadata
@@ -2775,14 +2930,17 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(process.exitcode, 0)
 
     def test_stale_lock_metadata_does_not_block_first_run(self) -> None:
-        """A descriptive stale lock file is retained without blocking ownership."""
+        """A descriptive stale lock file is refreshed without blocking ownership."""
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         paths.lock_metadata.parent.mkdir(parents=True)
         paths.lock_metadata.write_text("not-json\n", encoding="utf-8")
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
         self.assertEqual(code, 4, stderr)
-        self.assertEqual(paths.lock_metadata.read_text(encoding="utf-8"), "not-json\n")
+        metadata = json.loads(paths.lock_metadata.read_text(encoding="utf-8"))
+        self.assertEqual(metadata["run_id"], load_state(paths.state)["run_id"])
+        self.assertEqual(metadata["schema_version"], 1)
+        self.assertGreater(metadata["pid"], 0)
 
     def test_ignored_stale_lock_metadata_does_not_block_first_run(self) -> None:
         """An aggregate ignored `info/` record still permits only stale lock metadata."""
@@ -2797,7 +2955,8 @@ class FoundationTests(unittest.TestCase):
             handle.write("info/\n")
         code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
         self.assertEqual(code, 4, stderr)
-        self.assertEqual(paths.lock_metadata.read_text(encoding="utf-8"), "not-json\n")
+        metadata = json.loads(paths.lock_metadata.read_text(encoding="utf-8"))
+        self.assertEqual(metadata["run_id"], load_state(paths.state)["run_id"])
 
     def test_tracked_lock_metadata_is_never_replaced(self) -> None:
         """A user-tracked lock.json cannot be claimed as stale controller metadata."""
@@ -2814,27 +2973,47 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(paths.lock_metadata.read_bytes(), before)
         self.assertEqual(git(self.root, "status", "--porcelain=v2"), "")
 
-    def test_lock_metadata_tracking_race_preserves_the_existing_file(self) -> None:
-        """Metadata installation leaves a path untouched when it appears concurrently."""
+    def test_existing_lock_metadata_is_replaced_with_current_record(self) -> None:
+        """Metadata installation replaces a validated stale descriptive record."""
         from opencode_sprint_loop.cli import _write_lock_metadata
 
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         paths.info_dir.mkdir(parents=True)
         paths.lock_metadata.write_text("stale metadata\n", encoding="utf-8")
-        _write_lock_metadata(self.root, paths.lock_metadata, new_state(config))
-        self.assertEqual(paths.lock_metadata.read_text(encoding="utf-8"), "stale metadata\n")
+        state = new_state(config)
+        _write_lock_metadata(self.root, paths.lock_metadata, state)
+        metadata = json.loads(paths.lock_metadata.read_text(encoding="utf-8"))
+        self.assertEqual(metadata["run_id"], state["run_id"])
 
     def test_lock_metadata_path_replacement_preserves_the_replacement(self) -> None:
-        """Existing lock metadata is never replaced or deleted by the controller."""
+        """Metadata replacement restores a file substituted during atomic exchange."""
         from opencode_sprint_loop import cli
 
         config = load_config(self.root)
         paths = runtime_paths(self.root, config.multisprint, config.sprint)
         paths.info_dir.mkdir(parents=True)
         paths.lock_metadata.write_text("stale metadata\n", encoding="utf-8")
-        cli._write_lock_metadata(self.root, paths.lock_metadata, new_state(config))
-        self.assertEqual(paths.lock_metadata.read_text(encoding="utf-8"), "stale metadata\n")
+        replacement = self.fixture.base / "replacement-lock.json"
+        replacement.write_text("user replacement\n", encoding="utf-8")
+        real_exchange = cli._rename_exchange
+        swapped = False
+
+        def replace_before_exchange(directory: int, first: str, second: str) -> None:
+            nonlocal swapped
+            if not swapped:
+                os.replace(replacement, paths.lock_metadata)
+                swapped = True
+            real_exchange(directory, first, second)
+
+        with patch(
+            "opencode_sprint_loop.cli._rename_exchange", side_effect=replace_before_exchange
+        ):
+            with self.assertRaises(ControllerError) as context:
+                cli._write_lock_metadata(self.root, paths.lock_metadata, new_state(config))
+        self.assertTrue(swapped)
+        self.assertEqual(context.exception.code, "persistence_failed")
+        self.assertEqual(paths.lock_metadata.read_text(encoding="utf-8"), "user replacement\n")
 
     def test_ignored_stale_lock_metadata_cannot_hide_extra_directories(self) -> None:
         """The stale-lock exception rejects ignored controller trees with any extra content."""
@@ -3321,10 +3500,10 @@ class FoundationTests(unittest.TestCase):
 
         def fail_validating(
             directory: int, name: str, path: Path, event: dict[str, object], **keywords: object
-        ) -> None:
+        ) -> tuple[int, int]:
             if event["state"] == "validating":
                 raise OSError("injected")
-            original(directory, name, path, event, **keywords)  # type: ignore[arg-type]
+            return original(directory, name, path, event, **keywords)  # type: ignore[arg-type]
 
         with patch("opencode_sprint_loop.transitions.append_event_at", side_effect=fail_validating):
             code, _, stderr = self.invoke(

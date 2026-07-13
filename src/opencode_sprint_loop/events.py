@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -211,7 +212,7 @@ def append_event_at(
     *,
     expected_identity: tuple[int, int] | None = None,
     require_absent: bool = False,
-) -> None:
+) -> tuple[int, int]:
     """Durably append one event through an already-open runtime directory.
 
     ``expected_identity`` binds an append to the previously validated file;
@@ -249,6 +250,14 @@ def append_event_at(
         finally:
             os.close(descriptor)
         os.fsync(directory)
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or (current.st_dev, current.st_ino) != identity
+        ):
+            raise ControllerError("persistence_failed", f"Event log changed during append: {path}")
+        return identity
     except OSError as error:
         raise ControllerError("persistence_failed", f"Could not append event: {path}") from error
 

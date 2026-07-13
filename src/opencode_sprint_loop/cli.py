@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import socket
+import stat
 import sys
 from pathlib import Path
 from typing import NoReturn, Sequence
@@ -19,7 +20,7 @@ from .locking import ownership_lock, persistence_lock as persistence_advisory_lo
 from .paths import RuntimePaths, canonical_root, ensure_runtime_paths_safe, runtime_paths
 from .safeio import open_directory
 from .security import redact_diagnostic
-from .state import new_state, process_start_identity
+from .state import _rename_exchange, new_state, process_start_identity
 from .status import format_status, project_status, validate_persistence
 from .transitions import persist_initial, transition
 
@@ -117,11 +118,8 @@ def _reject_tracked_lock_metadata(root: Path, paths: RuntimePaths) -> None:
 
 
 def _write_lock_metadata(root: Path, path: Path, state: dict[str, object]) -> None:
-    """Create descriptive metadata without replacing an existing path entry.
-
-    Existing metadata is descriptive only and must never block ownership. Leaving
-    it untouched avoids deleting content installed by a concurrent user process.
-    """
+    """Install current descriptive metadata without overwriting a racing replacement."""
+    del root  # Tracking is validated immediately before this ownership-only operation.
     metadata = {
         "schema_version": 1,
         "run_id": state["run_id"],
@@ -132,6 +130,7 @@ def _write_lock_metadata(root: Path, path: Path, state: dict[str, object]) -> No
     }
     temporary_name: str | None = None
     directory: int | None = None
+    exchange_pending = False
     try:
         directory = open_directory(path.parent, create=True)
         temporary_name = f".lock-{secrets.token_hex(16)}.tmp"
@@ -149,12 +148,32 @@ def _write_lock_metadata(root: Path, path: Path, state: dict[str, object]) -> No
         finally:
             os.close(descriptor)
         try:
-            os.link(temporary_name, path.name, src_dir_fd=directory, dst_dir_fd=directory)
-        except FileExistsError:
-            # A stale or malformed descriptive record is intentionally retained.
-            # The advisory ownership lock is authoritative.
-            return
+            existing = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            try:
+                os.link(temporary_name, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+            except FileExistsError as error:
+                raise ControllerError(
+                    "persistence_failed", f"Lock metadata changed during installation: {path}"
+                ) from error
+        else:
+            if not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1:
+                raise ControllerError(
+                    "persistence_failed", f"Lock metadata is unsafe to replace: {path}"
+                )
+            expected_identity = (existing.st_dev, existing.st_ino)
+            _rename_exchange(directory, temporary_name, path.name)
+            exchange_pending = True
+            displaced = os.stat(temporary_name, dir_fd=directory, follow_symlinks=False)
+            if (displaced.st_dev, displaced.st_ino) != expected_identity:
+                _rename_exchange(directory, temporary_name, path.name)
+                exchange_pending = False
+                raise ControllerError(
+                    "persistence_failed", f"Lock metadata changed during installation: {path}"
+                )
+        os.fsync(directory)
         os.unlink(temporary_name, dir_fd=directory)
+        exchange_pending = False
         temporary_name = None
         os.fsync(directory)
     except OSError as error:
@@ -162,6 +181,11 @@ def _write_lock_metadata(root: Path, path: Path, state: dict[str, object]) -> No
             "persistence_failed", f"Could not persist lock metadata: {path}"
         ) from error
     finally:
+        if exchange_pending and temporary_name is not None and directory is not None:
+            try:
+                _rename_exchange(directory, temporary_name, path.name)
+            except (OSError, ControllerError):
+                temporary_name = None
         if temporary_name is not None and directory is not None:
             try:
                 os.unlink(temporary_name, dir_fd=directory)

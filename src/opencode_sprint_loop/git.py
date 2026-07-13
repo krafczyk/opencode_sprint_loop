@@ -62,7 +62,7 @@ def inspect_worktree(root: Path, *, expected_root: Path, error_code: str) -> Git
         )
     if _run(root, "rev-parse", "--is-bare-repository").strip() == "true":
         raise ControllerError(error_code, f"Bare repository is not supported: {expected_root}")
-    head = _run(root, "rev-parse", "--verify", "HEAD").strip()
+    head = _run(root, "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}").strip()
     git_dir_value = _run(root, "rev-parse", "--git-dir").strip()
     git_dir = (
         (root / git_dir_value).resolve()

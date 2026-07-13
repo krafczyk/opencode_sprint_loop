@@ -12,7 +12,13 @@ from .errors import ControllerError
 from .events import append_event_at, load_events_at, transition_event, validate_event_history
 from .locking import persistence_lock as persistence_advisory_lock
 from .safeio import open_directory, require_current_directory
-from .state import load_state_at, serialize_state, validate_state, write_state_atomic_at
+from .state import (
+    load_state_at,
+    remove_state_atomic_at,
+    serialize_state,
+    validate_state,
+    write_state_atomic_at,
+)
 
 WorkflowState: TypeAlias = Literal["initializing", "validating", "blocked", "failed"]
 EventType: TypeAlias = Literal["run.started", "state.entered", "run.blocked"]
@@ -31,6 +37,14 @@ def _artifact_identity(directory: int, name: str, path: Path) -> tuple[int, int]
     if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
         raise ControllerError("persistence_failed", f"Runtime artifact is unsafe: {path}")
     return details.st_dev, details.st_ino
+
+
+def _require_artifact_identity(
+    directory: int, name: str, path: Path, expected: tuple[int, int]
+) -> None:
+    """Fail when a durable artifact path no longer names its validated inode."""
+    if _artifact_identity(directory, name, path) != expected:
+        raise ControllerError("persistence_failed", f"Runtime artifact changed: {path}")
 
 
 def _load_durable_pair(directory: int, events_path: Path, state_path: Path) -> dict[str, Any]:
@@ -102,10 +116,22 @@ def persist_initial(
             next_state["last_event_sequence"] = event["sequence"]
             next_state["updated_at"] = event["timestamp"]
             serialized = serialize_state(next_state)
-            append_event_at(directory, events_path.name, events_path, event, require_absent=True)
-            write_state_atomic_at(
+            event_identity = append_event_at(
+                directory, events_path.name, events_path, event, require_absent=True
+            )
+            installed_state = write_state_atomic_at(
                 directory, state_path.name, state_path, serialized, require_absent=True
             )
+            try:
+                _require_artifact_identity(directory, events_path.name, events_path, event_identity)
+            except ControllerError:
+                remove_state_atomic_at(
+                    directory,
+                    state_path.name,
+                    state_path,
+                    expected_identity=installed_state,
+                )
+                raise
             require_current_directory(state_path.parent, directory)
             return next_state
         finally:
@@ -158,8 +184,9 @@ def transition(
             if destination in {"blocked", "failed"}:
                 next_state["process"]["active"] = False
             serialized = serialize_state(next_state)
+            previous_serialized = serialize_state(current)
             lock.ensure_current()
-            append_event_at(
+            event_identity = append_event_at(
                 directory,
                 events_path.name,
                 events_path,
@@ -167,13 +194,24 @@ def transition(
                 expected_identity=events_identity,
             )
             lock.ensure_current()
-            write_state_atomic_at(
+            installed_state = write_state_atomic_at(
                 directory,
                 state_path.name,
                 state_path,
                 serialized,
                 expected_identity=state_identity,
             )
+            try:
+                _require_artifact_identity(directory, events_path.name, events_path, event_identity)
+            except ControllerError:
+                write_state_atomic_at(
+                    directory,
+                    state_path.name,
+                    state_path,
+                    previous_serialized,
+                    expected_identity=installed_state,
+                )
+                raise
             lock.ensure_current()
             require_current_directory(state_path.parent, directory)
             return next_state
