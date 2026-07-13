@@ -15,6 +15,23 @@ Read these before changing behavior:
 
 The V1 final software specification is authoritative. If an implementation decision changes a durable schema, CLI contract, Git ownership rule, CI success rule, or terminal-state rule, update the specification deliberately rather than allowing code and documentation to diverge.
 
+## Threat Model and Audit Policy
+
+- Read `docs/threat_model.md` before assessing security, concurrency, recovery, or user-work risks.
+- Read `docs/audit_policy.md` before performing an audit or implementing audit findings.
+- The threat model calibrates likelihood and priority; it does not override explicit requirements in the authoritative specifications.
+- Separate impact severity, occurrence likelihood, confidence, priority, and disposition in audit findings.
+- Only P0 and P1 findings block sprint completion by default. The user has final authority to accept, defer, or promote any finding.
+- Do not treat hostile local filesystem races or deliberate repository forgery as current-sprint blockers when they are excluded by the threat model.
+
+## Role Workflows
+
+- Project-local OpenCode roles live in `.opencode/agents/`.
+- The Auditor is read-only and follows `docs/audit_policy.md`. Invoke it with `@auditor` or `/audit`.
+- The Builder implements accepted work and findings. Invoke it with `@builder` or `/address-audit`.
+- The Builder implements only findings marked `fix_now` or explicitly selected by the user. It does not silently implement deferred, accepted, investigative, or out-of-scope findings.
+- Role files supplement this repository guidance; they do not replace the authoritative specifications or current sprint documents.
+
 ## Finding the Current Sprint
 
 - Sprint implementation documents live under `docs/controller-v1/<sprint_number>/`.
