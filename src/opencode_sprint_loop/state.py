@@ -42,7 +42,7 @@ STATE_NAMES = frozenset(
 )
 TERMINAL_STATES = frozenset({"stopped", "failed", "finished"})
 RFC3339_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$")
-SUPPORTED_SERVER_VERSION = re.compile(r"^1\.17\.\d+$")
+SUPPORTED_SERVER_VERSION = re.compile(r"^1\.17\.(?:0|[1-9]\d*)$")
 
 
 def utc_now() -> str:

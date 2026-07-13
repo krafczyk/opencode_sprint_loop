@@ -30,6 +30,34 @@ def contains_credential(value: str) -> bool:
     return bool(_CREDENTIAL_VALUE.search(value))
 
 
+def external_utf8_bytes(value: Any, *, code: str, label: str) -> bytes:
+    """Encode one external string or raise its caller's stable failure code.
+
+    JSON permits escaped unpaired surrogates, but controller artifacts are UTF-8
+    records.  Keep that mismatch at the external-data boundary rather than
+    allowing ``UnicodeEncodeError`` to escape a lifecycle path.
+    """
+    if not isinstance(value, str):
+        raise ControllerError(code, f"{label} is not a string")
+    try:
+        return value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ControllerError(code, f"{label} is not valid UTF-8") from error
+
+
+def validate_external_utf8(value: Any, *, code: str, label: str) -> None:
+    """Reject unencodable strings and keys in recursively retained external data."""
+    if isinstance(value, str):
+        external_utf8_bytes(value, code=code, label=label)
+    elif isinstance(value, list):
+        for item in value:
+            validate_external_utf8(item, code=code, label=label)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            external_utf8_bytes(key, code=code, label=label)
+            validate_external_utf8(item, code=code, label=label)
+
+
 def validate_safe_data(
     value: Any,
     *,

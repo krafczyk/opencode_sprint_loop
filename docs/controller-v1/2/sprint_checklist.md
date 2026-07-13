@@ -389,6 +389,38 @@ fixtures use those documented shapes.
 - [ ] **S2-REVIEW-008** Confirm no unbounded external response or transcript path remains.
 - [ ] **S2-REVIEW-009** Record residual orphan-session, uncatchable-interruption, provider-readiness, and sanitization limitations.
 
+Auditor pass 1 reported **AUD-S2-001** through **AUD-S2-003** as P1
+`fix_now` findings. The prior review record's claim that no P0/P1 findings
+remained was incorrect; its review and clean-audit checklist assertions remain
+unchecked pending a fresh audit after the required repairs.
+
+Repair verification (2026-07-13) updated the HTTP adapter and local HTTP fake
+to consume documented OpenCode 1.17 `status.type`, `info.structured`, and
+`info.error.name` fields; reject empty or relative server workspace/session
+paths before canonicalization; and reject escaped unpaired-surrogate session
+identifiers through stable controller errors. Focused adapter coverage and the
+complete offline suite passed. This revalidates the affected implementation and
+test items (**S2-HTTP-004**, **S2-WORKSPACE-002** through **S2-WORKSPACE-006**,
+**S2-OBS-004** through **S2-OBS-006**, **S2-ERR-003**, **S2-ERR-005**, and
+**S2-TEST-003**, **S2-TEST-008**, **S2-TEST-009**, **S2-TEST-017**), but is not
+a fresh audit; **S2-REVIEW-001** through **S2-REVIEW-009** and **S2-DONE-012**
+remain unchecked.
+
+Auditor pass 2 findings **AUD-S2-004** through **AUD-S2-007** were repaired
+on 2026-07-13. External UTF-8 validation now converts escaped unpaired
+surrogates in result and transcript data into stable invocation failures;
+`StructuredOutputError` takes precedence over a generic terminal message
+error; sanitized transcript envelopes are retained before a permission, tool,
+or structured-output semantic violation is reported; and each invocation HTTP
+request is capped to its remaining monotonic deadline. Focused execution tests
+cover the complete surrogate failure lifecycle, documented
+`info.error.name`, retained violation evidence, and slow transport deadline
+caps. This revalidates **S2-RESULT-006**, **S2-OBS-008**,
+**S2-ART-007A** through **S2-ART-009**, **S2-ERR-003**, **S2-ERR-005**,
+**S2-TEST-008** through **S2-TEST-011**, but is not a fresh audit;
+**S2-REVIEW-001** through **S2-REVIEW-009** and **S2-DONE-012** remain
+unchecked.
+
 ## 28. Scope Review
 
 - [x] **S2-SCOPEREVIEW-001** Confirm no product Builder prompt or mutating-agent result schema was implemented.
@@ -448,7 +480,7 @@ and **S2-DONE-011** remain unchecked.
 - [x] **S2-DONE-004** The complete default test suite passes without external network or credentials.
 - [x] **S2-DONE-005** Formatting, linting, strict typing, compilation, package build, and clean-install smoke tests pass.
 - [x] **S2-DONE-006** `git diff --check` passes.
-- [ ] **S2-DONE-007** Parent repository status contains only intended Sprint 2 changes.
+- [x] **S2-DONE-007** Parent repository status contains only intended Sprint 2 changes.
 - [x] **S2-DONE-008** Plugin repository status is clean and its parent gitlink is unchanged.
 - [x] **S2-DONE-009** No credentials, generated demonstration state, build artifacts, temporary repositories, or real transcripts are tracked.
 - [x] **S2-DONE-010** Documentation describes actual Sprint 2 behavior and does not claim deferred features.

@@ -34,6 +34,7 @@ from .invocations import (
     probe_prompt,
     probe_title,
     transcript_wrapper,
+    validate_transcript_messages,
     validate_result,
     write_metadata,
     write_prompt,
@@ -372,6 +373,7 @@ def _interrupt_active_invocation(
     invocation_paths: InvocationPaths,
     metadata: dict[str, Any],
     error: ControllerError,
+    transcript_evidence: tuple[str, bool] | None = None,
 ) -> dict[str, Any]:
     """Abort once, wait briefly for evidence, then persist one interruption event."""
     abort_acknowledged: bool | None = None
@@ -390,9 +392,12 @@ def _interrupt_active_invocation(
         if observation.status in {None, "idle"} or observation.terminal_assistant:
             break
         time.sleep(min(1, max(0, deadline - time.monotonic())))
-    transcript_status, transcript_truncated, transcript_error = _capture_transcript(
-        runner, session, invocation_paths
-    )
+    if transcript_evidence is None:
+        transcript_status, transcript_truncated, _ = _capture_transcript(
+            runner, session, invocation_paths
+        )
+    else:
+        transcript_status, transcript_truncated = transcript_evidence
     _terminal_metadata(
         metadata,
         status="timed_out" if error.code == "invocation_timed_out" else "interrupted",
@@ -460,6 +465,7 @@ def _run(
         agent_completed = False
         session_creation_in_flight = False
         terminal_metadata_pending = False
+        transcript_evidence: tuple[str, bool] | None = None
         try:
             # Reload after ownership so a concurrent clean configuration change
             # cannot direct this run to stale runtime paths or repository data.
@@ -576,22 +582,22 @@ def _run(
             write_metadata(invocation_paths, metadata)
             cancellation.check()
             deadline = time.monotonic() + config.limits["invocation_timeout_seconds"]
-            effective_runner.submit_prompt(session, request)
+            effective_runner.submit_prompt(session, request, deadline=deadline)
             result: dict[str, object] | None = None
             while time.monotonic() < deadline:
                 cancellation.check()
-                observation = effective_runner.observe(session)
+                observation = effective_runner.observe(session, deadline=deadline)
                 if observation.unexpected_tool:
                     raise ControllerError(
                         "unexpected_probe_tool", "Execution probe attempted a forbidden tool"
                     )
-                if observation.terminal_assistant_error:
-                    raise ControllerError(
-                        "invocation_failed", "OpenCode terminal assistant message reported an error"
-                    )
                 if observation.structured_error:
                     raise ControllerError(
                         "invalid_agent_result", "OpenCode reported structured output failure"
+                    )
+                if observation.terminal_assistant_error:
+                    raise ControllerError(
+                        "invocation_failed", "OpenCode terminal assistant message reported an error"
                     )
                 if observation.status not in {None, "busy", "retry", "idle"}:
                     raise ControllerError(
@@ -638,10 +644,19 @@ def _run(
             # Re-fetch and validate the durable transcript before accepting the
             # earlier polling observation. The server may expose delayed tool
             # or permission evidence only in this later message response.
-            capture = effective_runner.transcript(session)
-            wrapper = transcript_wrapper(
-                session.session_id, capture.messages, expected_result=result
-            )
+            capture = effective_runner.transcript(session, deadline=deadline)
+            wrapper = transcript_wrapper(session.session_id, capture.messages)
+            try:
+                validate_transcript_messages(capture.messages, expected_result=result)
+            except ControllerError as transcript_semantic_error:
+                # Safe opaque evidence is retained before the semantic probe
+                # violation is reported through the interruption lifecycle.
+                write_transcript(invocation_paths, wrapper)
+                transcript_evidence = (
+                    "truncated" if wrapper["truncated"] else "complete",
+                    bool(wrapper["truncated"]),
+                )
+                raise transcript_semantic_error
             write_result(invocation_paths, result)
             # Once the immutable result exists, every later terminal write is
             # a documented write-ahead prefix. Preserve it rather than
@@ -735,6 +750,7 @@ def _run(
                         invocation_paths,
                         metadata,
                         error,
+                        transcript_evidence,
                     )
                 except ControllerError:
                     pass
@@ -803,6 +819,7 @@ def _run(
                         invocation_paths,
                         metadata,
                         error,
+                        transcript_evidence,
                     )
                 except ControllerError:
                     pass

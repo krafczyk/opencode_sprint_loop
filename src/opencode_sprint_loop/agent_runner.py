@@ -86,17 +86,23 @@ class AgentRunner(Protocol):
     def create_session(self, request: InvocationRequest) -> CreatedSession:
         """Create exactly one fresh, non-mutating session without submitting work."""
 
-    def submit_prompt(self, session: CreatedSession, request: InvocationRequest) -> None:
-        """Submit the one asynchronous structured-output prompt."""
+    def submit_prompt(
+        self, session: CreatedSession, request: InvocationRequest, *, deadline: float | None = None
+    ) -> None:
+        """Submit the one asynchronous structured-output prompt within its deadline."""
 
-    def observe(self, session: CreatedSession) -> InvocationObservation:
-        """Return one bounded session status/message observation."""
+    def observe(
+        self, session: CreatedSession, *, deadline: float | None = None
+    ) -> InvocationObservation:
+        """Return one bounded session status/message observation within its deadline."""
 
     def abort(self, session: CreatedSession) -> AbortObservation:
         """Request one best-effort cooperative abort for an active session."""
 
-    def transcript(self, session: CreatedSession) -> TranscriptCapture:
-        """Retrieve bounded raw message evidence for controller-side sanitization."""
+    def transcript(
+        self, session: CreatedSession, *, deadline: float | None = None
+    ) -> TranscriptCapture:
+        """Retrieve bounded raw message evidence within its deadline."""
 
 
 class FakeAgentRunner:
@@ -166,16 +172,20 @@ class FakeAgentRunner:
         self.created.append(session)
         return session
 
-    def submit_prompt(self, session: CreatedSession, request: InvocationRequest) -> None:
+    def submit_prompt(
+        self, session: CreatedSession, request: InvocationRequest, *, deadline: float | None = None
+    ) -> None:
         """Record a prompt submission without performing external work."""
         self.submitted.append(session.session_id)
-        del request
+        del request, deadline
         if self.submit_error is not None:
             raise self.submit_error
 
-    def observe(self, session: CreatedSession) -> InvocationObservation:
+    def observe(
+        self, session: CreatedSession, *, deadline: float | None = None
+    ) -> InvocationObservation:
         """Return scripted observations in order, retaining pending state when exhausted."""
-        del session
+        del session, deadline
         if self.observations:
             observation = self.observations.pop(0)
             if isinstance(observation, Exception):
@@ -190,9 +200,11 @@ class FakeAgentRunner:
             raise self.abort_error
         return AbortObservation(self.abort_acknowledged)
 
-    def transcript(self, session: CreatedSession) -> TranscriptCapture:
+    def transcript(
+        self, session: CreatedSession, *, deadline: float | None = None
+    ) -> TranscriptCapture:
         """Return the scripted transcript independently of observations."""
-        del session
+        del session, deadline
         if self.transcript_error is not None:
             raise self.transcript_error
         return TranscriptCapture(list(self.transcript_messages))

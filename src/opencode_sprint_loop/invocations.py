@@ -13,7 +13,13 @@ from typing import Any
 
 from .errors import ControllerError
 from .safeio import open_directory, open_regular
-from .security import contains_credential, redact_external_data, validate_safe_data
+from .security import (
+    contains_credential,
+    external_utf8_bytes,
+    redact_external_data,
+    validate_external_utf8,
+    validate_safe_data,
+)
 from .state import RFC3339_UTC, utc_now
 
 MAX_PROMPT_BYTES = 1024 * 1024
@@ -26,11 +32,13 @@ _TERMINAL = {"completed", "blocked", "failed", "timed_out", "interrupted"}
 
 def _bounded_string(value: Any, field: str, limit: int = 1024) -> str:
     """Validate one bounded, control-character-free invocation identifier."""
+    if not isinstance(value, str) or not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ControllerError("invocation_record_failed", f"Invocation {field} is invalid")
     if (
-        not isinstance(value, str)
-        or not value
-        or len(value.encode("utf-8")) > limit
-        or any(ord(c) < 32 or ord(c) == 127 for c in value)
+        len(
+            external_utf8_bytes(value, code="invocation_record_failed", label=f"Invocation {field}")
+        )
+        > limit
     ):
         raise ControllerError("invocation_record_failed", f"Invocation {field} is invalid")
     return value
@@ -57,7 +65,9 @@ def probe_prompt(multisprint: str, sprint: int, invocation_id: str) -> str:
 
 def validate_prompt(prompt: str) -> None:
     """Reject oversized or credential-bearing controller-authored prompt text."""
-    if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES or contains_credential(prompt):
+    if len(
+        external_utf8_bytes(prompt, code="invocation_record_failed", label="Execution probe prompt")
+    ) > MAX_PROMPT_BYTES or contains_credential(prompt):
         raise ControllerError(
             "invocation_record_failed", "Execution probe prompt is unsafe or too large"
         )
@@ -86,7 +96,12 @@ def validate_result(value: Any) -> dict[str, Any]:
         or status not in {"completed", "blocked", "failed"}
         or not isinstance(summary, str)
         or not summary
-        or len(summary.encode()) > 4096
+        or len(
+            external_utf8_bytes(
+                summary, code="invalid_agent_result", label="Execution probe summary"
+            )
+        )
+        > 4096
     ):
         raise ControllerError(
             "invalid_agent_result", "Execution probe result status or summary is invalid"
@@ -95,7 +110,16 @@ def validate_result(value: Any) -> dict[str, Any]:
         raise ControllerError("invalid_agent_result", "Execution probe checks must be empty")
     if (status == "completed" and reason is not None) or (
         status != "completed"
-        and (not isinstance(reason, str) or not reason or len(reason.encode()) > 4096)
+        and (
+            not isinstance(reason, str)
+            or not reason
+            or len(
+                external_utf8_bytes(
+                    reason, code="invalid_agent_result", label="Execution probe blocking_reason"
+                )
+            )
+            > 4096
+        )
     ):
         raise ControllerError("invalid_agent_result", "Execution probe blocking_reason is invalid")
     try:
@@ -314,7 +338,12 @@ def validate_metadata(metadata: dict[str, Any]) -> None:
         or any(
             not isinstance(key, str)
             or not key
-            or len(key.encode("utf-8")) > 1024
+            or len(
+                external_utf8_bytes(
+                    key, code="invocation_record_failed", label="Invocation input commit name"
+                )
+            )
+            > 1024
             or any(ord(character) < 32 or ord(character) == 127 for character in key)
             or value is not None
             for key, value in input_commits.items()
@@ -453,7 +482,7 @@ def write_result(paths: InvocationPaths, result: dict[str, Any]) -> None:
 
 def _truncate_text(value: str, limit: int) -> tuple[str, bool]:
     """Truncate UTF-8 safely with the documented visible marker."""
-    encoded = value.encode()
+    encoded = external_utf8_bytes(value, code="transcript_capture_failed", label="Transcript text")
     if len(encoded) <= limit:
         return value, False
     marker = "\n[TRUNCATED]"
@@ -486,7 +515,14 @@ def validate_transcript_messages(
             role not in {"user", "assistant"}
             or not isinstance(identifier, str)
             or not identifier
-            or len(identifier.encode("utf-8")) > 1024
+            or len(
+                external_utf8_bytes(
+                    identifier,
+                    code="transcript_capture_failed",
+                    label="Transcript message identifier",
+                )
+            )
+            > 1024
             or not isinstance(parts, list)
         ):
             raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
@@ -518,9 +554,14 @@ def validate_transcript_messages(
                     )
             if kind in {"structured_output", "json_schema"}:
                 message_results.append(part.get("value", part.get("output")))
+        if info.get("structured") is not None:
+            message_results.append(info["structured"])
         if message.get("structured_output") is not None:
             message_results.append(message["structured_output"])
-        if message.get("error") == "StructuredOutputError":
+        message_error = info.get("error", message.get("error"))
+        if message_error == "StructuredOutputError" or (
+            isinstance(message_error, dict) and message_error.get("name") == "StructuredOutputError"
+        ):
             raise ControllerError(
                 "invalid_agent_result", "OpenCode transcript reports structured output failure"
             )
@@ -546,7 +587,7 @@ def validate_transcript_messages(
             role != "assistant"
             or assistant_index <= user_index
             or parent != user_id
-            or assistant.get("error") is not None
+            or info.get("error", assistant.get("error")) is not None
             or captured_result != expected_result
         ):
             raise ControllerError(
@@ -562,9 +603,12 @@ def transcript_wrapper(
     *,
     expected_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Validate, recursively redact, and deterministically bound message evidence."""
+    """Safely redact and bound opaque transcript evidence before semantic acceptance."""
     _bounded_string(session_id, "session_id")
-    validate_transcript_messages(messages, expected_result)
+    del expected_result
+    if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages):
+        raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
+    validate_external_utf8(messages, code="transcript_capture_failed", label="OpenCode transcript")
     sanitized = redact_external_data(messages)
     truncated = False
 
@@ -592,7 +636,9 @@ def transcript_wrapper(
         raise ControllerError(
             "transcript_capture_failed", "OpenCode transcript is malformed"
         ) from error
-    original_bytes = len(content.encode())
+    original_bytes = len(
+        external_utf8_bytes(content, code="transcript_capture_failed", label="Sanitized transcript")
+    )
     wrapper = {
         "schema_version": 1,
         "session_id": session_id,
@@ -741,7 +787,11 @@ def _validate_transcript_wrapper(
                 else (_ for _ in ()).throw(ValueError("duplicate key")),
                 parse_constant=lambda item: (_ for _ in ()).throw(ValueError(item)),
             )
-            validate_transcript_messages(messages, expected_result)
+            validate_external_utf8(
+                messages, code="inconsistent_invocation_record", label="Invocation transcript"
+            )
+            if expected_result is not None:
+                validate_transcript_messages(messages, expected_result)
         except ControllerError as error:
             raise _record_error("Invocation transcript evidence is inconsistent", error) from error
         except (json.JSONDecodeError, ValueError, RecursionError) as error:
@@ -749,7 +799,11 @@ def _validate_transcript_wrapper(
         canonical = json.dumps(
             messages, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":")
         )
-        if canonical != content or wrapper["original_bytes"] != len(content.encode("utf-8")):
+        if canonical != content or wrapper["original_bytes"] != len(
+            external_utf8_bytes(
+                content, code="inconsistent_invocation_record", label="Invocation transcript"
+            )
+        ):
             raise _record_error("Invocation transcript content is not canonical")
 
 

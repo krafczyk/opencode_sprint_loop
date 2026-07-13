@@ -8,9 +8,10 @@ import json
 import os
 import re
 import socket
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -25,12 +26,51 @@ from .agent_runner import (
     ValidatedServer,
 )
 from .errors import ControllerError
+from .security import external_utf8_bytes
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 10
-_VERSION = re.compile(r"^(1)\.(17)\.(\d+)$")
+# Sprint 2 supports only SemVer release versions in the documented 1.17.x
+# compatibility window.  In particular, leading-zero numeric components are
+# malformed rather than an alternate spelling of a supported release.
+_VERSION = re.compile(r"^1\.17\.(?:0|[1-9]\d*)$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _PERMISSIONS = ({"permission": "*", "pattern": "*", "action": "deny"},)
+
+
+def _bounded_identifier(value: Any) -> TypeGuard[str]:
+    """Return whether one server identifier is safe for durable controller records."""
+    if not isinstance(value, str) or not value or _CONTROL.search(value):
+        return False
+    try:
+        return (
+            len(
+                external_utf8_bytes(
+                    value, code="malformed_server_response", label="OpenCode server identifier"
+                )
+            )
+            <= 1024
+        )
+    except ControllerError:
+        # Strict JSON permits escaped unpaired surrogates.  They are not valid
+        # durable external identifiers, but must remain an expected response
+        # validation failure rather than escaping as a controller exception.
+        return False
+
+
+def _server_absolute_path(value: Any, label: str) -> Path:
+    """Require one non-empty absolute server path before canonicalizing it."""
+    if not isinstance(value, str) or not value:
+        raise ControllerError("malformed_server_response", f"OpenCode {label} path is invalid")
+    path = Path(value)
+    if not path.is_absolute():
+        raise ControllerError("malformed_server_response", f"OpenCode {label} path is not absolute")
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError, UnicodeEncodeError) as error:
+        raise ControllerError(
+            "malformed_server_response", f"OpenCode {label} path is invalid"
+        ) from error
 
 
 def parse_server_url(value: str) -> str:
@@ -155,6 +195,7 @@ class OpenCodeServerRunner:
         body: dict[str, Any] | None = None,
         *,
         http_error_code: str = "server_unavailable",
+        deadline: float | None = None,
     ) -> Any:
         """Send one bounded JSON request and normalize transport failures safely."""
         payload = (
@@ -169,8 +210,16 @@ class OpenCodeServerRunner:
         authorization = self.authentication.header()
         if authorization is not None:
             request.add_header("Authorization", authorization)
+        timeout = float(self.timeout_seconds)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ControllerError(
+                    "invocation_timed_out", "OpenCode invocation exceeded its configured timeout"
+                )
+            timeout = min(timeout, remaining)
         try:
-            with self._opener.open(request, timeout=self.timeout_seconds) as response:
+            with self._opener.open(request, timeout=timeout) as response:
                 if response.geturl() != self._url(path):
                     raise ControllerError(
                         "server_api_incompatible", "OpenCode server redirected a request"
@@ -192,6 +241,10 @@ class OpenCodeServerRunner:
             finally:
                 error.close()
         except (URLError, TimeoutError, socket.timeout, OSError) as error:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ControllerError(
+                    "invocation_timed_out", "OpenCode invocation exceeded its configured timeout"
+                ) from error
             raise ControllerError("server_unavailable", "OpenCode server is unavailable") from error
         if len(raw) > MAX_RESPONSE_BYTES:
             raise ControllerError("server_response_too_large", "OpenCode response exceeds 8 MiB")
@@ -243,12 +296,14 @@ class OpenCodeServerRunner:
             )
         location = self._object(self._request("GET", "/path"), "path")
         try:
-            directory = Path(location["directory"]).resolve()
-            worktree = Path(location["worktree"]).resolve()
-        except (KeyError, TypeError, OSError, RuntimeError) as error:
+            directory_value = location["directory"]
+            worktree_value = location["worktree"]
+        except KeyError as error:
             raise ControllerError(
                 "malformed_server_response", "OpenCode path response is invalid"
             ) from error
+        directory = _server_absolute_path(directory_value, "directory")
+        worktree = _server_absolute_path(worktree_value, "worktree")
         if directory != request.sprint_root or worktree != request.sprint_root:
             raise ControllerError(
                 "wrong_server_workspace",
@@ -365,7 +420,7 @@ class OpenCodeServerRunner:
         result: set[str] = set()
         for session in sessions:
             identifier = session.get("id") if isinstance(session, dict) else None
-            if not isinstance(identifier, str) or not identifier or len(identifier.encode()) > 1024:
+            if not _bounded_identifier(identifier):
                 raise ControllerError(
                     "malformed_server_response", "OpenCode session identifier is invalid"
                 )
@@ -398,18 +453,17 @@ class OpenCodeServerRunner:
             raise
         identifier = response.get("id")
         title = response.get("title")
-        parent = response.get("parentID", response.get("parent_id"))
-        permissions = response.get("permission", response.get("permissions"))
+        parent = self._consistent_alias(response, "parentID", "parent_id")
+        permissions = self._consistent_alias(response, "permission", "permissions")
         try:
-            directory = Path(response["directory"]).resolve()
-        except (KeyError, TypeError, OSError, RuntimeError) as error:
+            directory_value = response["directory"]
+        except KeyError as error:
             raise ControllerError(
                 "malformed_server_response", "Created session directory is invalid"
             ) from error
+        directory = _server_absolute_path(directory_value, "created session directory")
         if (
-            not isinstance(identifier, str)
-            or not identifier
-            or len(identifier.encode()) > 1024
+            not _bounded_identifier(identifier)
             or title != request.title
             or parent is not None
             or directory != request.sprint_root
@@ -424,7 +478,19 @@ class OpenCodeServerRunner:
             )
         return CreatedSession(identifier, title, directory, _PERMISSIONS)
 
-    def submit_prompt(self, session: CreatedSession, request: InvocationRequest) -> None:
+    @staticmethod
+    def _consistent_alias(response: dict[str, Any], first: str, second: str) -> Any:
+        """Return one API spelling while rejecting contradictory duplicate aliases."""
+        if first in response and second in response and response[first] != response[second]:
+            raise ControllerError(
+                "session_creation_failed",
+                "Created session contains inconsistent compatibility fields",
+            )
+        return response[first] if first in response else response.get(second)
+
+    def submit_prompt(
+        self, session: CreatedSession, request: InvocationRequest, *, deadline: float | None = None
+    ) -> None:
         """Submit the fixed structured-output request after session durability is complete."""
         provider_id, _, model_id = request.model.partition("/")
         schema = {
@@ -450,6 +516,7 @@ class OpenCodeServerRunner:
                     "format": {"type": "json_schema", "schema": schema},
                 },
                 http_error_code="prompt_submission_failed",
+                deadline=deadline,
             )
         except ControllerError as error:
             if error.code == "server_unavailable":
@@ -466,9 +533,13 @@ class OpenCodeServerRunner:
                 "prompt_submission_failed", "OpenCode did not accept the asynchronous probe prompt"
             )
 
-    def _messages(self, session: CreatedSession) -> list[dict[str, Any]]:
+    def _messages(
+        self, session: CreatedSession, *, deadline: float | None = None
+    ) -> list[dict[str, Any]]:
         """Fetch the documented message collection without interpreting prose as output."""
-        response = self._request("GET", f"/session/{quote(session.session_id, safe='')}/message")
+        response = self._request(
+            "GET", f"/session/{quote(session.session_id, safe='')}/message", deadline=deadline
+        )
         messages = response.get("messages") if isinstance(response, dict) else response
         if not isinstance(messages, list) or not all(
             isinstance(message, dict) for message in messages
@@ -478,9 +549,11 @@ class OpenCodeServerRunner:
             )
         return messages
 
-    def observe(self, session: CreatedSession) -> InvocationObservation:
+    def observe(
+        self, session: CreatedSession, *, deadline: float | None = None
+    ) -> InvocationObservation:
         """Read one status map and message collection, detecting structured and tool evidence."""
-        status_response = self._request("GET", "/session/status")
+        status_response = self._request("GET", "/session/status", deadline=deadline)
         statuses = (
             status_response.get("statuses", status_response)
             if isinstance(status_response, dict)
@@ -491,15 +564,16 @@ class OpenCodeServerRunner:
                 "malformed_server_response", "OpenCode status response is invalid"
             )
         value = statuses.get(session.session_id)
-        status = value.get("status") if isinstance(value, dict) else value
+        status = value.get("type", value.get("status")) if isinstance(value, dict) else value
         if status is not None and not isinstance(status, str):
             raise ControllerError("malformed_server_response", "OpenCode session status is invalid")
-        messages = self._messages(session)
+        messages = self._messages(session, deadline=deadline)
         result: Any | None = None
         structured_error = False
         unexpected_tool = False
         terminal_assistant_error = False
         user_messages: list[tuple[int, str]] = []
+        assistant_messages: list[tuple[int, dict[str, Any]]] = []
         assistant_results: list[tuple[int, dict[str, Any], Any]] = []
         for index, message in enumerate(messages):
             raw_info = message.get("info")
@@ -508,7 +582,11 @@ class OpenCodeServerRunner:
             identifier = message.get("id", info.get("id"))
             if role == "user" and isinstance(identifier, str) and identifier:
                 user_messages.append((index, identifier))
-            message_result: Any | None = None
+            if role == "assistant":
+                assistant_messages.append((index, message))
+            message_results: list[Any] = []
+            if info.get("structured") is not None:
+                message_results.append(info["structured"])
             for part in (
                 message.get("parts", []) if isinstance(message.get("parts", []), list) else []
             ):
@@ -518,7 +596,7 @@ class OpenCodeServerRunner:
                     )
                 kind = part.get("type")
                 if kind in {"structured_output", "json_schema"}:
-                    message_result = part.get("value", part.get("output"))
+                    message_results.append(part.get("value", part.get("output")))
                 if kind == "tool":
                     tool = part.get("tool", part.get("name"))
                     if tool == "StructuredOutputError":
@@ -528,31 +606,54 @@ class OpenCodeServerRunner:
                 if kind == "permission":
                     unexpected_tool = True
             if message.get("structured_output") is not None:
-                message_result = message["structured_output"]
-            if message.get("error") == "StructuredOutputError":
+                message_results.append(message["structured_output"])
+            message_error = info.get("error", message.get("error"))
+            if message_error == "StructuredOutputError" or (
+                isinstance(message_error, dict)
+                and message_error.get("name") == "StructuredOutputError"
+            ):
                 structured_error = True
-            if message_result is not None:
-                assistant_results.append((index, message, message_result))
+            if len(message_results) > 1:
+                raise ControllerError(
+                    "malformed_server_response",
+                    "OpenCode message has conflicting structured output",
+                )
+            if message_results:
+                assistant_results.append((index, message, message_results[0]))
         terminal_assistant = False
-        if len(user_messages) == 1 and len(assistant_results) == 1:
+        if len(user_messages) == 1:
             user_index, user_id = user_messages[0]
-            assistant_index, assistant, result = assistant_results[0]
-            raw_assistant_info = assistant.get("info")
-            assistant_info: dict[str, Any] = (
-                raw_assistant_info if isinstance(raw_assistant_info, dict) else {}
-            )
-            role = assistant.get("role", assistant_info.get("role"))
-            parent = assistant.get(
-                "parentID",
-                assistant.get(
-                    "parent_id", assistant_info.get("parentID", assistant_info.get("parent_id"))
-                ),
-            )
-            terminal_assistant = (
-                role == "assistant" and assistant_index > user_index and parent == user_id
-            )
-            terminal_assistant_error = terminal_assistant and assistant.get("error") is not None
-        elif assistant_results:
+            terminal_candidates: list[tuple[int, dict[str, Any]]] = []
+            for assistant_index, assistant in assistant_messages:
+                raw_assistant_info = assistant.get("info")
+                assistant_info: dict[str, Any] = (
+                    raw_assistant_info if isinstance(raw_assistant_info, dict) else {}
+                )
+                parent = assistant.get(
+                    "parentID",
+                    assistant.get(
+                        "parent_id",
+                        assistant_info.get("parentID", assistant_info.get("parent_id")),
+                    ),
+                )
+                if assistant_index > user_index and parent == user_id:
+                    terminal_candidates.append((assistant_index, assistant))
+            if len(terminal_candidates) == 1:
+                terminal_assistant = True
+                assistant_index, assistant = terminal_candidates[0]
+                raw_assistant_info = assistant.get("info")
+                assistant_info = raw_assistant_info if isinstance(raw_assistant_info, dict) else {}
+                terminal_assistant_error = (
+                    assistant_info.get("error", assistant.get("error")) is not None
+                )
+                terminal_results = [
+                    value
+                    for index, _message, value in assistant_results
+                    if index == assistant_index
+                ]
+                if len(terminal_results) == 1:
+                    result = terminal_results[0]
+        if result is None and assistant_results:
             result = assistant_results[-1][2]
         return InvocationObservation(
             status,
@@ -574,6 +675,8 @@ class OpenCodeServerRunner:
             or (isinstance(response, dict) and response.get("acknowledged", True) is True)
         )
 
-    def transcript(self, session: CreatedSession) -> TranscriptCapture:
+    def transcript(
+        self, session: CreatedSession, *, deadline: float | None = None
+    ) -> TranscriptCapture:
         """Return the raw message array for bounded controller-side persistence."""
-        return TranscriptCapture(self._messages(session))
+        return TranscriptCapture(self._messages(session, deadline=deadline))
