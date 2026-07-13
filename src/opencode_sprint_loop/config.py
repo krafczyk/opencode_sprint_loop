@@ -83,7 +83,9 @@ def load_config(root: Path) -> SprintConfig:
     try:
         directory = open_directory(root)
         try:
-            descriptor = os.open(config_path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+            descriptor = os.open(
+                config_path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory
+            )
             try:
                 details = os.fstat(descriptor)
                 if not stat.S_ISREG(details.st_mode):
@@ -188,8 +190,12 @@ def load_config(root: Path) -> SprintConfig:
                     os.close(descriptor)
             finally:
                 os.close(directory)
-        except (FileNotFoundError, OSError, ValueError):
+        except FileNotFoundError:
             pass
+        except (OSError, ValueError) as error:
+            raise ControllerError(
+                "invalid_config", f"documents.{key} cannot be resolved safely within {root}"
+            ) from error
         if (
             document_details is None
             or not stat.S_ISREG(document_details.st_mode)
@@ -214,9 +220,11 @@ def load_config(root: Path) -> SprintConfig:
         agent_file = root / ".opencode" / "agents" / f"{name}.md"
         try:
             local_agent = agent_file.resolve().relative_to(root)
-        except ValueError:
+            valid_agent = not agent_file.is_symlink() and agent_file.is_file()
+        except (OSError, RuntimeError, ValueError):
             local_agent = None
-        if agent_file.is_symlink() or not agent_file.is_file() or local_agent is None:
+            valid_agent = False
+        if not valid_agent or local_agent is None:
             raise ControllerError(
                 "invalid_agent_definition", f"Missing agent definition: {agent_file}"
             )

@@ -7,7 +7,6 @@ import json
 import os
 import secrets
 import socket
-import stat
 import sys
 from pathlib import Path
 from typing import NoReturn, Sequence
@@ -16,7 +15,7 @@ from . import __version__
 from .config import SprintConfig, load_config
 from .errors import ControllerError
 from .git import is_tracked_path, validate_preflight, validate_root
-from .locking import advisory_lock, ownership_lock
+from .locking import ownership_lock, persistence_lock as persistence_advisory_lock
 from .paths import RuntimePaths, canonical_root, ensure_runtime_paths_safe, runtime_paths
 from .safeio import open_directory
 from .security import redact_diagnostic
@@ -93,6 +92,21 @@ def _existing_run(paths: RuntimePaths, config: SprintConfig) -> None:
         )
 
 
+def _existing_run_before_preflight(
+    paths: RuntimePaths, config: SprintConfig, persistence_lock: Path
+) -> None:
+    """Read existing artifacts under an existing persistence lock when available."""
+    while True:
+        try:
+            with persistence_advisory_lock(persistence_lock, exclusive=False, create=False):
+                _existing_run(paths, config)
+            return
+        except FileNotFoundError:
+            _existing_run(paths, config)
+            if not persistence_lock.exists():
+                return
+
+
 def _reject_tracked_lock_metadata(root: Path, paths: RuntimePaths) -> None:
     """Refuse to replace lock metadata that belongs to the sprint repository history."""
     if paths.lock_metadata.exists() and is_tracked_path(root, paths.lock_metadata):
@@ -103,7 +117,11 @@ def _reject_tracked_lock_metadata(root: Path, paths: RuntimePaths) -> None:
 
 
 def _write_lock_metadata(root: Path, path: Path, state: dict[str, object]) -> None:
-    """Install descriptive lock metadata without overwriting a tracked race."""
+    """Create descriptive metadata without replacing an existing path entry.
+
+    Existing metadata is descriptive only and must never block ownership. Leaving
+    it untouched avoids deleting content installed by a concurrent user process.
+    """
     metadata = {
         "schema_version": 1,
         "run_id": state["run_id"],
@@ -113,7 +131,6 @@ def _write_lock_metadata(root: Path, path: Path, state: dict[str, object]) -> No
         "started_at": state["created_at"],
     }
     temporary_name: str | None = None
-    stale_name: str | None = None
     directory: int | None = None
     try:
         directory = open_directory(path.parent, create=True)
@@ -132,51 +149,13 @@ def _write_lock_metadata(root: Path, path: Path, state: dict[str, object]) -> No
         finally:
             os.close(descriptor)
         try:
-            existing = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
-        except FileNotFoundError:
-            existing = None
-        if existing is not None:
-            if not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1:
-                raise ControllerError(
-                    "persistence_failed", f"Lock metadata must be an unlinked regular file: {path}"
-                )
-            if is_tracked_path(root, path):
-                raise ControllerError(
-                    "inconsistent_persistence",
-                    f"Tracked lock metadata cannot be replaced: {path}. Remove it from repository history before running",
-                )
-            stale_name = f".stale-lock-{secrets.token_hex(16)}.tmp"
-            os.link(
-                path.name,
-                stale_name,
-                src_dir_fd=directory,
-                dst_dir_fd=directory,
-                follow_symlinks=False,
-            )
-            os.unlink(path.name, dir_fd=directory)
-        # A Git index entry appearing after the initial preflight is still
-        # detected after removing stale metadata. The final link never replaces
-        # an entry created by another process.
-        if is_tracked_path(root, path):
-            if stale_name is not None:
-                os.link(stale_name, path.name, src_dir_fd=directory, dst_dir_fd=directory)
-                os.unlink(stale_name, dir_fd=directory)
-                stale_name = None
-            raise ControllerError(
-                "inconsistent_persistence",
-                f"Tracked lock metadata cannot be replaced: {path}. Remove it from repository history before running",
-            )
-        try:
             os.link(temporary_name, path.name, src_dir_fd=directory, dst_dir_fd=directory)
-        except FileExistsError as error:
-            raise ControllerError(
-                "persistence_failed", f"Lock metadata changed during persistence: {path}"
-            ) from error
+        except FileExistsError:
+            # A stale or malformed descriptive record is intentionally retained.
+            # The advisory ownership lock is authoritative.
+            return
         os.unlink(temporary_name, dir_fd=directory)
         temporary_name = None
-        if stale_name is not None:
-            os.unlink(stale_name, dir_fd=directory)
-            stale_name = None
         os.fsync(directory)
     except OSError as error:
         raise ControllerError(
@@ -186,11 +165,6 @@ def _write_lock_metadata(root: Path, path: Path, state: dict[str, object]) -> No
         if temporary_name is not None and directory is not None:
             try:
                 os.unlink(temporary_name, dir_fd=directory)
-            except FileNotFoundError:
-                pass
-        if stale_name is not None and directory is not None:
-            try:
-                os.unlink(stale_name, dir_fd=directory)
             except FileNotFoundError:
                 pass
         if directory is not None:
@@ -233,7 +207,7 @@ def _run(root_value: str, server_url: str) -> int:
     root, config, paths, run_lock, persistence_lock = _load_root_config(root_value)
     # Initial validation must not create controller metadata. A concurrent run
     # is rechecked under both locks after this read-only pass.
-    _existing_run(paths, config)
+    _existing_run_before_preflight(paths, config, persistence_lock)
     _reject_tracked_lock_metadata(root, paths)
     allowed = (
         {paths.lock_metadata.relative_to(root).as_posix()}
@@ -256,7 +230,7 @@ def _run(root_value: str, server_url: str) -> int:
             # The first transition includes the post-lock revalidation and
             # metadata creation under one exclusive persistence lock so status
             # sees either no run or a complete initialized run.
-            with advisory_lock(persistence_lock, exclusive=True) as persistence:
+            with persistence_advisory_lock(persistence_lock, exclusive=True) as persistence:
                 ownership.ensure_current()
                 persistence.ensure_current()
                 _existing_run(paths, config)
@@ -274,6 +248,7 @@ def _run(root_value: str, server_url: str) -> int:
                 state = persist_initial(
                     state, paths.events, paths.state, persistence_lock, lock_held=True
                 )
+                persistence.ensure_current()
             ownership.ensure_current()
             state = transition(state, paths.events, paths.state, persistence_lock, "validating")
             ownership.ensure_current()
@@ -301,8 +276,9 @@ def _run(root_value: str, server_url: str) -> int:
 def _status(root_value: str, as_json: bool) -> int:
     """Print current durable status without requiring a clean worktree."""
     root, config, paths, run_lock, persistence_lock = _load_root_config(root_value)
-    with advisory_lock(persistence_lock, exclusive=False):
+    with persistence_advisory_lock(persistence_lock, exclusive=False) as lock:
         status = project_status(root, config, paths, run_lock)
+        lock.ensure_current()
     if as_json:
         sys.stdout.write(json.dumps(status, sort_keys=True) + "\n")
     else:

@@ -11,7 +11,7 @@ from .errors import ControllerError
 
 
 def canonical_root(value: str) -> Path:
-    """Return an existing canonical sprint root directory."""
+    """Return an existing canonical sprint root or raise ``ControllerError``."""
     path = Path(value).expanduser()
     if not path.exists():
         raise ControllerError("root_not_found", f"Sprint root does not exist: {path.absolute()}")
@@ -23,11 +23,16 @@ def canonical_root(value: str) -> Path:
 
 
 def resolve_within(root: Path, value: str, *, field: str, require_exists: bool = False) -> Path:
-    """Resolve a relative path and reject escapes from the canonical root."""
+    """Resolve a safe relative path or raise ``ControllerError`` for escapes or absence."""
     candidate = Path(value)
     if candidate.is_absolute() or ".." in candidate.parts:
         raise ControllerError("invalid_config", f"{field} must be a relative path within {root}")
-    resolved = (root / candidate).resolve()
+    try:
+        resolved = (root / candidate).resolve()
+    except (OSError, RuntimeError) as error:
+        raise ControllerError(
+            "invalid_config", f"{field} cannot be resolved safely within {root}"
+        ) from error
     try:
         resolved.relative_to(root)
     except ValueError as error:

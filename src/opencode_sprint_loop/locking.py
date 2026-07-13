@@ -39,11 +39,23 @@ class OwnershipLock:
 
 
 @contextmanager
-def advisory_lock(path: Path, *, exclusive: bool, blocking: bool = True) -> Iterator[AdvisoryLock]:
-    """Hold and revalidate a Linux lock on a dedicated non-worktree directory."""
+def advisory_lock(
+    path: Path, *, exclusive: bool, blocking: bool = True, create: bool = True
+) -> Iterator[AdvisoryLock]:
+    """Hold a Linux advisory lock, creating its anchor when requested.
+
+    Yields an anchor that callers must revalidate before durable mutation. Raises
+    ``ControllerError`` when the anchor cannot be used or ownership is contested.
+    """
     descriptor: int | None = None
     try:
-        descriptor = open_directory(path, create=True)
+        descriptor = open_directory(path, create=create)
+    except FileNotFoundError:
+        if not create:
+            raise
+        raise ControllerError(
+            "persistence_failed", f"Cannot create lock directory: {path}"
+        ) from None
     except OSError as error:
         raise ControllerError(
             "persistence_failed", f"Cannot create lock directory: {path}"
@@ -78,6 +90,22 @@ def ownership_lock(path: Path, *, blocking: bool = True) -> Iterator[OwnershipLo
     with advisory_lock(namespace_path, exclusive=True, blocking=blocking) as namespace:
         with advisory_lock(path, exclusive=True, blocking=blocking) as run:
             lock = OwnershipLock(namespace, run)
+            lock.ensure_current()
+            yield lock
+
+
+@contextmanager
+def persistence_lock(
+    path: Path, *, exclusive: bool, blocking: bool = True, create: bool = True
+) -> Iterator[AdvisoryLock]:
+    """Serialize persistence readers and writers despite persistence-anchor replacement.
+
+    A sibling namespace lock protects the replaceable visible persistence anchor.
+    Raises ``ControllerError`` for contention or unsafe filesystem changes.
+    """
+    namespace = path.parent / "persistence-namespace"
+    with advisory_lock(namespace, exclusive=exclusive, blocking=blocking, create=create):
+        with advisory_lock(path, exclusive=exclusive, blocking=blocking, create=create) as lock:
             lock.ensure_current()
             yield lock
 

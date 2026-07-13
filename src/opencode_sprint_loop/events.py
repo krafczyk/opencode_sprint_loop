@@ -203,8 +203,21 @@ def append_event(path: Path, event: dict[str, Any]) -> None:
             os.close(directory)
 
 
-def append_event_at(directory: int, name: str, path: Path, event: dict[str, Any]) -> None:
-    """Durably append one event through an already-open runtime directory."""
+def append_event_at(
+    directory: int,
+    name: str,
+    path: Path,
+    event: dict[str, Any],
+    *,
+    expected_identity: tuple[int, int] | None = None,
+    require_absent: bool = False,
+) -> None:
+    """Durably append one event through an already-open runtime directory.
+
+    ``expected_identity`` binds an append to the previously validated file;
+    ``require_absent`` atomically creates the first event log without accepting
+    a file installed by another process.
+    """
     validate_event(event, code="persistence_failed")
     try:
         serialized = (
@@ -216,8 +229,19 @@ def append_event_at(directory: int, name: str, path: Path, event: dict[str, Any]
     if len(serialized) > MAX_JSON_BYTES:
         raise ControllerError("persistence_failed", "Event exceeds 1 MiB")
     try:
-        descriptor = open_regular_at(directory, name, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        if require_absent:
+            flags |= os.O_EXCL
+        descriptor = open_regular_at(directory, name, flags)
         try:
+            details = os.fstat(descriptor)
+            identity = (details.st_dev, details.st_ino)
+            if require_absent and expected_identity is not None:
+                raise ControllerError("persistence_failed", "Initial event log identity is invalid")
+            if expected_identity is not None and identity != expected_identity:
+                raise ControllerError(
+                    "persistence_failed", f"Event log changed during append: {path}"
+                )
             written = os.write(descriptor, serialized)
             if written != len(serialized):
                 raise ControllerError("persistence_failed", "Short write while appending event")

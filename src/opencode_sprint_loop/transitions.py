@@ -4,21 +4,33 @@ from __future__ import annotations
 
 import copy
 import os
+import stat
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypeAlias, cast
 
 from .errors import ControllerError
 from .events import append_event_at, load_events_at, transition_event, validate_event_history
-from .locking import advisory_lock
+from .locking import persistence_lock as persistence_advisory_lock
 from .safeio import open_directory, require_current_directory
 from .state import load_state_at, serialize_state, validate_state, write_state_atomic_at
 
-_ALLOWED = {
+WorkflowState: TypeAlias = Literal["initializing", "validating", "blocked", "failed"]
+EventType: TypeAlias = Literal["run.started", "state.entered", "run.blocked"]
+
+_ALLOWED: dict[tuple[WorkflowState, WorkflowState], EventType] = {
     ("initializing", "validating"): "state.entered",
     ("validating", "blocked"): "run.blocked",
     ("initializing", "failed"): "state.entered",
     ("validating", "failed"): "state.entered",
 }
+
+
+def _artifact_identity(directory: int, name: str, path: Path) -> tuple[int, int]:
+    """Return the regular single-link identity validated for a durable artifact."""
+    details = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+        raise ControllerError("persistence_failed", f"Runtime artifact is unsafe: {path}")
+    return details.st_dev, details.st_ino
 
 
 def _load_durable_pair(directory: int, events_path: Path, state_path: Path) -> dict[str, Any]:
@@ -90,8 +102,10 @@ def persist_initial(
             next_state["last_event_sequence"] = event["sequence"]
             next_state["updated_at"] = event["timestamp"]
             serialized = serialize_state(next_state)
-            append_event_at(directory, events_path.name, events_path, event)
-            write_state_atomic_at(directory, state_path.name, state_path, serialized)
+            append_event_at(directory, events_path.name, events_path, event, require_absent=True)
+            write_state_atomic_at(
+                directory, state_path.name, state_path, serialized, require_absent=True
+            )
             require_current_directory(state_path.parent, directory)
             return next_state
         finally:
@@ -99,7 +113,7 @@ def persist_initial(
 
     if lock_held:
         return persist()
-    with advisory_lock(persistence_lock, exclusive=True) as lock:
+    with persistence_advisory_lock(persistence_lock, exclusive=True) as lock:
         lock.ensure_current()
         return persist()
 
@@ -109,18 +123,20 @@ def transition(
     events_path: Path,
     state_path: Path,
     persistence_lock: Path,
-    destination: str,
+    destination: WorkflowState,
     *,
     reason: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist one guarded event/state transition from validated durable data."""
     del state  # The durable snapshot, not a potentially stale caller copy, is authoritative.
-    with advisory_lock(persistence_lock, exclusive=True) as lock:
+    with persistence_advisory_lock(persistence_lock, exclusive=True) as lock:
         lock.ensure_current()
         directory = open_directory(state_path.parent)
         try:
             current = _load_durable_pair(directory, events_path, state_path)
-            source = current["state"]
+            events_identity = _artifact_identity(directory, events_path.name, events_path)
+            state_identity = _artifact_identity(directory, state_path.name, state_path)
+            source = cast(WorkflowState, current["state"])
             event_type = _ALLOWED.get((source, destination))
             if event_type is None:
                 raise ControllerError(
@@ -142,8 +158,23 @@ def transition(
             if destination in {"blocked", "failed"}:
                 next_state["process"]["active"] = False
             serialized = serialize_state(next_state)
-            append_event_at(directory, events_path.name, events_path, event)
-            write_state_atomic_at(directory, state_path.name, state_path, serialized)
+            lock.ensure_current()
+            append_event_at(
+                directory,
+                events_path.name,
+                events_path,
+                event,
+                expected_identity=events_identity,
+            )
+            lock.ensure_current()
+            write_state_atomic_at(
+                directory,
+                state_path.name,
+                state_path,
+                serialized,
+                expected_identity=state_identity,
+            )
+            lock.ensure_current()
             require_current_directory(state_path.parent, directory)
             return next_state
         finally:

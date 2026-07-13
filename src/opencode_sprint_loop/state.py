@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import re
 import socket
@@ -364,18 +365,68 @@ def write_state_atomic(path: Path, state: dict[str, Any]) -> None:
             os.close(directory)
 
 
-def write_state_atomic_at(directory: int, name: str, path: Path, serialized: str) -> None:
-    """Atomically replace state through one already-open runtime directory descriptor."""
+def _rename_exchange(directory: int, first: str, second: str) -> None:
+    """Atomically exchange two names or fail without replacing either path."""
+    function = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if function is None:
+        raise ControllerError("persistence_failed", "Atomic state replacement is unavailable")
+    function.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    function.restype = ctypes.c_int
+    if (
+        function(
+            directory,
+            os.fsencode(first),
+            directory,
+            os.fsencode(second),
+            0x2,  # RENAME_EXCHANGE
+        )
+        != 0
+    ):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def write_state_atomic_at(
+    directory: int,
+    name: str,
+    path: Path,
+    serialized: str,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+    require_absent: bool = False,
+) -> None:
+    """Atomically replace validated state without overwriting a swapped path.
+
+    The first state is installed by an exclusive hard link. Later replacements
+    use Linux ``RENAME_EXCHANGE`` and restore an unexpected replacement before
+    reporting the persistence failure.
+    """
     temporary_name: str | None = None
     try:
+        existing_identity: tuple[int, int] | None = None
         try:
             existing = os.stat(name, dir_fd=directory, follow_symlinks=False)
             if not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1:
                 raise ControllerError(
                     "persistence_failed", f"State file must be an unlinked regular file: {path}"
                 )
+            existing_identity = (existing.st_dev, existing.st_ino)
         except FileNotFoundError:
             pass
+        if require_absent and existing_identity is not None:
+            raise ControllerError(
+                "persistence_failed", f"Initial state file already exists: {path}"
+            )
+        if expected_identity is not None and existing_identity != expected_identity:
+            raise ControllerError(
+                "persistence_failed", f"State file changed during transition: {path}"
+            )
         temporary_name = f".state-{uuid.uuid4().hex}.tmp"
         descriptor = os.open(
             temporary_name,
@@ -390,7 +441,21 @@ def write_state_atomic_at(directory: int, name: str, path: Path, serialized: str
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        os.replace(temporary_name, name, src_dir_fd=directory, dst_dir_fd=directory)
+        if existing_identity is None:
+            try:
+                os.link(temporary_name, name, src_dir_fd=directory, dst_dir_fd=directory)
+            except FileExistsError as error:
+                raise ControllerError(
+                    "persistence_failed", f"State file changed during transition: {path}"
+                ) from error
+        else:
+            _rename_exchange(directory, temporary_name, name)
+            displaced = os.stat(temporary_name, dir_fd=directory, follow_symlinks=False)
+            if (displaced.st_dev, displaced.st_ino) != existing_identity:
+                _rename_exchange(directory, temporary_name, name)
+                raise ControllerError(
+                    "persistence_failed", f"State file changed during transition: {path}"
+                )
         os.fsync(directory)
     except OSError as error:
         raise ControllerError("persistence_failed", f"Could not persist state: {path}") from error

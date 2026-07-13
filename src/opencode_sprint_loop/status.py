@@ -117,7 +117,7 @@ def project_status(
 def validate_persistence(
     paths: RuntimePaths, config: SprintConfig
 ) -> tuple[dict[str, Any], list[dict[str, Any]]] | tuple[None, None]:
-    """Load and cross-validate state and events without projecting status."""
+    """Load and cross-validate state/events or raise a corruption consistency error."""
     try:
         directory = open_directory(paths.info_dir)
     except FileNotFoundError:

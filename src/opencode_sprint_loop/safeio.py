@@ -10,7 +10,11 @@ from .errors import ControllerError
 
 
 def open_directory(path: Path, *, create: bool = False) -> int:
-    """Open an absolute directory without following any path-component symlink."""
+    """Open an absolute non-symlink directory and return a caller-owned descriptor.
+
+    Creates missing components with owner-only permissions when ``create`` is true.
+    Raises ``OSError`` when a component is unsafe or unavailable.
+    """
     absolute = path.absolute()
     if not absolute.is_absolute():  # pragma: no cover - Path.absolute guarantees this.
         raise ControllerError("persistence_failed", f"Directory path must be absolute: {path}")
@@ -69,8 +73,12 @@ def open_regular(
 
 
 def open_regular_at(directory: int, name: str, flags: int, *, mode: int = 0o600) -> int:
-    """Open one single-link regular file relative to an anchored directory."""
-    descriptor = os.open(name, flags | os.O_NOFOLLOW, mode, dir_fd=directory)
+    """Open one single-link regular file relative to an anchored directory.
+
+    The caller owns the returned descriptor. Nonblocking open prevents FIFOs
+    substituted after preflight from stalling controller operations.
+    """
+    descriptor = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, mode, dir_fd=directory)
     details = os.fstat(descriptor)
     readable_snapshot = flags & os.O_ACCMODE == os.O_RDONLY and details.st_nlink == 0
     if not stat.S_ISREG(details.st_mode) or (details.st_nlink != 1 and not readable_snapshot):
@@ -91,7 +99,7 @@ def path_exists(directory: int, name: str) -> bool:
 
 
 def require_current_directory(path: Path, directory: int) -> None:
-    """Fail if a path no longer identifies the directory held by ``directory``."""
+    """Raise ``ControllerError`` if path no longer identifies the open directory."""
     try:
         current = os.stat(path, follow_symlinks=False)
     except OSError as error:
