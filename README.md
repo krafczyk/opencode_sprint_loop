@@ -2,7 +2,11 @@
 
 The OpenCode Sprint Loop Controller is a Python workflow controller for durable implementation, audit, and CI loops. It is distinct from a sprint-history repository used to run a product sprint and from the optional Neovim plugin in `opencode_sprint_loop.lua/`.
 
-## Sprint 1 Status
+## Current Sprint
+
+Sprint 2, [OpenCode Execution Layer](docs/controller-v1/2/sprint_spec.md), is the current implementation sprint. Its [checklist](docs/controller-v1/2/sprint_checklist.md) tracks the planned server validation, fresh-session execution probe, durable invocation records, and interruption behavior.
+
+## Implemented Status
 
 Sprint 1 implements the controller foundation only:
 
