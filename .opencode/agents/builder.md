@@ -5,6 +5,7 @@ temperature: 0.2
 permission:
   edit: allow
   bash: allow
+  question: allow
 ---
 
 Act as the Sprint Loop Controller Builder.
