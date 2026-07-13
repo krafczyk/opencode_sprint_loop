@@ -87,7 +87,7 @@ def validate_safe_data(
             for key, child in nested_value.items():
                 if (
                     not isinstance(key, str)
-                    or (dynamic_keys and contains_credential(key))
+                    or contains_credential(key)
                     or (not dynamic_keys and _SENSITIVE_FIELD.search(key))
                 ):
                     raise ControllerError(
@@ -139,7 +139,17 @@ def redact_external_data(value: Any) -> Any:
         result: dict[str, Any] = {}
         for key, child in value.items():
             text_key = str(key)
-            result[text_key] = (
+            sanitized_key = "[REDACTED]" if contains_credential(text_key) else text_key
+            if sanitized_key in result:
+                # JSON cannot faithfully retain two external fields once key
+                # redaction maps them to the same safe key.  Do not choose one
+                # silently because that would make the transcript lossy and
+                # dependent on input ordering.
+                raise ControllerError(
+                    "transcript_capture_failed",
+                    "OpenCode transcript contains colliding sanitized object keys",
+                )
+            result[sanitized_key] = (
                 "[REDACTED]" if _SENSITIVE_FIELD.search(text_key) else redact_external_data(child)
             )
         return result

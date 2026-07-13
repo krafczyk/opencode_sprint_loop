@@ -276,7 +276,7 @@ fixtures use those documented shapes.
 - [x] **S2-BOUND-009** Truncate oversized transcript content deterministically with explicit markers.
 - [x] **S2-BOUND-010** Fail non-transcript oversized inputs instead of silently truncating semantic data.
 - [x] **S2-SEC-001** Reject credentials in controller-authored prompt, metadata, state, event, and result data.
-- [x] **S2-SEC-002** Reject credential-bearing structured results without writing `result.json`; redact recognizable credentials in other external response and transcript strings.
+- [x] **S2-SEC-002** Reject credential-bearing structured results without writing `result.json`; redact recognizable credentials in other external response and transcript keys and values.
 - [x] **S2-SEC-003** Cover URL user-info, URL query/fragment values, authorization headers, common secret keys, and supported provider token patterns.
 - [x] **S2-SEC-004** Use synthetic credentials in every test and example.
 
@@ -422,7 +422,7 @@ caps. This revalidates **S2-RESULT-006**, **S2-OBS-008**,
 unchecked.
 
 Builder repair verification (2026-07-13) addressed **AUD-S2-009** through
-**AUD-S2-012**. Synthetic current-provider tokens, including all documented
+**AUD-S2-011**. Synthetic current-provider tokens, including all documented
 GitLab forms, plus PostgreSQL and SSH URI user-info are rejected from
 result/state/event data and redacted from transcript/diagnostic paths. Terminal
 transcript acceptance requires the exact submitted prompt and documented
@@ -441,7 +441,8 @@ the complete offline suite (196 passing, one opt-in real-server test skipped),
 Ruff, mypy, compilation, build, clean-wheel installation, and diff checks.
 The synthetic server now returns the documented JSON-boolean abort response.
 
-Builder repair verification (2026-07-13) addressed **AUD-S2-013**. Current
+Builder repair verification (2026-07-13) addressed the value-only portion of
+**AUD-S2-013**. Current
 variable-length stateless GitHub App installation tokens shaped
 `ghs_<APPID>_<JWT>` now fail controller-authored result, state, and event
 validation and redact from transcript and diagnostic paths. Any URI query value
@@ -452,6 +453,18 @@ installation, and diff checks passed. This revalidates **S2-SEC-001** through
 **S2-SEC-004**, **S2-TEST-009**, **S2-TEST-012**, and **S2-ERR-008**, but is not
 a fresh audit; **S2-REVIEW-001** through **S2-REVIEW-009** and **S2-DONE-012**
 remain unchecked.
+
+Builder repair verification (2026-07-13) addressed residual **AUD-S2-012**
+and **AUD-S2-013**. Timeout, transport-interruption, and signal-cancellation
+paths now emit a concise fixed diagnostic only when bounded abort confirmation
+is unavailable, while retaining the exact interruption-event schema. Recursive
+transcript redaction and controller-authored safe-data validation now scan
+object keys as well as values; sanitized key collisions fail transcript capture
+rather than dropping evidence. Focused abort, transcript, and state-contract
+tests and the complete offline suite passed (196 passing, one opt-in real-server
+test skipped), along with Ruff, mypy, compilation, build, and diff checks. This
+is not a fresh audit; **S2-REVIEW-001** through
+**S2-REVIEW-009** and **S2-DONE-012** remain unchecked.
 
 ## 28. Scope Review
 

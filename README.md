@@ -210,9 +210,15 @@ strict JSON-boolean abort acknowledgement and whether idle or terminal
 confirmation was obtained before capturing any available sanitized transcript. `SIGINT` and
 `SIGTERM` return statuses 130 and 143 respectively. Ambiguous session creation
 is not retried and an orphan session may remain. Interrupted work is not resumed
-or repaired in Sprint 2.
+or repaired in Sprint 2. When cancellation confirmation is unavailable, the
+controller writes a concise sanitized diagnostic that the session may remain
+active.
 
 Runtime readers and writers use descriptor-anchored paths and distinct controller-owned Git-metadata lock directories. Git-managed files such as `HEAD` and `config` are never lock anchors because ordinary Git operations can replace them. State/event payloads reject credential-bearing keys, provider tokens (including variable-length stateless GitHub App installation tokens shaped `ghs_<APPID>_<JWT>`), and every URI query value or fragment regardless of its key. CLI diagnostics redact those values along with URI user-info and HTTP authorization values. GitLab forms include `glpat-`, `glcbt-`, `glptt-`, `glrt-`, `glimt-`, `glsoat-`, `gldt-`, `glrtr-`, `glft-`, `glagent-`, `glwt-`, `glffct-`, and `gloas-`. URI user-info is recognized for every URI scheme, including database and SSH URLs.
+
+Transcript sanitization applies the same recognizable-credential checks to
+opaque object keys and values. A collision introduced by safe key redaction is
+rejected rather than silently dropping one field.
 
 Status and existing-run validation cross-check invocation metadata, prompt,
 result, transcript, state, and terminal event identities. Missing or

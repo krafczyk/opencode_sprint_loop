@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+from io import StringIO
 import json
 import os
 import signal
@@ -634,6 +636,19 @@ class OpenCodeExecutionTests(unittest.TestCase):
             ],
         )
         self.assertIn("[REDACTED]", wrapper["content"])
+        token_key = "ghp_" + "A" * 36
+        uri_key = "https://example.invalid/path?opaque=synthetic-secret"
+        for key in (token_key, uri_key):
+            with self.subTest(key=key.split(":", 1)[0]):
+                wrapper = transcript_wrapper("ses_test", [{key: "safe"}])
+                self.assertNotIn(key, wrapper["content"])
+                self.assertIn("[REDACTED]", wrapper["content"])
+        with self.assertRaises(ControllerError) as context:
+            transcript_wrapper(
+                "ses_test",
+                [{token_key: "safe", "[REDACTED]": "safe"}],
+            )
+        self.assertEqual(context.exception.code, "transcript_capture_failed")
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             paths = allocate_paths(root, "test", 1, 1, "auditor")
@@ -1324,9 +1339,17 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 fake = FakeAgentRunner(
                     ValidatedServer("http://127.0.0.1:4096", "1.17.18"), observations=observations
                 )
-                with self.assertRaises(ControllerError) as context:
+                diagnostics = StringIO()
+                with redirect_stderr(diagnostics), self.assertRaises(ControllerError) as context:
                     _run(str(root), "http://127.0.0.1:4096", runner=fake)
                 self.assertEqual(context.exception.code, "invocation_failed")
+                if expected_confirmation is None:
+                    self.assertIn(
+                        "OpenCode cancellation could not be confirmed; the session may remain active.",
+                        diagnostics.getvalue(),
+                    )
+                else:
+                    self.assertNotIn("cancellation could not be confirmed", diagnostics.getvalue())
                 events = [
                     json.loads(line)
                     for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()

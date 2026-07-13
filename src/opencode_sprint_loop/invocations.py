@@ -654,7 +654,17 @@ def transcript_wrapper(
         if isinstance(value, list):
             return [bound(item) for item in value]
         if isinstance(value, dict):
-            return {str(key): bound(item) for key, item in value.items()}
+            bounded: dict[str, Any] = {}
+            for key, item in value.items():
+                bounded_key, was_truncated = _truncate_text(str(key), MAX_STRING_BYTES)
+                truncated |= was_truncated
+                if bounded_key in bounded:
+                    raise ControllerError(
+                        "transcript_capture_failed",
+                        "OpenCode transcript contains colliding bounded object keys",
+                    )
+                bounded[bounded_key] = bound(item)
+            return bounded
         return value
 
     try:

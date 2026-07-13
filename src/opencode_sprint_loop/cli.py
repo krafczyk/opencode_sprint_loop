@@ -403,6 +403,14 @@ def _interrupt_active_invocation(
         )
     else:
         transcript_status, transcript_truncated = transcript_evidence
+    if confirmation is None:
+        # This fixed diagnostic contains no service response data.  Preserve the
+        # event's null confirmation contract while making the orphan-session
+        # risk visible to the operator.
+        sys.stderr.write(
+            "cancellation_unconfirmed: OpenCode cancellation could not be confirmed; "
+            "the session may remain active.\n"
+        )
     _terminal_metadata(
         metadata,
         status="timed_out" if error.code == "invocation_timed_out" else "interrupted",

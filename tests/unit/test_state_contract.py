@@ -60,6 +60,8 @@ class StateContractTests(unittest.TestCase):
             {"commits": {"local": {"token": {"authorization": "value"}}}},
             {"commits": {"local": {"token": "token=synthetic-secret"}}},
             {"commits": {"local": {"token=synthetic-secret": None}}},
+            {"commits": {"local": {"ghp_" + "A" * 36: None}}},
+            {"commits": {"local": {"https://example.invalid/path?opaque=synthetic-secret": None}}},
             {"commits": {"local": {1: None}}},
         )
         for value in unsafe_values:
