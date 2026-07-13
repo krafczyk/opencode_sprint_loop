@@ -6,6 +6,7 @@ import unittest
 
 from opencode_sprint_loop.errors import ControllerError
 from opencode_sprint_loop.events import validate_event
+from opencode_sprint_loop.security import validate_safe_data
 from opencode_sprint_loop.state import is_rfc3339_utc
 
 
@@ -39,6 +40,36 @@ class StateContractTests(unittest.TestCase):
         """Structured expected errors preserve their public machine code."""
         error = ControllerError("corrupt_state", "fixture")
         self.assertEqual(error.code, "corrupt_state")
+
+    def test_safe_data_exempts_only_declared_dynamic_map_keys(self) -> None:
+        """Validated identifiers may resemble field names without weakening credential checks."""
+        dynamic_paths = frozenset({("commits", "local"), ("commits", "pushed")})
+        validate_safe_data(
+            {
+                "commits": {
+                    "local": {"token": None},
+                    "pushed": {"api-key": None},
+                }
+            },
+            code="corrupt_state",
+            label="State",
+            dynamic_key_paths=dynamic_paths,
+        )
+        unsafe_values = (
+            {"token": None},
+            {"commits": {"local": {"token": {"authorization": "value"}}}},
+            {"commits": {"local": {"token": "token=synthetic-secret"}}},
+            {"commits": {"local": {"token=synthetic-secret": None}}},
+            {"commits": {"local": {1: None}}},
+        )
+        for value in unsafe_values:
+            with self.subTest(value=value), self.assertRaises(ControllerError):
+                validate_safe_data(
+                    value,
+                    code="corrupt_state",
+                    label="State",
+                    dynamic_key_paths=dynamic_paths,
+                )
 
 
 if __name__ == "__main__":  # pragma: no cover

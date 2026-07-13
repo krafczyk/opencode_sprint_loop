@@ -114,7 +114,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S1-ROOT-006** Require root `AGENTS.md`.
 - [x] **S1-ROOT-007** Require valid configuration, documents, and local agent definitions.
 - [x] **S1-ROOT-008** Reject staged sprint repository changes.
-- [x] **S1-ROOT-009** Reject unstaged sprint repository changes.
+- [x] **S1-ROOT-009** Reject unstaged sprint repository changes, including changes hidden by `assume-unchanged` or `skip-worktree` index flags.
 - [x] **S1-ROOT-010** Reject all untracked sprint repository files and directories.
 - [x] **S1-ROOT-011** Reject an active merge.
 - [x] **S1-ROOT-012** Reject either supported form of active rebase metadata.
@@ -135,7 +135,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S1-SUB-009** Reject detached HEAD.
 - [x] **S1-SUB-010** Require the configured remote to exist.
 - [x] **S1-SUB-011** Reject staged managed repository changes.
-- [x] **S1-SUB-012** Reject unstaged managed repository changes.
+- [x] **S1-SUB-012** Reject unstaged managed repository changes, including changes hidden by `assume-unchanged` or `skip-worktree` index flags.
 - [x] **S1-SUB-013** Reject all untracked managed repository files and directories.
 - [x] **S1-SUB-014** Reject active merge, rebase, cherry-pick, revert, and bisect operations.
 - [x] **S1-SUB-015** Reject dirty nested submodule state surfaced by managed repository status.

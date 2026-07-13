@@ -314,7 +314,12 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
         raise ControllerError(
             "corrupt_state", "Blocked and terminal Sprint 1 states must be inactive"
         )
-    validate_safe_data(data, code="corrupt_state", label="State")
+    validate_safe_data(
+        data,
+        code="corrupt_state",
+        label="State",
+        dynamic_key_paths=frozenset({("commits", "local"), ("commits", "pushed")}),
+    )
     return data
 
 
@@ -333,10 +338,13 @@ def load_state(path: Path) -> dict[str, Any]:
 
 
 def load_state_at(directory: int, name: str, path: Path) -> dict[str, Any]:
-    """Load state through one already-open runtime directory descriptor."""
-    descriptor = open_regular_at(directory, name, os.O_RDONLY)
-    with os.fdopen(descriptor, "rb", closefd=True) as handle:
-        return validate_state(load_json_object_handle(handle, path, code="corrupt_state"))
+    """Load state through one directory descriptor or raise path-specific corruption."""
+    try:
+        descriptor = open_regular_at(directory, name, os.O_RDONLY)
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            return validate_state(load_json_object_handle(handle, path, code="corrupt_state"))
+    except OSError as error:
+        raise ControllerError("corrupt_state", f"Cannot read state file: {path}") from error
 
 
 def serialize_state(state: dict[str, Any]) -> str:

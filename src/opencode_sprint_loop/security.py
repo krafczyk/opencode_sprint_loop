@@ -30,18 +30,35 @@ def contains_credential(value: str) -> bool:
     return bool(_CREDENTIAL_VALUE.search(value))
 
 
-def validate_safe_data(value: Any, *, code: str, label: str) -> None:
-    """Reject credential-bearing fields and values before durable use."""
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            if not isinstance(key, str) or _SENSITIVE_FIELD.search(key):
-                raise ControllerError(code, f"{label} must not contain credential-bearing fields")
-            validate_safe_data(nested, code=code, label=label)
-    elif isinstance(value, list):
-        for nested in value:
-            validate_safe_data(nested, code=code, label=label)
-    elif isinstance(value, str) and contains_credential(value):
-        raise ControllerError(code, f"{label} must not contain credential-bearing values")
+def validate_safe_data(
+    value: Any,
+    *,
+    code: str,
+    label: str,
+    dynamic_key_paths: frozenset[tuple[str, ...]] = frozenset(),
+) -> None:
+    """Reject credentials while permitting declared paths to use validated dynamic keys."""
+
+    def visit(nested_value: Any, path: tuple[str, ...]) -> None:
+        if isinstance(nested_value, dict):
+            dynamic_keys = path in dynamic_key_paths
+            for key, child in nested_value.items():
+                if (
+                    not isinstance(key, str)
+                    or (dynamic_keys and contains_credential(key))
+                    or (not dynamic_keys and _SENSITIVE_FIELD.search(key))
+                ):
+                    raise ControllerError(
+                        code, f"{label} must not contain credential-bearing fields"
+                    )
+                visit(child, (*path, key))
+        elif isinstance(nested_value, list):
+            for child in nested_value:
+                visit(child, (*path, "[]"))
+        elif isinstance(nested_value, str) and contains_credential(nested_value):
+            raise ControllerError(code, f"{label} must not contain credential-bearing values")
+
+    visit(value, ())
 
 
 def redact_diagnostic(message: str) -> str:

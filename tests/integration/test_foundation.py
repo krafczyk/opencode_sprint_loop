@@ -363,6 +363,14 @@ class SprintRepositoryFixture:
         elif kind not in {"unstaged", "untracked", "untracked_directory"}:
             raise ValueError(f"Unsupported dirty fixture kind: {kind}")
 
+    def hide_tracked_change(self, repository: Path, flag: str) -> Path:
+        """Hide one tracked modification behind an index worktree-visibility flag."""
+        tracked = "AGENTS.md" if repository == self.root else "managed.txt"
+        git(repository, "update-index", f"--{flag}", "--", tracked)
+        target = repository / tracked
+        target.write_text(f"{flag} hidden fixture change\n", encoding="utf-8")
+        return target
+
     def set_managed_branch(self, branch: str = "wrong") -> None:
         """Move the managed worktree to a deliberately incorrect branch."""
         git(self.managed, "checkout", "-b", branch)
@@ -1038,6 +1046,26 @@ class FoundationTests(unittest.TestCase):
         self.assertIsNone(state["server"]["url"])
         self.assertIn("execution_not_implemented", stderr)
 
+    def test_credential_word_repository_name_is_a_valid_commit_map_key(self) -> None:
+        """Validated dynamic repository names are not mistaken for schema credential fields."""
+        data = json.loads((self.root / "sprint_config.json").read_text(encoding="utf-8"))
+        data["repositories"][0]["name"] = "token"
+        (self.root / "sprint_config.json").write_text(
+            json.dumps(data, indent=2) + "\n", encoding="utf-8"
+        )
+        git(self.root, "add", "sprint_config.json")
+        git(self.root, "commit", "-m", "Use credential-word repository name")
+
+        code, _, stderr = self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])
+        self.assertEqual(code, 4, stderr)
+        paths = runtime_paths(self.root, "foundation", 1)
+        expected = {"local": {"token": None}, "pushed": {"token": None}}
+        self.assertEqual(load_state(paths.state)["commits"], expected)
+
+        code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(json.loads(stdout)["commits"], expected)
+
     def test_sprint_one_state_rejects_populated_reserved_fields_and_credentials(self) -> None:
         """Persisted state cannot claim deferred Sprint 1 work or expose credential-bearing data."""
         config = load_config(self.root)
@@ -1278,6 +1306,39 @@ class FoundationTests(unittest.TestCase):
                         else "dirty_managed_repository"
                     )
                     self.assert_preflight_preserves_snapshot(fixture, expected)
+
+    def test_hidden_index_flags_are_rejected_and_preserved(self) -> None:
+        """Assume-unchanged and skip-worktree cannot conceal tracked user changes."""
+        for repository_name in ("sprint", "managed"):
+            for flag in ("assume-unchanged", "skip-worktree"):
+                with self.subTest(repository=repository_name, flag=flag):
+                    fixture, _ = self.variant()
+                    repository = fixture.root if repository_name == "sprint" else fixture.managed
+                    target = fixture.hide_tracked_change(repository, flag)
+                    self.assertEqual(
+                        git(repository, "status", "--porcelain=v2", "--untracked-files=all"), ""
+                    )
+                    before = fixture.snapshot()
+                    contents = target.read_text(encoding="utf-8")
+
+                    code, stdout, stderr = self.invoke(
+                        ["run", "--root", str(fixture.root), "--server-url", "opaque"]
+                    )
+
+                    self.assertEqual(code, 2)
+                    self.assertEqual(stdout, "")
+                    self.assertIn(
+                        "dirty_sprint_repository"
+                        if repository_name == "sprint"
+                        else "dirty_managed_repository",
+                        stderr,
+                    )
+                    self.assertIn(f"--no-{flag}", stderr)
+                    self.assertIn(str(repository), stderr)
+                    self.assertEqual(fixture.snapshot(), before)
+                    self.assertEqual(target.read_text(encoding="utf-8"), contents)
+                    self.assertFalse((fixture.root / "info").exists())
+                    self.assertFalse(controller_metadata_directory(fixture.root).exists())
 
     def test_ignored_untracked_files_are_rejected_and_preserved(self) -> None:
         """Ignored user files remain preflight blockers in both managed worktrees."""
@@ -1734,6 +1795,40 @@ class FoundationTests(unittest.TestCase):
         code, _, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
         self.assertEqual(code, 2)
         self.assertIn("inconsistent_persistence", stderr)
+
+    def test_status_translates_state_artifact_read_failures(self) -> None:
+        """State descriptor failures identify the unreadable artifact instead of internal_error."""
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
+        paths = runtime_paths(self.root, "foundation", 1)
+        with patch(
+            "opencode_sprint_loop.state.open_regular_at",
+            side_effect=PermissionError("injected state read failure"),
+        ):
+            code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
+        self.assertTrue(stderr.startswith("corrupt_state:"), stderr)
+        self.assertIn(str(paths.state), stderr)
+        self.assertNotIn("internal_error", stderr)
+
+    def test_status_translates_event_artifact_read_failures(self) -> None:
+        """Event descriptor failures identify the unreadable artifact instead of internal_error."""
+        self.assertEqual(
+            self.invoke(["run", "--root", str(self.root), "--server-url", "opaque"])[0], 4
+        )
+        paths = runtime_paths(self.root, "foundation", 1)
+        with patch(
+            "opencode_sprint_loop.events.open_regular_at",
+            side_effect=PermissionError("injected event read failure"),
+        ):
+            code, stdout, stderr = self.invoke(["status", "--root", str(self.root), "--json"])
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
+        self.assertTrue(stderr.startswith("corrupt_event_log:"), stderr)
+        self.assertIn(str(paths.events), stderr)
+        self.assertNotIn("internal_error", stderr)
 
     def test_status_rejects_partial_event_line(self) -> None:
         """Partial JSONL is corruption and is never automatically truncated."""

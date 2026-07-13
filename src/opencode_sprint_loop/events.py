@@ -109,45 +109,55 @@ def load_events(path: Path) -> list[dict[str, Any]]:
 
 
 def load_events_at(directory: int, name: str, path: Path) -> list[dict[str, Any]]:
-    """Load events through one already-open runtime directory descriptor."""
+    """Load events through one directory descriptor or raise path-specific corruption."""
     events: list[dict[str, Any]] = []
-    descriptor = open_regular_at(directory, name, os.O_RDONLY)
-    with os.fdopen(descriptor, "rb", closefd=True) as handle:
-        number = 0
-        while True:
-            raw = handle.readline(MAX_JSON_BYTES + 1)
-            if not raw:
-                break
-            number += 1
-            if len(raw) > MAX_JSON_BYTES:
-                raise ControllerError("corrupt_event_log", f"Event line {number} exceeds 1 MiB")
-            if not raw.endswith(b"\n"):
-                raise ControllerError("corrupt_event_log", f"Event line {number} is partial")
+    try:
+        descriptor = open_regular_at(directory, name, os.O_RDONLY)
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            number = 0
+            while True:
+                raw = handle.readline(MAX_JSON_BYTES + 1)
+                if not raw:
+                    break
+                number += 1
+                if len(raw) > MAX_JSON_BYTES:
+                    raise ControllerError("corrupt_event_log", f"Event line {number} exceeds 1 MiB")
+                if not raw.endswith(b"\n"):
+                    raise ControllerError("corrupt_event_log", f"Event line {number} is partial")
 
-            def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-                result: dict[str, Any] = {}
-                for key, value in pairs:
-                    if key in result:
-                        raise ControllerError(
-                            "corrupt_event_log",
-                            f"Duplicate JSON key {key!r} in event line {number}",
-                        )
-                    result[key] = value
-                return result
+                def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                    result: dict[str, Any] = {}
+                    for key, value in pairs:
+                        if key in result:
+                            raise ControllerError(
+                                "corrupt_event_log",
+                                f"Duplicate JSON key {key!r} in event line {number}",
+                            )
+                        result[key] = value
+                    return result
 
-            try:
-                event = json.loads(
-                    raw.decode("utf-8"),
-                    object_pairs_hook=reject_duplicates,
-                    parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
-                )
-            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
-                raise ControllerError(
-                    "corrupt_event_log", f"Malformed event line {number}"
-                ) from error
-            if not isinstance(event, dict):
-                raise ControllerError("corrupt_event_log", f"Event line {number} is not an object")
-            events.append(event)
+                try:
+                    event = json.loads(
+                        raw.decode("utf-8"),
+                        object_pairs_hook=reject_duplicates,
+                        parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+                    )
+                except (
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    RecursionError,
+                    ValueError,
+                ) as error:
+                    raise ControllerError(
+                        "corrupt_event_log", f"Malformed event line {number}"
+                    ) from error
+                if not isinstance(event, dict):
+                    raise ControllerError(
+                        "corrupt_event_log", f"Event line {number} is not an object"
+                    )
+                events.append(event)
+    except OSError as error:
+        raise ControllerError("corrupt_event_log", f"Cannot read event log: {path}") from error
     expected = 1
     run_id: str | None = None
     for event in events:

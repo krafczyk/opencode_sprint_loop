@@ -89,6 +89,7 @@ def _ensure_clean(
     repository: GitRepository, code: str, label: str, *, allowed_untracked: set[str] | None = None
 ) -> None:
     """Fail when porcelain v2 reports any tracked or untracked change."""
+    _ensure_no_hidden_index_flags(repository, code, label)
     status = _run(
         repository.root,
         "status",
@@ -118,6 +119,31 @@ def _ensure_clean(
         raise ControllerError(
             code,
             f"{label} must be clean; commit, remove, or use 'git stash --all' for its changes first: {repository.root}",
+        )
+
+
+def _ensure_no_hidden_index_flags(repository: GitRepository, code: str, label: str) -> None:
+    """Reject index flags that can hide tracked worktree changes from status."""
+    records = _run(repository.root, "ls-files", "--cached", "-v", "-z", "--").split("\0")
+    hidden_flags: set[str] = set()
+    for record in records:
+        if not record:
+            continue
+        if len(record) < 3 or record[1] != " ":
+            raise ControllerError(code, f"Cannot verify tracked index flags in {repository.root}")
+        tag = record[0]
+        if tag.islower():
+            hidden_flags.add("assume-unchanged")
+        if tag.upper() == "S":
+            hidden_flags.add("skip-worktree")
+    if hidden_flags:
+        flags = " and ".join(sorted(hidden_flags))
+        raise ControllerError(
+            code,
+            f"{label} has tracked paths marked {flags}, which can hide worktree changes: "
+            f"{repository.root}. Inspect with 'git ls-files -v' and clear the flags with "
+            "'git update-index --no-assume-unchanged -- <path>' or "
+            "'git update-index --no-skip-worktree -- <path>' before running",
         )
 
 

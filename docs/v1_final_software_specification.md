@@ -304,6 +304,7 @@ Before entering the loop, the controller must validate all of the following.
 - `sprint_config.json` is present and valid.
 - Required documents and agent definitions exist.
 - The sprint repository has no staged, unstaged, or untracked files.
+- No tracked sprint-repository path uses an index flag that hides worktree changes from status.
 - No merge, rebase, cherry-pick, or revert is in progress.
 - The configured submodule is initialized.
 - The managed repository gitlink matches its checked-out HEAD.
@@ -314,6 +315,7 @@ Before entering the loop, the controller must validate all of the following.
 - The path is a Git repository and the expected submodule.
 - The configured branch is checked out.
 - The repository has no staged, unstaged, or untracked files.
+- No tracked managed-repository path uses an index flag that hides worktree changes from status.
 - No merge, rebase, cherry-pick, or revert is in progress.
 - The configured remote exists.
 

@@ -368,11 +368,12 @@ The controller must verify:
 4. The repository is not bare.
 5. The current HEAD resolves to a commit.
 6. No staged, unstaged, or untracked files exist.
-7. No merge, rebase, cherry-pick, revert, or bisect operation is in progress.
-8. The configured managed path is a tracked gitlink with mode `160000`.
-9. The submodule is registered in `.gitmodules` at the configured path.
-10. The submodule is initialized and has a checked-out commit.
-11. The checked-out managed repository HEAD equals the gitlink SHA recorded by the sprint repository index.
+7. No tracked path is marked `assume-unchanged` or `skip-worktree`, because those index flags can hide worktree changes from status.
+8. No merge, rebase, cherry-pick, revert, or bisect operation is in progress.
+9. The configured managed path is a tracked gitlink with mode `160000`.
+10. The submodule is registered in `.gitmodules` at the configured path.
+11. The submodule is initialized and has a checked-out commit.
+12. The checked-out managed repository HEAD equals the gitlink SHA recorded by the sprint repository index.
 
 The clean check must include all untracked files and must not hide submodule dirtiness.
 
@@ -386,8 +387,9 @@ The controller must verify:
 4. HEAD resolves to a commit.
 5. The symbolic branch name exactly matches the configured branch; detached HEAD is rejected.
 6. No staged, unstaged, or untracked files exist.
-7. No merge, rebase, cherry-pick, revert, or bisect operation is in progress.
-8. The configured remote exists.
+7. No tracked path is marked `assume-unchanged` or `skip-worktree`, because those index flags can hide worktree changes from status.
+8. No merge, rebase, cherry-pick, revert, or bisect operation is in progress.
+9. The configured remote exists.
 
 Nested submodules are not managed in Sprint 1, but dirty nested submodule state reported by the managed repository causes the clean check to fail.
 

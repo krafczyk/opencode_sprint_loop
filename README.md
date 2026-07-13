@@ -83,7 +83,7 @@ sprint-repo/
     `-- <managed-repository>/       # initialized Git submodule
 ```
 
-V1 configuration is collection-shaped but Sprint 1 accepts exactly one managed repository. The sprint repository and managed repository must have no staged, unstaged, untracked (including ignored), or in-progress Git operation state. Dirty nested submodules also block the managed repository preflight. The configured managed branch must be checked out, its configured remote must exist, and its HEAD must match the sprint repository gitlink. Preflight disables Git filesystem-monitor hooks and accepts both absorbed and old-form initialized submodules.
+V1 configuration is collection-shaped but Sprint 1 accepts exactly one managed repository. The sprint repository and managed repository must have no staged, unstaged, untracked (including ignored), or in-progress Git operation state. Tracked paths marked `assume-unchanged` or `skip-worktree` are rejected because those index flags can hide changes from Git status. Dirty nested submodules also block the managed repository preflight. The configured managed branch must be checked out, its configured remote must exist, and its HEAD must match the sprint repository gitlink. Preflight disables Git filesystem-monitor hooks and accepts both absorbed and old-form initialized submodules.
 
 ## Configuration
 
