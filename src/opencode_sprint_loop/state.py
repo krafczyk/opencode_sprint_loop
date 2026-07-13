@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import ipaddress
 import os
 import re
 import socket
@@ -11,6 +12,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .config import SprintConfig
 from .errors import ControllerError
@@ -40,6 +42,7 @@ STATE_NAMES = frozenset(
 )
 TERMINAL_STATES = frozenset({"stopped", "failed", "finished"})
 RFC3339_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$")
+SUPPORTED_SERVER_VERSION = re.compile(r"^1\.17\.\d+$")
 
 
 def utc_now() -> str:
@@ -64,6 +67,50 @@ def is_rfc3339_utc(value: Any) -> bool:
     except ValueError:
         return False
     return parsed.tzinfo == UTC
+
+
+def _is_normalized_server_origin(value: Any) -> bool:
+    """Return whether a persisted server URL is a normalized credential-free origin."""
+    if not isinstance(value, str) or any(
+        ord(character) < 32 or ord(character) == 127 for character in value
+    ):
+        return False
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    host = parsed.hostname.lower()
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.removesuffix(".").split(".")
+        if not labels or any(
+            not label
+            or len(label) > 63
+            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+            for label in labels
+        ):
+            return False
+    else:
+        host = address.compressed
+    if port == 0:
+        return False
+    if ":" in host:
+        host = f"[{host}]"
+    default = 80 if parsed.scheme == "http" else 443
+    normalized = f"{parsed.scheme}://{host}{'' if port is None or port == default else f':{port}'}"
+    return value == normalized
 
 
 def process_start_identity(pid: int) -> str | None:
@@ -231,10 +278,40 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
     ):
         raise ControllerError("corrupt_state", "State process_start is invalid")
     server = _exact_fields(data["server"], {"url", "version"}, "server")
-    if server["url"] is not None or server["version"] is not None:
-        raise ControllerError("corrupt_state", "Sprint 1 server fields must be null")
-    if data["active_invocation"] is not None:
-        raise ControllerError("corrupt_state", "Sprint 1 active_invocation must be null")
+    if (server["url"] is None) != (server["version"] is None):
+        raise ControllerError("corrupt_state", "State server identity must be complete or null")
+    if server["url"] is not None and (
+        not _is_normalized_server_origin(server["url"])
+        or not isinstance(server["version"], str)
+        or not SUPPORTED_SERVER_VERSION.fullmatch(server["version"])
+    ):
+        raise ControllerError("corrupt_state", "State server identity is invalid")
+    active = data["active_invocation"]
+    if active is not None:
+        active_fields = _exact_fields(
+            active,
+            {"invocation_id", "sequence", "role", "model", "session_id", "status", "started_at"},
+            "active_invocation",
+        )
+        for field in ("invocation_id", "role", "model", "session_id"):
+            value = active_fields[field]
+            if (
+                not isinstance(value, str)
+                or not value
+                or len(value.encode()) > 1024
+                or any(ord(character) < 32 or ord(character) == 127 for character in value)
+            ):
+                raise ControllerError(
+                    "corrupt_state", f"State active invocation {field} is invalid"
+                )
+        if (
+            not isinstance(active_fields["sequence"], int)
+            or isinstance(active_fields["sequence"], bool)
+            or active_fields["sequence"] <= 0
+            or active_fields["status"] != "running"
+        ):
+            raise ControllerError("corrupt_state", "State active invocation lifecycle is invalid")
+        _timestamp(active_fields["started_at"], "active_invocation.started_at")
 
     commits = _exact_fields(data["commits"], {"local", "pushed"}, "commits")
     if not isinstance(commits["local"], dict) or not isinstance(commits["pushed"], dict):

@@ -19,6 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from opencode_sprint_loop import __version__
+from opencode_sprint_loop.agent_runner import (
+    FakeAgentRunner,
+    InvocationObservation,
+    ValidatedServer,
+)
 from opencode_sprint_loop.cli import _lock_paths, main
 from opencode_sprint_loop.config import load_config
 from opencode_sprint_loop.errors import ControllerError
@@ -436,14 +441,36 @@ class SprintRepositoryFixture:
         return target
 
 
+def fake_server_runner(server_url: str) -> FakeAgentRunner:
+    """Return a no-network Sprint 2 runner for retained foundation tests."""
+    del server_url
+    result = {
+        "schema_version": 1,
+        "status": "completed",
+        "summary": "foundation fake probe",
+        "checks": [],
+        "blocking_reason": None,
+    }
+    return FakeAgentRunner(
+        ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+        observations=[InvocationObservation("idle", [], result, False, False, True)],
+        transcript_messages=[],
+    )
+
+
 class FoundationTests(unittest.TestCase):
     """Test Sprint 1 behavior using only local Git repositories."""
 
     def setUp(self) -> None:
         self.fixture = SprintRepositoryFixture()
         self.root = self.fixture.create()
+        self.runner_patch = patch(
+            "opencode_sprint_loop.cli.OpenCodeServerRunner", side_effect=fake_server_runner
+        )
+        self.runner_patch.start()
 
     def tearDown(self) -> None:
+        self.runner_patch.stop()
         self.fixture.close()
 
     def invoke(self, arguments: list[str]) -> tuple[int, str, str]:
@@ -1028,8 +1055,8 @@ class FoundationTests(unittest.TestCase):
         self.assertTrue((self.root / "info" / "updated" / "1" / "state.json").exists())
         self.assertFalse((self.root / "info" / "foundation").exists())
 
-    def test_valid_run_persists_placeholder_state(self) -> None:
-        """A valid run creates the intentional three-event blocked placeholder."""
+    def test_valid_run_persists_execution_probe_placeholder_state(self) -> None:
+        """A valid fake probe creates the ordered Sprint 2 blocked placeholder."""
         code, stdout, stderr = self.invoke(
             ["run", "--root", str(self.root), "--server-url", "opaque-value"]
         )
@@ -1041,9 +1068,17 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(state["state"], "blocked")
         self.assertEqual(state["reason"]["code"], "execution_not_implemented")
         self.assertEqual(
-            [event["type"] for event in events], ["run.started", "state.entered", "run.blocked"]
+            [event["type"] for event in events],
+            [
+                "run.started",
+                "state.entered",
+                "server.validated",
+                "agent.started",
+                "agent.completed",
+                "run.blocked",
+            ],
         )
-        self.assertIsNone(state["server"]["url"])
+        self.assertEqual(state["server"]["url"], "http://127.0.0.1:4096")
         self.assertIn("execution_not_implemented", stderr)
 
     def test_credential_word_repository_name_is_a_valid_commit_map_key(self) -> None:
@@ -1119,7 +1154,7 @@ class FoundationTests(unittest.TestCase):
                 "state": "blocked",
                 "reason": {
                     "code": "execution_not_implemented",
-                    "message": "Sprint execution begins in a later implementation sprint.",
+                    "message": "OpenCode execution probe completed; Builder workflow begins in Sprint 4.",
                 },
                 "active": {"role": None, "invocation_id": None, "session_id": None},
                 "commits": {"local": {"managed": None}, "pushed": {"managed": None}},
@@ -1139,7 +1174,7 @@ class FoundationTests(unittest.TestCase):
                     "assessed_at": None,
                 },
                 "last_event": {
-                    "sequence": 3,
+                    "sequence": 6,
                     "type": "run.blocked",
                     "timestamp": events[-1]["timestamp"],
                 },
@@ -1557,7 +1592,7 @@ class FoundationTests(unittest.TestCase):
         """Reserved controls return clear errors without creating runtime state."""
         for arguments in (
             ["pause", "--root", str(self.root)],
-            ["resume", "--root", str(self.root), "--server-url", "opaque"],
+            ["resume", "--root", str(self.root), "--server-url", "http://127.0.0.1:4096"],
             ["stop", "--root", str(self.root)],
         ):
             code, _, stderr = self.invoke(list(arguments))
@@ -1570,7 +1605,7 @@ class FoundationTests(unittest.TestCase):
         before = self.fixture.snapshot()
         for arguments in (
             ["pause", "--root", str(self.root)],
-            ["resume", "--root", str(self.root), "--server-url", "opaque"],
+            ["resume", "--root", str(self.root), "--server-url", "http://127.0.0.1:4096"],
             ["stop", "--root", str(self.root)],
         ):
             with self.subTest(command=arguments[0]):
@@ -1592,7 +1627,7 @@ class FoundationTests(unittest.TestCase):
         }
         for arguments in (
             ["pause", "--root", str(self.root)],
-            ["resume", "--root", str(self.root), "--server-url", "opaque"],
+            ["resume", "--root", str(self.root), "--server-url", "http://127.0.0.1:4096"],
             ["stop", "--root", str(self.root)],
         ):
             with self.subTest(command=arguments[0]):
@@ -1768,7 +1803,7 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("root_not_found", stderr)
         code, _, stderr = self.invoke(["resume", "--root", str(self.root), "--server-url", ""])
         self.assertEqual(code, 2)
-        self.assertIn("invalid_arguments", stderr)
+        self.assertIn("invalid_server_url", stderr)
 
     def test_status_rejects_inconsistent_persistence(self) -> None:
         """An event log ahead of state fails closed rather than guessing."""
@@ -1782,7 +1817,7 @@ class FoundationTests(unittest.TestCase):
                 json.dumps(
                     {
                         "schema_version": 1,
-                        "sequence": 4,
+                        "sequence": 7,
                         "timestamp": "2026-01-01T00:00:00Z",
                         "run_id": load_state(paths.state)["run_id"],
                         "type": "state.entered",
@@ -2689,6 +2724,8 @@ class FoundationTests(unittest.TestCase):
             **os.environ,
             "PIP_DISABLE_PIP_VERSION_CHECK": "1",
             "PIP_NO_INDEX": "1",
+            "PIP_USER": "0",
+            "PYTHONPATH": "",
         }
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "source"

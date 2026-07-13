@@ -85,3 +85,25 @@ def redact_diagnostic(message: str) -> str:
         r"\1[REDACTED]",
         message,
     )
+
+
+def redact_external_data(value: Any) -> Any:
+    """Recursively replace recognizable credentials in untrusted transcript data.
+
+    This is deliberately separate from ``validate_safe_data``: controller-authored
+    records fail closed, while external transcript evidence remains useful after
+    conventional credential values have been replaced.
+    """
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            text_key = str(key)
+            result[text_key] = (
+                "[REDACTED]" if _SENSITIVE_FIELD.search(text_key) else redact_external_data(child)
+            )
+        return result
+    if isinstance(value, list):
+        return [redact_external_data(child) for child in value]
+    if isinstance(value, str):
+        return "[REDACTED]" if contains_credential(value) else redact_diagnostic(value)
+    return value

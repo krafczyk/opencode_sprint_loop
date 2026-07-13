@@ -8,14 +8,22 @@ Sprint 2, [OpenCode Execution Layer](docs/controller-v1/2/sprint_spec.md), is th
 
 ## Implemented Status
 
-Sprint 1 implements the controller foundation only:
+Sprint 2 builds on the controller foundation with one deliberately non-mutating
+OpenCode execution probe:
 
 - Versioned `sprint_config.json` validation.
 - Read-only Git and submodule preflight checks.
 - Linux advisory locks, durable state, append-only events, and status output.
 - The `sprint-loop` command surface.
+- Credential-free OpenCode URL, Basic-auth, health/version, workspace, agent,
+  provider, and model preflight.
+- One fresh configured-Auditor session with wildcard-deny permissions,
+  controller-validated JSON output, and bounded sanitized invocation evidence.
 
-It does **not** yet run OpenCode sessions, make commits or pushes, monitor GitHub CI, provide functional pause/resume/stop controls, or implement the Neovim commands. A valid `run` intentionally ends with `blocked / execution_not_implemented` and a non-zero exit status.
+It does **not** yet run a product Builder, accept a staged handoff, make commits
+or pushes, run audit rounds or CI, provide functional controls/recovery, or
+implement Neovim commands. A successful probe intentionally ends with
+`blocked / execution_not_implemented` and a non-zero exit status.
 
 ## Requirements
 
@@ -61,7 +69,18 @@ sprint-loop resume --root <sprint-repository> --server-url <url>
 sprint-loop stop --root <sprint-repository>
 ```
 
-In Sprint 1, `run` requires `--server-url` to preserve the final V1 command shape but treats it as opaque input. It does not contact, parse, log, or persist the value. Do not embed credentials in the argument.
+In Sprint 2, `run` requires an already-running OpenCode server rooted at the
+sprint repository. The URL must be a credential-free absolute HTTP(S) origin,
+such as `http://127.0.0.1:4096`; paths, query strings, fragments, and user-info
+are rejected. HTTP is only appropriate on the trusted local mkchad transport;
+use HTTPS and server authentication outside that boundary. Supported OpenCode
+release versions are `>=1.17.0, <1.18.0`.
+
+Basic authentication is inherited only from `OPENCODE_SERVER_PASSWORD` and,
+optionally, `OPENCODE_SERVER_USERNAME` (default `opencode` with a password).
+Never put credentials in argv, configuration, or artifacts. Before creating a
+runtime path or session, the controller validates health, default workspace, all
+configured agents, and configured provider/model pairs.
 
 `pause`, `resume`, and `stop` are reserved command names and return `feature_not_implemented` without changing state or Git repositories.
 
@@ -157,7 +176,7 @@ Schema version 1 rejects duplicate JSON keys and unknown fields at every level. 
 
 ## Runtime Records and Status
 
-A successful Sprint 1 placeholder run creates:
+A successful Sprint 2 probe creates uncommitted controller runtime records:
 
 ```text
 info/<multisprint>/<sprint>/
@@ -166,13 +185,30 @@ info/<multisprint>/<sprint>/
 `-- lock.json
 ```
 
-The event log records `run.started`, `state.entered`, and `run.blocked`; state ends at `blocked` with reason code `execution_not_implemented`. Sprint 1 does not create checkpoint commits, so these controller-owned runtime files remain uncommitted until Sprint 4 introduces checkpoint commits.
+It also creates `invocations/<multisprint>/<sprint>/0001-auditor/` containing
+owner-only `metadata.json`, exact `prompt.md`, validated `result.json`, and a
+sanitized bounded `transcript.json`. The event log records `run.started`,
+`state.entered`, `server.validated`, `agent.started`, `agent.completed`, and
+`run.blocked`; state ends at `blocked` with `execution_not_implemented`. No
+checkpoint commit is made until Sprint 4.
+
+The fresh Auditor probe has a wildcard-deny tool override and a deterministic
+title. On timeout, uncertain terminal evidence, or cooperative `SIGINT`/
+`SIGTERM`, the controller sends exactly one best-effort abort, waits up to ten
+seconds for idle or terminal evidence, then captures any available sanitized
+transcript before recording the interruption. `SIGINT` and `SIGTERM` return
+statuses 130 and 143 respectively. Ambiguous session creation is not retried
+and an orphan session may remain. Interrupted work is not resumed or repaired
+in Sprint 2.
 
 Runtime readers and writers use descriptor-anchored paths and distinct controller-owned Git-metadata lock directories. Git-managed files such as `HEAD` and `config` are never lock anchors because ordinary Git operations can replace them. State/event payloads reject credential-bearing keys and common credential-bearing values, and CLI diagnostics redact URI user-info, query values, fragments, and HTTP authorization values.
 
 Use `status --json` for integrations. It emits one JSON object and writes diagnostics only to standard error. Its stable top-level fields are `schema_version`, `controller_version`, `sprint_root`, `run_exists`, `process_running`, `run_id`, `sprint`, `state`, `reason`, `active`, `commits`, `audit`, `ci`, `counters`, `checklist`, `last_event`, and `updated_at`. The complete V1 Sprint 1 JSON schema is defined in [the status contract](docs/controller-v1/1/sprint_spec.md#12-status-json-contract).
 
-`sprint` contains `multisprint` and `index`; `reason` contains safe `code` and `message`; `active` contains `role`, `invocation_id`, and `session_id`; `last_event` contains `sequence`, `type`, and `timestamp`. `commits` has `local` and `pushed` maps. `audit`, `ci`, `counters`, and `checklist` contain the corresponding fields shown in the linked contract. No-run status sets every run-specific object to `null`.
+`sprint` contains `multisprint` and `index`; `reason` contains safe `code` and
+`message`; `active` contains `role`, `invocation_id`, and `session_id` while the
+probe runs. Status remains local and never exposes the server URL, prompt,
+result, transcript, or credentials.
 
 When no run exists, `run_exists` is `false`, `process_running` is `false`, and every run-specific field from `run_id` through `updated_at` is `null`. No-run status does not create worktree or runtime files. For a placeholder run, `active` is an object containing null `role`, `invocation_id`, and `session_id` fields; `last_event` identifies the final `run.blocked` record.
 
@@ -192,6 +228,25 @@ git diff --check
 ```
 
 The tests create temporary local Git repositories and submodules. They do not require a model, OpenCode server, GitHub account, network access, or global Git identity.
+
+Default Sprint 2 tests use deterministic fakes and a local fake HTTP server.
+Real-server checks are opt-in: start a supported server rooted at a clean sprint
+repository outside the controller, inherit any authentication, and pass only its
+credential-free origin. The non-mutating preflight smoke test can then be run as:
+
+```bash
+SPRINT_LOOP_REAL_SPRINT_ROOT=/path/to/sprint-repo \
+SPRINT_LOOP_REAL_SERVER_URL=http://127.0.0.1:4096 \
+python3 -m unittest \
+  tests.unit.test_opencode_execution.OpenCodeExecutionTests.test_opt_in_real_server_preflight -v
+```
+
+These variables contain no credentials; Basic authentication remains inherited
+through the OpenCode variables documented above. The complete real-server exit
+demonstration additionally runs `sprint-loop run`, observes its fresh session in
+an ordinary OpenCode client, and checks the invocation records and final block.
+Builder handoff, commits, audits, CI, functional controls/recovery, and Neovim
+remain deliberately unimplemented.
 
 ## Sprint 1 Demonstration
 

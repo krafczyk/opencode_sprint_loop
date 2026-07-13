@@ -21,6 +21,16 @@ class GitRepository:
     head: str
 
 
+@dataclass(frozen=True, slots=True)
+class RepositorySnapshot:
+    """Read-only identities used to detect accidental non-mutating probe changes."""
+
+    sprint_head: str
+    managed_head: str
+    sprint_branch: str
+    managed_branch: str
+
+
 def _run(path: Path, *arguments: str, allow_failure: bool = False) -> str:
     """Run a read-only Git command with deterministic diagnostics."""
     environment = {
@@ -320,3 +330,48 @@ def validate_preflight(
             allowed_untracked=allowed_root_untracked,
         )
     return sprint
+
+
+def capture_probe_snapshot(root: Path, config: SprintConfig) -> RepositorySnapshot:
+    """Capture branch and HEAD identities after clean preflight without mutation."""
+    sprint = validate_root(root)
+    managed = _ensure_submodule(sprint, config)
+    return RepositorySnapshot(
+        sprint.head,
+        managed.head,
+        _run(sprint.root, "symbolic-ref", "--quiet", "--short", "HEAD", allow_failure=True).strip(),
+        _run(
+            managed.root, "symbolic-ref", "--quiet", "--short", "HEAD", allow_failure=True
+        ).strip(),
+    )
+
+
+def verify_probe_snapshot(
+    root: Path, config: SprintConfig, snapshot: RepositorySnapshot, allowed_root_untracked: set[str]
+) -> None:
+    """Verify the Auditor probe changed only explicit controller runtime paths."""
+    try:
+        current = capture_probe_snapshot(root, config)
+        if current != snapshot:
+            raise ControllerError(
+                "unexpected_agent_repository_change",
+                "Repository HEAD or branch changed during execution probe; inspect "
+                f"{root} and {root / config.repositories[0].path}",
+            )
+        validate_preflight(
+            root, config, require_clean=True, allowed_root_untracked=allowed_root_untracked
+        )
+    except ControllerError as error:
+        if error.code in {
+            "dirty_sprint_repository",
+            "dirty_managed_repository",
+            "wrong_branch",
+            "git_operation_in_progress",
+            "submodule_sha_mismatch",
+        }:
+            raise ControllerError(
+                "unexpected_agent_repository_change",
+                "Repository changed during execution probe; inspect "
+                f"{root} and {root / config.repositories[0].path}",
+            ) from error
+        raise

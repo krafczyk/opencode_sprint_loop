@@ -1,0 +1,198 @@
+"""OpenCode-independent contracts used by the Sprint 2 execution probe."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
+
+
+@dataclass(frozen=True, slots=True)
+class ServerValidationRequest:
+    """Inputs for a read-only server capability check."""
+
+    sprint_root: Path
+    agents: dict[str, str]
+    models: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedServer:
+    """Credential-free identity returned after server validation."""
+
+    url: str
+    version: str
+
+
+@dataclass(frozen=True, slots=True)
+class InvocationRequest:
+    """Controller-owned immutable inputs for one fresh execution probe."""
+
+    invocation_id: str
+    sequence: int
+    role: str
+    model: str
+    title: str
+    prompt: str
+    sprint_root: Path
+
+
+@dataclass(frozen=True, slots=True)
+class CreatedSession:
+    """Validated identity of one newly created top-level OpenCode session."""
+
+    session_id: str
+    title: str
+    directory: Path
+    permissions: tuple[dict[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class InvocationObservation:
+    """One bounded polling observation and its normalized message evidence."""
+
+    status: str | None
+    messages: list[dict[str, Any]]
+    structured_result: Any | None
+    structured_error: bool
+    unexpected_tool: bool
+    terminal_assistant: bool = False
+    terminal_assistant_error: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AbortObservation:
+    """Result of a single best-effort session abort request."""
+
+    acknowledged: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptCapture:
+    """Raw validated message records retained for controller sanitization."""
+
+    messages: list[dict[str, Any]]
+
+
+class AgentRunner(Protocol):
+    """Synchronous runner boundary; methods never expose transport objects."""
+
+    def validate_server(self, request: ServerValidationRequest) -> ValidatedServer:
+        """Validate the configured server without creating a session."""
+
+    def existing_session_ids(self) -> set[str]:
+        """Return a bounded snapshot of default-workspace session identifiers."""
+
+    def create_session(self, request: InvocationRequest) -> CreatedSession:
+        """Create exactly one fresh, non-mutating session without submitting work."""
+
+    def submit_prompt(self, session: CreatedSession, request: InvocationRequest) -> None:
+        """Submit the one asynchronous structured-output prompt."""
+
+    def observe(self, session: CreatedSession) -> InvocationObservation:
+        """Return one bounded session status/message observation."""
+
+    def abort(self, session: CreatedSession) -> AbortObservation:
+        """Request one best-effort cooperative abort for an active session."""
+
+    def transcript(self, session: CreatedSession) -> TranscriptCapture:
+        """Retrieve bounded raw message evidence for controller-side sanitization."""
+
+
+class FakeAgentRunner:
+    """Deterministic scripted ``AgentRunner`` for offline controller tests."""
+
+    def __init__(
+        self,
+        validated: ValidatedServer,
+        *,
+        session_ids: list[str] | None = None,
+        observations: list[InvocationObservation | Exception] | None = None,
+        transcript_messages: list[dict[str, Any]] | None = None,
+        abort_acknowledged: bool = True,
+        validation_error: Exception | None = None,
+        session_snapshot_error: Exception | None = None,
+        create_error: Exception | None = None,
+        submit_error: Exception | None = None,
+        abort_error: Exception | None = None,
+        transcript_error: Exception | None = None,
+    ) -> None:
+        """Configure deterministic values or failures for every runner operation."""
+        self.validated = validated
+        self.session_ids = list(session_ids or ["ses_fake_0001"])
+        self.observations = list(observations or [])
+        self.transcript_messages = list(transcript_messages or [])
+        self.abort_acknowledged = abort_acknowledged
+        self.validation_error = validation_error
+        self.session_snapshot_error = session_snapshot_error
+        self.create_error = create_error
+        self.submit_error = submit_error
+        self.abort_error = abort_error
+        self.transcript_error = transcript_error
+        self.created: list[CreatedSession] = []
+        self.submitted: list[str] = []
+        self.aborted: list[str] = []
+        self.preexisting: set[str] = set()
+
+    def validate_server(self, request: ServerValidationRequest) -> ValidatedServer:
+        """Return the scripted validation result or a scripted controller error."""
+        del request
+        if self.validation_error is not None:
+            raise self.validation_error
+        return self.validated
+
+    def existing_session_ids(self) -> set[str]:
+        """Return the scripted pre-creation session snapshot."""
+        if self.session_snapshot_error is not None:
+            raise self.session_snapshot_error
+        return set(self.preexisting)
+
+    def create_session(self, request: InvocationRequest) -> CreatedSession:
+        """Create the next scripted session and retain its semantic request fields."""
+        if self.create_error is not None:
+            raise self.create_error
+        if not self.session_ids:
+            from .errors import ControllerError
+
+            raise ControllerError(
+                "session_creation_failed", "Fake session creation was not scripted"
+            )
+        session = CreatedSession(
+            self.session_ids.pop(0),
+            request.title,
+            request.sprint_root,
+            ({"permission": "*", "pattern": "*", "action": "deny"},),
+        )
+        self.created.append(session)
+        return session
+
+    def submit_prompt(self, session: CreatedSession, request: InvocationRequest) -> None:
+        """Record a prompt submission without performing external work."""
+        self.submitted.append(session.session_id)
+        del request
+        if self.submit_error is not None:
+            raise self.submit_error
+
+    def observe(self, session: CreatedSession) -> InvocationObservation:
+        """Return scripted observations in order, retaining pending state when exhausted."""
+        del session
+        if self.observations:
+            observation = self.observations.pop(0)
+            if isinstance(observation, Exception):
+                raise observation
+            return observation
+        return InvocationObservation("busy", [], None, False, False)
+
+    def abort(self, session: CreatedSession) -> AbortObservation:
+        """Record a scripted abort acknowledgement."""
+        self.aborted.append(session.session_id)
+        if self.abort_error is not None:
+            raise self.abort_error
+        return AbortObservation(self.abort_acknowledged)
+
+    def transcript(self, session: CreatedSession) -> TranscriptCapture:
+        """Return the scripted transcript independently of observations."""
+        del session
+        if self.transcript_error is not None:
+            raise self.transcript_error
+        return TranscriptCapture(list(self.transcript_messages))

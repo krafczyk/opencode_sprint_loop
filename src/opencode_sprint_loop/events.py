@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import uuid
 from datetime import datetime
@@ -44,6 +45,17 @@ _SPRINT_ONE_TRANSITIONS = {
 }
 
 _EVENT_FIELDS = {"schema_version", "sequence", "timestamp", "run_id", "type", "state", "payload"}
+_SUPPORTED_SERVER_VERSION = re.compile(r"^1\.17\.\d+$")
+
+
+def _bounded_event_string(value: Any) -> bool:
+    """Return whether a same-state event identifier satisfies the V1 bound."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value.encode("utf-8")) <= 1024
+        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+    )
 
 
 def _validate_safe_payload(value: Any, *, code: str) -> None:
@@ -172,7 +184,7 @@ def load_events_at(directory: int, name: str, path: Path) -> list[dict[str, Any]
 
 
 def validate_event_history(events: list[dict[str, Any]]) -> None:
-    """Require persisted Sprint 1 events to describe a reachable history."""
+    """Require persisted Sprint 1/2 events to describe a reachable history."""
     if not events:
         raise ControllerError("corrupt_event_log", "State exists but event log is empty")
     first = events[0]
@@ -181,8 +193,90 @@ def validate_event_history(events: list[dict[str, Any]]) -> None:
     if first["payload"] != {"previous_state": None}:
         raise ControllerError("corrupt_event_log", "Initial event payload is invalid")
     previous = "initializing"
+    server_validated = False
+    probe_started = False
+    probe_terminal: str | None = None
     for event in events[1:]:
         destination = event["state"]
+        if previous == "validating" and destination == "validating":
+            if event["type"] not in {
+                "server.validated",
+                "agent.started",
+                "agent.completed",
+                "agent.interrupted",
+            }:
+                raise ControllerError("corrupt_event_log", "Invalid Sprint 2 same-state event")
+            payload = event["payload"]
+            if payload.get("previous_state") != "validating":
+                raise ControllerError(
+                    "corrupt_event_log", "Sprint 2 event prior state is inconsistent"
+                )
+            if event["type"] == "server.validated":
+                if (
+                    server_validated
+                    or probe_started
+                    or probe_terminal is not None
+                    or set(payload) != {"previous_state", "server_version"}
+                    or not isinstance(payload["server_version"], str)
+                    or not _SUPPORTED_SERVER_VERSION.fullmatch(payload["server_version"])
+                ):
+                    raise ControllerError(
+                        "corrupt_event_log", "Server validation event payload is invalid"
+                    )
+                server_validated = True
+            else:
+                required = {"previous_state", "invocation_id", "role", "session_id"}
+                if (
+                    not required <= set(payload)
+                    or payload.get("role") != "auditor"
+                    or not _bounded_event_string(payload.get("invocation_id"))
+                    or not _bounded_event_string(payload.get("session_id"))
+                ):
+                    raise ControllerError("corrupt_event_log", "Agent event payload is invalid")
+                if event["type"] == "agent.started":
+                    if (
+                        not server_validated
+                        or probe_started
+                        or probe_terminal is not None
+                        or set(payload) != required
+                    ):
+                        raise ControllerError(
+                            "corrupt_event_log", "Agent start event order is invalid"
+                        )
+                    probe_started = True
+                elif event["type"] == "agent.completed":
+                    if (
+                        not probe_started
+                        or set(payload) != required | {"result_status"}
+                        or payload["result_status"] not in {"completed", "blocked", "failed"}
+                    ):
+                        raise ControllerError(
+                            "corrupt_event_log", "Agent completion event payload is invalid"
+                        )
+                    probe_started = False
+                    probe_terminal = "completed"
+                else:
+                    interruption = payload.get("interruption")
+                    if (
+                        not probe_started
+                        or set(payload) != required | {"interruption", "abort_acknowledged"}
+                        or not isinstance(interruption, dict)
+                        or set(interruption) != {"code", "message", "details"}
+                        or not _bounded_event_string(interruption.get("code"))
+                        or not _bounded_event_string(interruption.get("message"))
+                        or interruption.get("details") != {}
+                        or (
+                            payload["abort_acknowledged"] is not None
+                            and not isinstance(payload["abort_acknowledged"], bool)
+                        )
+                    ):
+                        raise ControllerError(
+                            "corrupt_event_log", "Agent interruption event payload is invalid"
+                        )
+                    probe_started = False
+                    probe_terminal = "interrupted"
+            previous = destination
+            continue
         expected_type = _SPRINT_ONE_TRANSITIONS.get((previous, destination))
         if event["type"] != expected_type:
             raise ControllerError(
@@ -197,6 +291,18 @@ def validate_event_history(events: list[dict[str, Any]]) -> None:
                 raise ControllerError(
                     "corrupt_event_log", "Blocked or failed event requires a reason"
                 )
+            if (
+                reason.get("code") == "execution_not_implemented"
+                and server_validated
+                and probe_terminal != "completed"
+            ):
+                raise ControllerError(
+                    "corrupt_event_log", "Execution placeholder requires a completed probe"
+                )
+        if probe_started:
+            raise ControllerError(
+                "corrupt_event_log", "An active probe cannot transition to another state"
+            )
         previous = destination
 
 

@@ -1,4 +1,4 @@
-"""Guarded Sprint 1 workflow transitions."""
+"""Guarded durable workflow transitions and Sprint 2 observations."""
 
 from __future__ import annotations
 
@@ -47,8 +47,10 @@ def _require_artifact_identity(
         raise ControllerError("persistence_failed", f"Runtime artifact changed: {path}")
 
 
-def _load_durable_pair(directory: int, events_path: Path, state_path: Path) -> dict[str, Any]:
-    """Return one validated state/event pair or fail closed on inconsistency."""
+def _load_durable_pair(
+    directory: int, events_path: Path, state_path: Path
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Return one validated state/event pair and history or fail closed."""
     state = load_state_at(directory, state_path.name, state_path)
     events = load_events_at(directory, events_path.name, events_path)
     if not events:
@@ -69,7 +71,7 @@ def _load_durable_pair(directory: int, events_path: Path, state_path: Path) -> d
         raise ControllerError(
             "inconsistent_persistence", "State reason does not match its last event"
         )
-    return state
+    return state, events
 
 
 def persist_initial(
@@ -159,7 +161,7 @@ def transition(
         lock.ensure_current()
         directory = open_directory(state_path.parent)
         try:
-            current = _load_durable_pair(directory, events_path, state_path)
+            current, events = _load_durable_pair(directory, events_path, state_path)
             events_identity = _artifact_identity(directory, events_path.name, events_path)
             state_identity = _artifact_identity(directory, state_path.name, state_path)
             source = cast(WorkflowState, current["state"])
@@ -184,6 +186,7 @@ def transition(
             if destination in {"blocked", "failed"}:
                 next_state["process"]["active"] = False
             serialized = serialize_state(next_state)
+            validate_event_history([*events, event])
             previous_serialized = serialize_state(current)
             lock.ensure_current()
             event_identity = append_event_at(
@@ -209,6 +212,99 @@ def transition(
                     state_path.name,
                     state_path,
                     previous_serialized,
+                    expected_identity=installed_state,
+                )
+                raise
+            lock.ensure_current()
+            require_current_directory(state_path.parent, directory)
+            return next_state
+        finally:
+            os.close(directory)
+
+
+def observe(
+    state: dict[str, Any],
+    events_path: Path,
+    state_path: Path,
+    persistence_lock: Path,
+    event_type: str,
+    payload: dict[str, Any],
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist one validated ``validating -> validating`` observation.
+
+    The caller supplies only small safe state fields (server or active invocation)
+    and all external I/O has already completed before this short critical section.
+    """
+    del state
+    allowed = {"server.validated", "agent.started", "agent.completed", "agent.interrupted"}
+    if event_type not in allowed:
+        raise ControllerError("internal_error", "Invalid same-state observation")
+    with persistence_advisory_lock(persistence_lock, exclusive=True) as lock:
+        lock.ensure_current()
+        directory = open_directory(state_path.parent)
+        try:
+            current, events = _load_durable_pair(directory, events_path, state_path)
+            if current["state"] != "validating":
+                raise ControllerError(
+                    "inconsistent_persistence", "Sprint 2 observation requires validating state"
+                )
+            events_identity = _artifact_identity(directory, events_path.name, events_path)
+            state_identity = _artifact_identity(directory, state_path.name, state_path)
+            next_state = copy.deepcopy(current)
+            if event_type == "server.validated":
+                if (
+                    set(update) != {"server"}
+                    or current["server"]
+                    != {
+                        "url": None,
+                        "version": None,
+                    }
+                    or not isinstance(update["server"], dict)
+                    or update["server"].get("version") != payload.get("server_version")
+                ):
+                    raise ControllerError("internal_error", "Invalid server validation update")
+            elif event_type == "agent.started":
+                if set(update) != {"active_invocation"} or current["active_invocation"] is not None:
+                    raise ControllerError("internal_error", "Invalid agent start update")
+                active = update["active_invocation"]
+                if not isinstance(active, dict) or any(
+                    active.get(field) != payload.get(field)
+                    for field in ("invocation_id", "role", "session_id")
+                ):
+                    raise ControllerError("internal_error", "Agent start identity is inconsistent")
+            elif (
+                set(update) != {"active_invocation"}
+                or update["active_invocation"] is not None
+                or current["active_invocation"] is None
+            ):
+                raise ControllerError("internal_error", "Invalid agent terminal update")
+            elif any(
+                current["active_invocation"].get(field) != payload.get(field)
+                for field in ("invocation_id", "role", "session_id")
+            ):
+                raise ControllerError("internal_error", "Agent terminal identity is inconsistent")
+            for key, value in update.items():
+                next_state[key] = value
+            event = transition_event(next_state, event_type, "validating", payload)
+            next_state["last_event_sequence"] = event["sequence"]
+            next_state["updated_at"] = event["timestamp"]
+            validate_event_history([*events, event])
+            serialized = serialize_state(next_state)
+            event_identity = append_event_at(
+                directory, events_path.name, events_path, event, expected_identity=events_identity
+            )
+            installed_state = write_state_atomic_at(
+                directory, state_path.name, state_path, serialized, expected_identity=state_identity
+            )
+            try:
+                _require_artifact_identity(directory, events_path.name, events_path, event_identity)
+            except ControllerError:
+                write_state_atomic_at(
+                    directory,
+                    state_path.name,
+                    state_path,
+                    serialize_state(current),
                     expected_identity=installed_state,
                 )
                 raise

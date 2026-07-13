@@ -3,26 +3,52 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import secrets
+import signal
 import socket
 import stat
 import sys
+import threading
+import time
 from pathlib import Path
-from typing import NoReturn, Sequence
+from typing import Any, NoReturn, Sequence
 
 from . import __version__
 from .config import SprintConfig, load_config
 from .errors import ControllerError
-from .git import is_tracked_path, validate_preflight, validate_root
+from .agent_runner import AgentRunner, CreatedSession, InvocationRequest, ServerValidationRequest
+from .git import (
+    capture_probe_snapshot,
+    is_tracked_path,
+    validate_preflight,
+    validate_root,
+    verify_probe_snapshot,
+)
+from .invocations import (
+    InvocationPaths,
+    allocate_paths,
+    new_metadata,
+    probe_prompt,
+    probe_title,
+    transcript_wrapper,
+    validate_result,
+    write_metadata,
+    write_prompt,
+    write_result,
+    write_transcript,
+)
 from .locking import ownership_lock, persistence_lock as persistence_advisory_lock
 from .paths import RuntimePaths, canonical_root, ensure_runtime_paths_safe, runtime_paths
 from .safeio import open_directory
 from .security import redact_diagnostic
-from .state import _rename_exchange, new_state, process_start_identity
+from .state import _rename_exchange, new_state, process_start_identity, utc_now
 from .status import format_status, project_status, validate_persistence
+from .transitions import observe as persist_observation
 from .transitions import persist_initial, transition
+from .opencode_runner import OpenCodeServerRunner, parse_server_url
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -30,6 +56,56 @@ class _ArgumentParser(argparse.ArgumentParser):
 
     def error(self, message: str) -> NoReturn:
         raise ControllerError("invalid_arguments", message)
+
+
+class _CancellationRequested(Exception):
+    """A recorded cooperative SIGINT or SIGTERM request."""
+
+    def __init__(self, signal_number: int) -> None:
+        super().__init__(signal_number)
+        self.signal_number = signal_number
+
+    @property
+    def exit_status(self) -> int:
+        """Return the conventional shell status for the recorded signal."""
+        return 128 + self.signal_number
+
+
+class _Cancellation:
+    """Minimal signal-safe cancellation recorder used by orchestration."""
+
+    def __init__(self) -> None:
+        self.signal_number: int | None = None
+
+    def record(self, signal_number: int, _frame: object) -> None:
+        """Record the first request; handlers never perform I/O or persistence."""
+        if self.signal_number is None:
+            self.signal_number = signal_number
+
+    def check(self) -> None:
+        """Raise in orchestration after any current atomic action finishes."""
+        if self.signal_number is not None:
+            raise _CancellationRequested(self.signal_number)
+
+
+@contextlib.contextmanager
+def _cooperative_signal_handlers() -> Any:
+    """Install temporary request-recording handlers only in the main thread."""
+    cancellation = _Cancellation()
+    if threading.current_thread() is not threading.main_thread():
+        yield cancellation
+        return
+    previous = {
+        signal.SIGINT: signal.getsignal(signal.SIGINT),
+        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+    }
+    signal.signal(signal.SIGINT, cancellation.record)
+    signal.signal(signal.SIGTERM, cancellation.record)
+    try:
+        yield cancellation
+    finally:
+        for signal_number, handler in previous.items():
+            signal.signal(signal_number, handler)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -224,10 +300,140 @@ def _persist_best_effort_failure(
         return
 
 
-def _run(root_value: str, server_url: str) -> int:
-    """Execute the intentional Sprint 1 placeholder workflow without network access."""
+def _runtime_artifacts(root: Path, paths: RuntimePaths, invocation: InvocationPaths) -> set[str]:
+    """Enumerate only the Sprint 2 runtime files permitted by post-probe Git checks."""
+    candidates = (
+        paths.lock_metadata,
+        paths.state,
+        paths.events,
+        invocation.metadata,
+        invocation.prompt,
+        invocation.result,
+        invocation.transcript,
+    )
+    return {
+        candidate.relative_to(root).as_posix() for candidate in candidates if candidate.exists()
+    }
+
+
+def _terminal_metadata(
+    metadata: dict[str, Any],
+    *,
+    status: str,
+    error: ControllerError,
+    transcript_status: str = "unavailable",
+    transcript_truncated: bool = False,
+) -> None:
+    """Set a coherent terminal infrastructure outcome without fabricating a result."""
+    metadata.update(
+        {
+            "status": status,
+            "completed_at": utc_now(),
+            "result": {"available": False, "status": None},
+            "transcript": {"status": transcript_status, "truncated": transcript_truncated},
+            "error": {"code": error.code, "message": error.message},
+        }
+    )
+
+
+def _capture_transcript(
+    runner: AgentRunner, session: CreatedSession, paths: InvocationPaths
+) -> tuple[str, bool, ControllerError | None]:
+    """Best-effort capture after a terminal result or cancellation boundary."""
+    try:
+        capture = runner.transcript(session)
+        wrapper = transcript_wrapper(session.session_id, capture.messages)
+        write_transcript(paths, wrapper)
+        return (
+            "truncated" if wrapper["truncated"] else "complete",
+            bool(wrapper["truncated"]),
+            None,
+        )
+    except ControllerError as error:
+        return "unavailable", False, error
+
+
+def _abort_empty_session(runner: AgentRunner, session: CreatedSession) -> None:
+    """Attempt exactly one abort for a known session before prompt submission."""
+    try:
+        runner.abort(session)
+    except ControllerError:
+        # The attempted abort is all the controller can safely do for a session
+        # whose invocation state was not made durable.
+        pass
+
+
+def _interrupt_active_invocation(
+    state: dict[str, Any],
+    paths: RuntimePaths,
+    persistence_lock: Path,
+    runner: AgentRunner,
+    session: CreatedSession,
+    invocation_paths: InvocationPaths,
+    metadata: dict[str, Any],
+    error: ControllerError,
+) -> dict[str, Any]:
+    """Abort once, wait briefly for evidence, then persist one interruption event."""
+    abort_acknowledged: bool | None = None
+    try:
+        abort_acknowledged = runner.abort(session).acknowledged
+    except ControllerError:
+        # A failed abort request is evidence of an unconfirmed abort, not a
+        # reason to retry a non-idempotent cancellation operation.
+        abort_acknowledged = None
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            observation = runner.observe(session)
+        except ControllerError:
+            break
+        if observation.status in {None, "idle"} or observation.terminal_assistant:
+            break
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    transcript_status, transcript_truncated, transcript_error = _capture_transcript(
+        runner, session, invocation_paths
+    )
+    _terminal_metadata(
+        metadata,
+        status="timed_out" if error.code == "invocation_timed_out" else "interrupted",
+        error=error,
+        transcript_status=transcript_status,
+        transcript_truncated=transcript_truncated,
+    )
+    write_metadata(invocation_paths, metadata)
+    return persist_observation(
+        state,
+        paths.events,
+        paths.state,
+        persistence_lock,
+        "agent.interrupted",
+        {
+            "previous_state": "validating",
+            "invocation_id": metadata["invocation_id"],
+            "role": "auditor",
+            "session_id": session.session_id,
+            "interruption": {
+                "code": error.code,
+                "message": error.message,
+                "details": {},
+            },
+            "abort_acknowledged": abort_acknowledged,
+        },
+        {"active_invocation": None},
+    )
+
+
+def _run(
+    root_value: str,
+    server_url: str,
+    *,
+    runner: AgentRunner | None = None,
+    cancellation: _Cancellation | None = None,
+) -> int:
+    """Run one non-mutating, fresh Auditor execution probe then block intentionally."""
+    cancellation = cancellation or _Cancellation()
     if not server_url:
-        raise ControllerError("invalid_arguments", "--server-url must be non-empty")
+        raise ControllerError("invalid_server_url", "--server-url must be non-empty")
     root, config, paths, run_lock, persistence_lock = _load_root_config(root_value)
     # Initial validation must not create controller metadata. A concurrent run
     # is rechecked under both locks after this read-only pass.
@@ -239,7 +445,21 @@ def _run(root_value: str, server_url: str) -> int:
         else set()
     )
     validate_preflight(root, config, require_clean=True, allowed_root_untracked=allowed)
+    # This entire preflight is intentionally before ownership/runtime creation.
+    effective_runner: AgentRunner = runner or OpenCodeServerRunner(server_url)
+    validated_server = effective_runner.validate_server(
+        ServerValidationRequest(root, dict(config.agents), dict(config.models))
+    )
+    cancellation.check()
     with ownership_lock(run_lock, blocking=False) as ownership:
+        state: dict[str, Any] | None = None
+        invocation_paths: InvocationPaths | None = None
+        metadata: dict[str, Any] | None = None
+        session: CreatedSession | None = None
+        agent_started = False
+        agent_completed = False
+        session_creation_in_flight = False
+        terminal_metadata_pending = False
         try:
             # Reload after ownership so a concurrent clean configuration change
             # cannot direct this run to stale runtime paths or repository data.
@@ -276,6 +496,196 @@ def _run(root_value: str, server_url: str) -> int:
             ownership.ensure_current()
             state = transition(state, paths.events, paths.state, persistence_lock, "validating")
             ownership.ensure_current()
+            state = persist_observation(
+                state,
+                paths.events,
+                paths.state,
+                persistence_lock,
+                "server.validated",
+                {"previous_state": "validating", "server_version": validated_server.version},
+                {"server": {"url": validated_server.url, "version": validated_server.version}},
+            )
+            invocation_id = "0001-auditor"
+            invocation_paths = allocate_paths(root, config.multisprint, config.sprint, 1, "auditor")
+            prompt = probe_prompt(config.multisprint, config.sprint, invocation_id)
+            metadata = new_metadata(
+                state["run_id"],
+                invocation_id,
+                1,
+                validated_server.version and config.models["auditor"],
+                validated_server.version,
+                config.repositories[0].name,
+            )
+            write_metadata(invocation_paths, metadata)
+            write_prompt(invocation_paths, prompt)
+            snapshot = capture_probe_snapshot(root, config)
+            known_sessions = effective_runner.existing_session_ids()
+            cancellation.check()
+            request = InvocationRequest(
+                invocation_id,
+                1,
+                config.agents["auditor"],
+                config.models["auditor"],
+                probe_title(config.multisprint, config.sprint, 1),
+                prompt,
+                root,
+            )
+            session_creation_in_flight = True
+            session = effective_runner.create_session(request)
+            session_creation_in_flight = False
+            if session.session_id in known_sessions:
+                raise ControllerError(
+                    "non_fresh_session", "OpenCode reused an existing session identifier"
+                )
+            started_at = utc_now()
+            # Retain this in memory before the state/event write.  If that
+            # durable pair fails, the terminal metadata fallback must still
+            # identify the externally created session it aborts.
+            metadata.update(
+                {
+                    "session_id": session.session_id,
+                    "status": "session_created",
+                    "started_at": started_at,
+                }
+            )
+            active = {
+                "invocation_id": invocation_id,
+                "sequence": 1,
+                "role": "auditor",
+                "model": config.models["auditor"],
+                "session_id": session.session_id,
+                "status": "running",
+                "started_at": started_at,
+            }
+            state = persist_observation(
+                state,
+                paths.events,
+                paths.state,
+                persistence_lock,
+                "agent.started",
+                {
+                    "previous_state": "validating",
+                    "invocation_id": invocation_id,
+                    "role": "auditor",
+                    "session_id": session.session_id,
+                },
+                {"active_invocation": active},
+            )
+            agent_started = True
+            metadata["status"] = "running"
+            write_metadata(invocation_paths, metadata)
+            cancellation.check()
+            deadline = time.monotonic() + config.limits["invocation_timeout_seconds"]
+            effective_runner.submit_prompt(session, request)
+            result: dict[str, object] | None = None
+            while time.monotonic() < deadline:
+                cancellation.check()
+                observation = effective_runner.observe(session)
+                if observation.unexpected_tool:
+                    raise ControllerError(
+                        "unexpected_probe_tool", "Execution probe attempted a forbidden tool"
+                    )
+                if observation.terminal_assistant_error:
+                    raise ControllerError(
+                        "invocation_failed", "OpenCode terminal assistant message reported an error"
+                    )
+                if observation.structured_error:
+                    raise ControllerError(
+                        "invalid_agent_result", "OpenCode reported structured output failure"
+                    )
+                if observation.status not in {None, "busy", "retry", "idle"}:
+                    raise ControllerError(
+                        "invocation_failed", "OpenCode returned an unknown session status"
+                    )
+                if observation.structured_result is not None and observation.status in {
+                    "busy",
+                    "retry",
+                }:
+                    raise ControllerError(
+                        "invocation_failed",
+                        "OpenCode returned terminal output while the session remained active",
+                    )
+                if (
+                    observation.structured_result is not None
+                    and observation.status in {None, "idle"}
+                    and not observation.terminal_assistant
+                ):
+                    raise ControllerError(
+                        "invocation_failed",
+                        "OpenCode terminal result lacks an associated assistant message",
+                    )
+                if (
+                    observation.status in {None, "idle"}
+                    and observation.terminal_assistant
+                    and observation.structured_result is None
+                ):
+                    raise ControllerError(
+                        "invalid_agent_result",
+                        "OpenCode terminal assistant message omitted structured output",
+                    )
+                if (
+                    observation.structured_result is not None
+                    and observation.status in {None, "idle"}
+                    and observation.terminal_assistant
+                ):
+                    result = validate_result(observation.structured_result)
+                    break
+                time.sleep(1)
+            if result is None:
+                raise ControllerError(
+                    "invocation_timed_out", "OpenCode invocation exceeded its configured timeout"
+                )
+            write_result(invocation_paths, result)
+            transcript_status, transcript_truncated, transcript_error = _capture_transcript(
+                effective_runner, session, invocation_paths
+            )
+            metadata.update(
+                {
+                    "status": result["status"],
+                    "completed_at": utc_now(),
+                    "result": {"available": True, "status": result["status"]},
+                    "transcript": {
+                        "status": transcript_status,
+                        "truncated": transcript_truncated,
+                    },
+                    "error": (
+                        None
+                        if transcript_error is None
+                        else {"code": transcript_error.code, "message": transcript_error.message}
+                    ),
+                }
+            )
+            terminal_metadata_pending = True
+            # A raised write leaves immutable result/transcript artifacts as
+            # the documented write-ahead prefix.  Do not later replace
+            # metadata or append an agent terminal event that denies them.
+            write_metadata(invocation_paths, metadata)
+            terminal_metadata_pending = False
+            state = persist_observation(
+                state,
+                paths.events,
+                paths.state,
+                persistence_lock,
+                "agent.completed",
+                {
+                    "previous_state": "validating",
+                    "invocation_id": invocation_id,
+                    "role": "auditor",
+                    "session_id": session.session_id,
+                    "result_status": result["status"],
+                },
+                {"active_invocation": None},
+            )
+            agent_completed = True
+            if transcript_error is not None:
+                raise transcript_error
+            if result["status"] != "completed":
+                raise ControllerError(
+                    "invocation_failed", "Execution probe reported it could not complete"
+                )
+            verify_probe_snapshot(
+                root, config, snapshot, _runtime_artifacts(root, paths, invocation_paths)
+            )
             state = transition(
                 state,
                 paths.events,
@@ -284,15 +694,147 @@ def _run(root_value: str, server_url: str) -> int:
                 "blocked",
                 reason={
                     "code": "execution_not_implemented",
-                    "message": "Sprint execution begins in a later implementation sprint.",
+                    "message": "OpenCode execution probe completed; Builder workflow begins in Sprint 4.",
                     "details": {},
                 },
             )
+        except _CancellationRequested as cancellation_error:
+            error = ControllerError(
+                "invocation_interrupted", "OpenCode invocation was interrupted by a signal"
+            )
+            if state is None:
+                raise
+            if terminal_metadata_pending:
+                # Preserve the result/transcript-before-metadata prefix.
+                pass
+            elif (
+                session is not None
+                and agent_started
+                and not agent_completed
+                and invocation_paths is not None
+                and metadata is not None
+            ):
+                try:
+                    state = _interrupt_active_invocation(
+                        state,
+                        paths,
+                        persistence_lock,
+                        effective_runner,
+                        session,
+                        invocation_paths,
+                        metadata,
+                        error,
+                    )
+                except ControllerError:
+                    pass
+            elif (
+                session is not None
+                and not agent_completed
+                and invocation_paths is not None
+                and metadata is not None
+            ):
+                _abort_empty_session(effective_runner, session)
+                try:
+                    _terminal_metadata(metadata, status="interrupted", error=error)
+                    write_metadata(invocation_paths, metadata)
+                except ControllerError:
+                    pass
+            elif invocation_paths is not None and metadata is not None:
+                if session_creation_in_flight:
+                    error = ControllerError(
+                        "session_creation_ambiguous", "Session creation outcome is unknown"
+                    )
+                    terminal_status = "failed"
+                else:
+                    terminal_status = "interrupted"
+                try:
+                    _terminal_metadata(metadata, status=terminal_status, error=error)
+                    write_metadata(invocation_paths, metadata)
+                except ControllerError:
+                    pass
+            if not terminal_metadata_pending:
+                try:
+                    current, _ = validate_persistence(paths, config)
+                    if current is not None and current["state"] == "validating":
+                        transition(
+                            current,
+                            paths.events,
+                            paths.state,
+                            persistence_lock,
+                            "blocked",
+                            reason={"code": error.code, "message": error.message, "details": {}},
+                        )
+                except ControllerError:
+                    pass
+            raise cancellation_error
+        except ControllerError as error:
+            # A completed valid result has already emitted agent.completed;
+            # never overwrite its metadata or append agent.interrupted.
+            if terminal_metadata_pending:
+                # Preserve the documented result/transcript write-ahead prefix
+                # rather than manufacturing contradictory interruption records.
+                pass
+            elif (
+                state is not None
+                and session is not None
+                and agent_started
+                and not agent_completed
+                and invocation_paths is not None
+                and metadata is not None
+            ):
+                try:
+                    state = _interrupt_active_invocation(
+                        state,
+                        paths,
+                        persistence_lock,
+                        effective_runner,
+                        session,
+                        invocation_paths,
+                        metadata,
+                        error,
+                    )
+                except ControllerError:
+                    pass
+            elif (
+                session is not None
+                and not agent_completed
+                and invocation_paths is not None
+                and metadata is not None
+            ):
+                _abort_empty_session(effective_runner, session)
+                try:
+                    _terminal_metadata(metadata, status="failed", error=error)
+                    write_metadata(invocation_paths, metadata)
+                except ControllerError:
+                    pass
+            elif invocation_paths is not None and metadata is not None and not agent_completed:
+                # A definitive rejection and a transport-ambiguous create both
+                # terminalize the planned record without inventing a session ID.
+                try:
+                    _terminal_metadata(metadata, status="failed", error=error)
+                    write_metadata(invocation_paths, metadata)
+                except ControllerError:
+                    pass
+            if state is not None and not terminal_metadata_pending:
+                try:
+                    current, _ = validate_persistence(paths, config)
+                    if current is not None and current["state"] == "validating":
+                        transition(
+                            current,
+                            paths.events,
+                            paths.state,
+                            persistence_lock,
+                            "blocked",
+                            reason={"code": error.code, "message": error.message, "details": {}},
+                        )
+                except ControllerError:
+                    pass
+            raise
         except BaseException:
             _persist_best_effort_failure(paths, config, persistence_lock)
             raise
     sys.stderr.write(
-        "execution_not_implemented: Sprint execution begins in a later implementation sprint.\n"
+        "execution_not_implemented: OpenCode execution probe completed; Builder workflow begins in Sprint 4.\n"
     )
     return 4
 
@@ -316,16 +858,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         arguments = parser.parse_args(argv)
         if arguments.command == "run":
-            return _run(arguments.root, arguments.server_url)
+            with _cooperative_signal_handlers() as cancellation:
+                try:
+                    return _run(arguments.root, arguments.server_url, cancellation=cancellation)
+                except _CancellationRequested as error:
+                    return error.exit_status
         if arguments.command == "status":
             return _status(arguments.root, arguments.json)
-        if arguments.command == "resume" and not arguments.server_url:
-            raise ControllerError("invalid_arguments", "--server-url must be non-empty")
+        if arguments.command == "resume":
+            parse_server_url(arguments.server_url)
         # Reserved controls still validate their root and configuration before
         # reporting that their Sprint 1 coordination semantics are unavailable.
         _load_root_config(arguments.root)
         raise ControllerError(
-            "feature_not_implemented", f"{arguments.command} is not implemented in Sprint 1"
+            "feature_not_implemented", f"{arguments.command} is not implemented in Sprint 2"
         )
     except ControllerError as error:
         sys.stderr.write(f"{error.code}: {redact_diagnostic(error.message)}\n")

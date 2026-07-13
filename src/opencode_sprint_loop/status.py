@@ -84,7 +84,17 @@ def project_status(
             "code": state["reason"]["code"],
             "message": state["reason"]["message"],
         },
-        "active": {"role": None, "invocation_id": None, "session_id": None},
+        "active": {
+            "role": None
+            if state["active_invocation"] is None
+            else state["active_invocation"]["role"],
+            "invocation_id": None
+            if state["active_invocation"] is None
+            else state["active_invocation"]["invocation_id"],
+            "session_id": None
+            if state["active_invocation"] is None
+            else state["active_invocation"]["session_id"],
+        },
         "commits": state["commits"],
         "audit": {
             "phase": state["audit"]["phase"],
@@ -176,6 +186,41 @@ def validate_persistence(
             raise ControllerError(
                 "inconsistent_persistence", "State reason does not match its last event"
             )
+        server_events = [item for item in events if item["type"] == "server.validated"]
+        if state["server"]["url"] is None:
+            if server_events or state["active_invocation"] is not None:
+                raise ControllerError(
+                    "inconsistent_persistence", "Invocation state requires a validated server"
+                )
+        elif (
+            len(server_events) != 1
+            or server_events[0]["payload"]["server_version"] != state["server"]["version"]
+        ):
+            raise ControllerError(
+                "inconsistent_persistence", "Persisted server does not match validation history"
+            )
+        active = state["active_invocation"]
+        if active is not None:
+            if (
+                state["state"] != "validating"
+                or active["role"] != "auditor"
+                or active["model"] != config.models["auditor"]
+                or active["sequence"] != 1
+                or active["invocation_id"] != "0001-auditor"
+                or event["type"] != "agent.started"
+                or any(
+                    active[field] != event["payload"].get(field)
+                    for field in ("role", "invocation_id", "session_id")
+                )
+            ):
+                raise ControllerError(
+                    "inconsistent_persistence",
+                    "Active invocation does not match configuration or event history",
+                )
+        elif event["type"] == "agent.started":
+            raise ControllerError(
+                "inconsistent_persistence", "Agent start event requires active invocation state"
+            )
         require_current_directory(paths.info_dir, directory)
         return state, events
     finally:
@@ -197,6 +242,12 @@ def format_status(status: dict[str, Any]) -> str:
     ]
     if reason is not None:
         lines.append(f"Reason: {reason['code']}: {reason['message']}")
+    if status["active"] is not None and status["active"]["session_id"] is not None:
+        lines.append(
+            "Active: "
+            f"{status['active']['role']} {status['active']['invocation_id']} "
+            f"({status['active']['session_id']})"
+        )
     if status["last_event"] is not None:
         lines.append(
             f"Last event: {status['last_event']['type']} ({status['last_event']['timestamp']})"
