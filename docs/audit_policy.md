@@ -12,9 +12,7 @@ Before auditing, read:
 - `docs/v1_final_software_specification.md`.
 - `docs/multi_sprint_plan.md`.
 - `docs/threat_model.md`.
-- The current sprint's `sprint_spec.md` and `sprint_checklist.md`.
-
-Use the current-sprint selection rules in `AGENTS.md`. Stop and ask if selection is ambiguous.
+- The audited scope's applicable specification and checklist, when present.
 
 ## Finding Standard
 
@@ -100,11 +98,3 @@ Expected: Smallest correction or documented limitation
 ```
 
 Order findings by priority, then impact. Keep limitations and residual risks separate from actionable findings.
-
-## Builder Handoff
-
-- The Builder implements only findings marked `fix_now` or explicitly selected by the user.
-- The Builder does not automatically implement `investigate`, `defer`, `accept`, or `out_of_scope` items.
-- If a finding lacks a disposition, the Builder asks for clarification rather than assuming every audit observation must be fixed.
-- The Builder preserves finding IDs in its summary so audit decisions remain traceable.
-- After implementation, a fresh audit reassesses the code rather than treating prior findings as automatically closed.

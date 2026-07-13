@@ -24,23 +24,9 @@ The V1 final software specification is authoritative. If an implementation decis
 - Only P0 and P1 findings block sprint completion by default. The user has final authority to accept, defer, or promote any finding.
 - Do not treat hostile local filesystem races or deliberate repository forgery as current-sprint blockers when they are excluded by the threat model.
 
-## Role Workflows
+## Runtime Agent Contract
 
-- Project-local OpenCode roles live in `.opencode/agents/`.
-- The Auditor is read-only and follows `docs/audit_policy.md`. Invoke it with `@auditor` or `/audit`.
-- The Builder implements accepted work and findings. Invoke it with `@builder` or `/address-audit`.
-- The Builder implements only findings marked `fix_now` or explicitly selected by the user. It does not silently implement deferred, accepted, investigative, or out-of-scope findings.
-- Role files supplement this repository guidance; they do not replace the authoritative specifications or current sprint documents.
-
-## Finding the Current Sprint
-
-- Sprint implementation documents live under `docs/controller-v1/<sprint_number>/`.
-- An explicit sprint named by the user takes precedence over repository inference.
-- Otherwise, inspect numbered sprint directories in ascending numeric order. The current sprint is the first one whose `sprint_checklist.md` Completion Gate is not fully checked.
-- A sprint directory is valid only when it contains both `sprint_spec.md` and `sprint_checklist.md`. If the inferred directory is incomplete or sprint ordering is ambiguous, stop and ask rather than guessing.
-- Before implementing, read the current sprint's specification and checklist together with both authoritative documents above.
-- Do not begin work from a future sprint merely because it appears in `docs/multi_sprint_plan.md`; detailed sprint documents must exist and all earlier sprint Completion Gates must be complete.
-- Keep checklist boxes synchronized with verified implementation. Do not mark an item complete before its code, tests, documentation, and required verification are finished.
+- Project-local OpenCode roles in `.opencode/agents/` are runtime inputs required by the controller's V1 configuration contract. Do not remove or rename them without deliberately updating that contract and its fixtures.
 
 ## Architecture Boundaries
 
@@ -70,10 +56,6 @@ The V1 final software specification is authoritative. If an implementation decis
 - Add tests for success, failure, interruption, and recovery paths when changing stateful behavior.
 - Keep real OpenCode and GitHub integration tests opt-in. Default tests must not require credentials, model usage, or network access.
 - Avoid speculative support for multi-repository workflows, other CI providers, custom dashboards, or multiplexers in V1.
-- Be sure to document public API methods with docstrings.
-- Update documentation in the same change as user-visible behavior, CLI options, configuration, schemas, state transitions, recovery behavior, or external integration requirements.
-- Keep examples, command output, and JSON fragments consistent with the implemented contracts and covered by tests where practical.
-- Document operational limitations and failure behavior explicitly. Do not present planned or speculative behavior as implemented.
 
 ## Git Submodule Workflow
 
