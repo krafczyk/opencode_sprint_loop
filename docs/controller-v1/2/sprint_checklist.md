@@ -396,7 +396,7 @@ An item may be checked only when its implementation, tests, and required documen
 
 ## 29. Exit Demonstration
 
-- [ ] **S2-DEMO-001** Install the built package into a clean Python 3.11+ environment.
+- [x] **S2-DEMO-001** Install the built package into a clean Python 3.11+ environment.
 - [ ] **S2-DEMO-002** Create a clean sprint fixture with real managed submodule and valid configured agents/models.
 - [ ] **S2-DEMO-003** Start an authenticated supported OpenCode server rooted at the fixture outside the controller.
 - [ ] **S2-DEMO-004** Supply credentials only through inherited environment, never argv or files.
@@ -406,9 +406,19 @@ An item may be checked only when its implementation, tests, and required documen
 - [ ] **S2-DEMO-008** Inspect sanitized metadata, exact prompt, validated result, and bounded transcript.
 - [ ] **S2-DEMO-009** Verify both repositories changed only by expected uncommitted controller runtime records.
 - [ ] **S2-DEMO-010** Show final `blocked/execution_not_implemented` state and ordered Sprint 2 events.
-- [ ] **S2-DEMO-011** Demonstrate a wrong-default-workspace server failure with no runtime mutation or session.
+- [x] **S2-DEMO-011** Demonstrate a wrong-default-workspace server failure with no runtime mutation or session.
 - [x] **S2-DEMO-012** Demonstrate deterministic fake timeout, abort, interruption evidence, and preserved session identity.
 - [x] **S2-DEMO-013** Confirm the default demonstration/test path does not require GitHub or plugin behavior.
+
+On 2026-07-13, a clean wheel install reported controller version `0.1.0`. The
+supplied server reported healthy OpenCode `1.17.18`, but its documented default
+`directory` and `worktree` were the controller source repository rather than the
+clean temporary sprint fixture. Running the installed controller against that
+fixture returned `wrong_server_workspace` with status 2; repository snapshots
+were identical, runtime paths remained absent, and the server's session-ID set
+was unchanged. The successful execution-probe items and **S2-DONE-011** remain
+unchecked because the supplied server could not be re-rooted without changing
+its externally managed configuration.
 
 ## 30. Completion Gate
 
