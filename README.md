@@ -82,7 +82,10 @@ Basic authentication is inherited only from `OPENCODE_SERVER_PASSWORD` and,
 optionally, `OPENCODE_SERVER_USERNAME` (default `opencode` with a password).
 Never put credentials in argv, configuration, or artifacts. Before creating a
 runtime path or session, the controller validates health, default workspace, all
-configured agents, and configured provider/model pairs.
+configured agents, and configured provider/model pairs. Provider capability
+records must explicitly report `connected: true` and advertise models through
+the documented object map; missing or non-boolean connection state and list-shaped
+model collections are rejected as malformed server responses.
 
 `pause`, `resume`, and `stop` are reserved command names and return `feature_not_implemented` without changing state or Git repositories.
 

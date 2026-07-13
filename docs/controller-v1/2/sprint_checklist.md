@@ -65,8 +65,8 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S2-PREFLIGHT-004** Acquire no session during server preflight.
 - [x] **S2-PREFLIGHT-005** Repeat local configuration and repository preflight after acquiring run ownership.
 - [x] **S2-PREFLIGHT-006** Perform no network call while ownership is held but no run state exists; classify later service changes as post-start failures.
-- [ ] **S2-PREFLIGHT-007** Prove each representative server-preflight failure creates no runtime path, invocation artifact, lock metadata, session, Git index change, or commit.
-- [ ] **S2-PREFLIGHT-008** Prove no-run status semantics remain unchanged during bounded post-lock local revalidation.
+- [x] **S2-PREFLIGHT-007** Prove each representative server-preflight failure creates no runtime path, invocation artifact, lock metadata, session, Git index change, or commit.
+- [x] **S2-PREFLIGHT-008** Prove no-run status semantics remain unchanged during bounded post-lock local revalidation.
 
 ## 6. Health and Version Validation
 
@@ -74,7 +74,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S2-HEALTH-002** Require an object with `healthy: true` and a non-empty version string.
 - [x] **S2-HEALTH-003** Accept supported release versions `>=1.17.0` and `<1.18.0`.
 - [x] **S2-HEALTH-004** Reject malformed, pre-release, older, and newer-minor versions with `unsupported_server_version`.
-- [ ] **S2-HEALTH-005** Distinguish unavailable, unauthenticated, unhealthy, malformed, oversized, and incompatible server responses.
+- [x] **S2-HEALTH-005** Distinguish unavailable, unauthenticated, unhealthy, malformed, oversized, and incompatible server responses.
 - [x] **S2-HEALTH-006** Persist only the validated version after durable run creation.
 
 ## 7. Workspace Validation
@@ -102,12 +102,12 @@ An item may be checked only when its implementation, tests, and required documen
 ## 9. Fake Runner and Fake Server
 
 - [x] **S2-FAKE-001** Implement a deterministic fake satisfying the `AgentRunner` protocol.
-- [ ] **S2-FAKE-002** Script every server validation success and failure category.
-- [ ] **S2-FAKE-003** Script unique, duplicate, and ambiguous session creation outcomes.
-- [ ] **S2-FAKE-004** Script busy, retry, idle, missing, unknown, and inconsistent observation states.
-- [ ] **S2-FAKE-005** Script valid, blocked, failed, malformed, free-form, and oversized results.
-- [ ] **S2-FAKE-006** Script timeout, interruption, abort acknowledgement, and abort non-acknowledgement.
-- [ ] **S2-FAKE-007** Script complete, malformed, credential-bearing, and oversized transcripts.
+- [x] **S2-FAKE-002** Script every server validation success and failure category.
+- [x] **S2-FAKE-003** Script unique, duplicate, and ambiguous session creation outcomes.
+- [x] **S2-FAKE-004** Script busy, retry, idle, missing, unknown, and inconsistent observation states.
+- [x] **S2-FAKE-005** Script valid, blocked, failed, malformed, free-form, and oversized results.
+- [x] **S2-FAKE-006** Script timeout, interruption, abort acknowledgement, and abort non-acknowledgement.
+- [x] **S2-FAKE-007** Script complete, malformed, credential-bearing, and oversized transcripts.
 - [x] **S2-FAKE-008** Add a local fake HTTP server exercising the real adapter without external network access.
 - [x] **S2-FAKE-009** Keep state-machine tests independent of OpenCode HTTP implementation details.
 
@@ -180,7 +180,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S2-ABORT-010** Document that uncatchable process loss may leave an externally running session.
 - [x] **S2-ABORT-011** Exit `130` after orderly `SIGINT` handling and `143` after orderly `SIGTERM` handling.
 - [x] **S2-ABORT-012** Add a process-level signal test in addition to injected fake cancellation tests.
-- [ ] **S2-ABORT-013** Best-effort abort any known successfully created session even when cancellation precedes normal `agent.started` completion.
+- [x] **S2-ABORT-013** Best-effort abort any known successfully created session even when cancellation precedes normal `agent.started` completion.
 
 ## 15. State Model
 
@@ -253,8 +253,8 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S2-SAFEIO-005** Use same-directory temporary files and atomic replacement.
 - [x] **S2-SAFEIO-006** Flush file data and sync directories where supported.
 - [x] **S2-SAFEIO-007** Clean handled temporary artifacts only when safe.
-- [ ] **S2-SAFEIO-008** Inject short-write, permission, pre-replace, post-replace, and directory-sync failures.
-- [ ] **S2-SAFEIO-009** Prove readers see prior or next complete metadata/result/transcript artifacts, never truncated JSON.
+- [x] **S2-SAFEIO-008** Inject short-write, permission, pre-replace, post-replace, and directory-sync failures.
+- [x] **S2-SAFEIO-009** Prove readers see prior or next complete metadata/result/transcript artifacts, never truncated JSON.
 - [x] **S2-SAFEIO-010** Do not stage or commit invocation artifacts in Sprint 2.
 
 ## 20. Bounds and Sanitization
@@ -285,11 +285,11 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S2-GIT-007** Enter `unexpected_agent_repository_change` with an actionable repository path.
 - [x] **S2-GIT-008** Preserve all unexpected changes exactly.
 - [x] **S2-GIT-009** Never reset, stash, clean, checkout, switch, add, commit, push, or broad-stage in response.
-- [ ] **S2-GIT-010** Prove successful probe execution changes only expected uncommitted controller runtime artifacts.
+- [x] **S2-GIT-010** Prove successful probe execution changes only expected uncommitted controller runtime artifacts.
 
 ## 22. Error Model
 
-- [ ] **S2-ERR-001** Implement and document every required Sprint 2 stable reason code or a tested equivalent specific mapping.
+- [x] **S2-ERR-001** Implement and document every required Sprint 2 stable reason code or a tested equivalent specific mapping.
 - [x] **S2-ERR-002** Distinguish URL, authentication, health, version, API, workspace, capability, session, prompt, timeout, result, transcript, record, and repository failures.
 - [x] **S2-ERR-003** Keep expected external failures out of `internal_error`.
 - [x] **S2-ERR-004** Before durable run creation, return non-zero with no mutation.
@@ -328,9 +328,9 @@ An item may be checked only when its implementation, tests, and required documen
 
 ## 25. Automated Verification
 
-- [ ] **S2-TEST-001** Cover every URL and authentication rule.
-- [ ] **S2-TEST-002** Cover every health/version HTTP and schema failure class.
-- [ ] **S2-TEST-003** Cover workspace canonicalization and wrong-default-context failures.
+- [x] **S2-TEST-001** Cover every URL and authentication rule.
+- [x] **S2-TEST-002** Cover every health/version HTTP and schema failure class.
+- [x] **S2-TEST-003** Cover workspace canonicalization and wrong-default-context failures.
 - [x] **S2-TEST-004** Cover configured agent, provider, and model failures.
 - [x] **S2-TEST-005** Cover initial server-preflight and post-lock local-revalidation no-mutation guarantees.
 - [x] **S2-TEST-006** Cover runner protocol behavior with deterministic fake outcomes.
@@ -339,12 +339,12 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S2-TEST-008** Cover asynchronous submission, polling, terminal evidence, timeout, interruption, and abort.
 - [x] **S2-TEST-008A** Cover real process delivery of `SIGINT` and `SIGTERM`, orderly abort, durable interruption, and exit statuses `130`/`143`.
 - [x] **S2-TEST-008B** Cover ambiguous prompt submission and status/message transport failures attempting one bounded abort.
-- [ ] **S2-TEST-009** Cover every structured-result validation rule.
+- [x] **S2-TEST-009** Cover every structured-result validation rule.
 - [x] **S2-TEST-009A** Cover enforced wildcard-deny permissions and rejection of non-`StructuredOutput` tool evidence.
-- [ ] **S2-TEST-010** Cover invocation artifact schemas, atomic persistence, and fault injection.
-- [ ] **S2-TEST-010A** Inject failure after each terminal write boundary and verify documented prefixes never become success.
-- [ ] **S2-TEST-010B** Reject every cross-record identity, status, availability, truncation, and path mismatch.
-- [ ] **S2-TEST-011** Cover response, prompt, result, metadata, transcript, string, and identifier bounds.
+- [x] **S2-TEST-010** Cover invocation artifact schemas, atomic persistence, and fault injection.
+- [x] **S2-TEST-010A** Inject failure after each terminal write boundary and verify documented prefixes never become success.
+- [x] **S2-TEST-010B** Reject every cross-record identity, status, availability, truncation, and path mismatch.
+- [x] **S2-TEST-011** Cover response, prompt, result, metadata, transcript, string, and identifier bounds.
 - [x] **S2-TEST-012** Cover recursive credential sanitization with synthetic values.
 - [x] **S2-TEST-013** Cover Sprint 2 state/event histories and Sprint 1 backward compatibility.
 - [x] **S2-TEST-014** Cover active human/JSON status while a separate process owns the run.

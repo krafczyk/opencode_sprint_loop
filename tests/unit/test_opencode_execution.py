@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import signal
+import ssl
+import stat
 import subprocess
 import sys
 import threading
@@ -15,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 from opencode_sprint_loop.agent_runner import (
     FakeAgentRunner,
@@ -29,10 +32,13 @@ from opencode_sprint_loop.invocations import (
     new_metadata,
     probe_prompt,
     transcript_wrapper,
+    validate_invocation_records,
     validate_metadata,
+    validate_prompt,
     validate_result,
     write_metadata,
     write_prompt,
+    write_result,
     write_transcript,
 )
 from opencode_sprint_loop.opencode_runner import (
@@ -151,6 +157,26 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
 
+class _HTTPResponse:
+    """Small opener response fake for transport and response-bound tests."""
+
+    def __init__(self, url: str, payload: bytes) -> None:
+        self.url = url
+        self.payload = payload
+
+    def __enter__(self) -> "_HTTPResponse":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        del args
+
+    def geturl(self) -> str:
+        return self.url
+
+    def read(self, amount: int) -> bytes:
+        return self.payload[:amount]
+
+
 class OpenCodeExecutionTests(unittest.TestCase):
     """Exercise the public Sprint 2 execution boundary without external services."""
 
@@ -160,15 +186,21 @@ class OpenCodeExecutionTests(unittest.TestCase):
         self.assertEqual(
             parse_server_url("https://example.invalid:444"), "https://example.invalid:444"
         )
+        self.assertEqual(parse_server_url("http://[::1]:80"), "http://[::1]")
         for value in (
             "",
+            "relative",
             "ssh://host",
+            "http:///missing-host",
             "http://user:pass@host",
             "http://host/a",
+            "http://host/%zz",
             "http://host?q=x",
             "http://host#x",
+            "http://host\n",
             "http://host:%zz",
             "http://host:",
+            "http://host:65536",
             "http://[::1]:",
             "http://bad_host",
             "http://host:0",
@@ -184,7 +216,10 @@ class OpenCodeExecutionTests(unittest.TestCase):
             self.assertEqual(context.exception.code, "invalid_server_authentication")
         with patch.dict("os.environ", {"OPENCODE_SERVER_PASSWORD": "synthetic-pass"}, clear=True):
             authentication = HTTPAuthentication.from_environment()
+            self.assertEqual(authentication.username, "opencode")
             self.assertTrue(authentication.header().startswith("Basic "))  # type: ignore[union-attr]
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertIsNone(HTTPAuthentication.from_environment().header())
 
     def test_metadata_schema_and_transcript_bounds_fail_closed(self) -> None:
         """Nested metadata invariants are exact and transcript truncation stays in bounds."""
@@ -378,7 +413,65 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     [{"name": "builder"}, {"name": "auditor"}, {"name": "auditor"}],
                     "configured_agent_unavailable",
                 ),
+                ("/agent", [{"name": 1}], "malformed_server_response"),
+                ("/agent", [{"name": "builder", "mode": []}], "malformed_server_response"),
+                ("/agent", [{"name": "builder", "disable": 1}], "malformed_server_response"),
+                (
+                    "/config/providers",
+                    {"providers": ["test", "test"]},
+                    "malformed_server_response",
+                ),
+                (
+                    "/config/providers",
+                    {"providers": [1]},
+                    "malformed_server_response",
+                ),
                 ("/provider", [], "configured_model_unavailable"),
+                (
+                    "/provider",
+                    [{"id": "test", "models": {"medium": {}, "strong": {}}}],
+                    "malformed_server_response",
+                ),
+                (
+                    "/provider",
+                    [
+                        {
+                            "id": "test",
+                            "connected": "yes",
+                            "models": {"medium": {}, "strong": {}},
+                        }
+                    ],
+                    "malformed_server_response",
+                ),
+                (
+                    "/provider",
+                    [{"id": "test", "connected": True, "models": ["medium", "strong"]}],
+                    "malformed_server_response",
+                ),
+                (
+                    "/provider",
+                    [{"id": "test", "connected": True, "models": {"strong": None}}],
+                    "malformed_server_response",
+                ),
+                (
+                    "/provider",
+                    [
+                        {"id": "test", "connected": True, "models": {"strong": {}}},
+                        {"id": "test", "connected": True, "models": {"medium": {}}},
+                    ],
+                    "malformed_server_response",
+                ),
+                (
+                    "/provider",
+                    [
+                        {
+                            "id": "test",
+                            "connected": False,
+                            "models": {"medium": {}, "strong": {}},
+                        }
+                    ],
+                    "configured_model_unavailable",
+                ),
             )
             for endpoint, response, code in cases:
                 with self.subTest(endpoint=endpoint, code=code):
@@ -524,6 +617,13 @@ class OpenCodeExecutionTests(unittest.TestCase):
         fixture = SprintRepositoryFixture()
         root = fixture.create()
         self.addCleanup(fixture.close)
+        sprint_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        managed = root / "repositories/managed"
+        managed_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=managed, check=True, capture_output=True, text=True
+        ).stdout.strip()
         completed = {
             "schema_version": 1,
             "status": "completed",
@@ -564,6 +664,51 @@ class OpenCodeExecutionTests(unittest.TestCase):
         self.assertEqual(metadata["session_id"], "ses_fake_0001")
         self.assertTrue((metadata_path.parent / "result.json").is_file())
         self.assertTrue((metadata_path.parent / "transcript.json").is_file())
+        sprint_status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        self.assertEqual(
+            set(sprint_status),
+            {
+                "?? info/foundation/1/events.jsonl",
+                "?? info/foundation/1/lock.json",
+                "?? info/foundation/1/state.json",
+                "?? invocations/foundation/1/0001-auditor/metadata.json",
+                "?? invocations/foundation/1/0001-auditor/prompt.md",
+                "?? invocations/foundation/1/0001-auditor/result.json",
+                "?? invocations/foundation/1/0001-auditor/transcript.json",
+            },
+        )
+        self.assertEqual(
+            subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=all"],
+                cwd=managed,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout,
+            "",
+        )
+        self.assertEqual(
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+            ).stdout.strip(),
+            sprint_head,
+        )
+        self.assertEqual(
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=managed,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip(),
+            managed_head,
+        )
 
         without_server = [event for event in events if event["type"] != "server.validated"]
         with self.assertRaises(ControllerError):
@@ -815,6 +960,116 @@ class OpenCodeExecutionTests(unittest.TestCase):
             for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()
         ]
         self.assertIn("agent.interrupted", [event["type"] for event in events])
+
+    def test_busy_retry_idle_missing_unknown_and_inconsistent_observations(self) -> None:
+        """Pending observations wait, while unknown and contradictory evidence fail closed."""
+        from opencode_sprint_loop.cli import _run
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        scenarios = {
+            "pending_then_complete": (
+                [
+                    InvocationObservation("busy", [], None, False, False),
+                    InvocationObservation("retry", [], None, False, False),
+                    InvocationObservation("idle", [], None, False, False),
+                    InvocationObservation(None, [], None, False, False),
+                    InvocationObservation(
+                        "idle", self._terminal_messages(), completed, False, False, True
+                    ),
+                ],
+                None,
+            ),
+            "unknown": (
+                [InvocationObservation("unexpected", [], None, False, False)],
+                "invocation_failed",
+            ),
+            "active_with_result": (
+                [InvocationObservation("busy", self._terminal_messages(), completed, False, False)],
+                "invocation_failed",
+            ),
+        }
+        for name, (observations, expected_error) in scenarios.items():
+            with self.subTest(scenario=name):
+                fixture = SprintRepositoryFixture()
+                root = fixture.create()
+                self.addCleanup(fixture.close)
+                fake = FakeAgentRunner(
+                    ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+                    observations=observations,
+                    transcript_messages=self._terminal_messages(completed),
+                )
+                with patch("opencode_sprint_loop.cli.time.sleep", return_value=None):
+                    if expected_error is None:
+                        self.assertEqual(_run(str(root), "http://127.0.0.1:4096", runner=fake), 4)
+                    else:
+                        with self.assertRaises(ControllerError) as context:
+                            _run(str(root), "http://127.0.0.1:4096", runner=fake)
+                        self.assertEqual(context.exception.code, expected_error)
+
+    def test_abort_non_acknowledgement_is_persisted(self) -> None:
+        """A false abort acknowledgement remains explicit interruption evidence."""
+        from opencode_sprint_loop.cli import _run
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        fixture = SprintRepositoryFixture()
+        root = fixture.create()
+        self.addCleanup(fixture.close)
+        fake = FakeAgentRunner(
+            ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+            observations=[
+                InvocationObservation("idle", self._terminal_messages(), None, False, False, True),
+                InvocationObservation("idle", [], None, False, False),
+            ],
+            abort_acknowledged=False,
+        )
+        with self.assertRaises(ControllerError) as context:
+            _run(str(root), "http://127.0.0.1:4096", runner=fake)
+        self.assertEqual(context.exception.code, "invalid_agent_result")
+        events = [
+            json.loads(line)
+            for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(events[-2]["type"], "agent.interrupted")
+        self.assertIs(events[-2]["payload"]["abort_acknowledged"], False)
+
+    def test_malformed_fake_transcript_blocks_without_result_artifact(self) -> None:
+        """Malformed transcript evidence from the fake cannot complete the probe."""
+        from opencode_sprint_loop.cli import _run
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        fixture = SprintRepositoryFixture()
+        root = fixture.create()
+        self.addCleanup(fixture.close)
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        fake = FakeAgentRunner(
+            ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+            observations=[
+                InvocationObservation(
+                    "idle", self._terminal_messages(), completed, False, False, True
+                )
+            ],
+            transcript_messages=[{"malformed": True}],
+        )
+        with self.assertRaises(ControllerError) as context:
+            _run(str(root), "http://127.0.0.1:4096", runner=fake)
+        self.assertEqual(context.exception.code, "transcript_capture_failed")
+        directory = root / "invocations/foundation/1/0001-auditor"
+        self.assertFalse((directory / "result.json").exists())
+        metadata = json.loads((directory / "metadata.json").read_text())
+        self.assertEqual(metadata["transcript"]["status"], "unavailable")
 
     def test_unhashable_result_status_uses_durable_invalid_result_path(self) -> None:
         """List and object statuses cannot escape result failure persistence as TypeError."""
@@ -1146,6 +1401,95 @@ class OpenCodeExecutionTests(unittest.TestCase):
         self.assertEqual(state["state"], "validating")
         self.assertIsNotNone(state["active_invocation"])
 
+    def test_each_terminal_write_boundary_preserves_only_coherent_prefixes(self) -> None:
+        """Result, transcript, agent-event, and run-block faults never imply false success."""
+        import opencode_sprint_loop.cli as cli
+
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        for boundary in ("result", "transcript", "agent_event", "run_block"):
+            with self.subTest(boundary=boundary):
+                fixture = SprintRepositoryFixture()
+                root = fixture.create()
+                self.addCleanup(fixture.close)
+                fake = FakeAgentRunner(
+                    ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+                    observations=[
+                        InvocationObservation(
+                            "idle", self._terminal_messages(), completed, False, False, True
+                        )
+                    ],
+                    transcript_messages=self._terminal_messages(completed),
+                )
+                original_observe = cli.persist_observation
+                original_transition = cli.transition
+
+                def fail_agent_event(*args: object, **kwargs: object) -> dict[str, object]:
+                    if args[4] == "agent.completed":
+                        raise ControllerError(
+                            "invocation_record_failed", "Synthetic agent event failure"
+                        )
+                    return original_observe(*args, **kwargs)  # type: ignore[arg-type]
+
+                def fail_run_block(*args: object, **kwargs: object) -> dict[str, object]:
+                    if args[4] == "blocked":
+                        raise ControllerError(
+                            "invocation_record_failed", "Synthetic run block failure"
+                        )
+                    return original_transition(*args, **kwargs)  # type: ignore[arg-type]
+
+                target = {
+                    "result": "opencode_sprint_loop.cli.write_result",
+                    "transcript": "opencode_sprint_loop.cli.write_transcript",
+                    "agent_event": "opencode_sprint_loop.cli.persist_observation",
+                    "run_block": "opencode_sprint_loop.cli.transition",
+                }[boundary]
+                replacement = {
+                    "result": ControllerError(
+                        "invocation_record_failed", "Synthetic result write failure"
+                    ),
+                    "transcript": ControllerError(
+                        "invocation_record_failed", "Synthetic transcript write failure"
+                    ),
+                    "agent_event": fail_agent_event,
+                    "run_block": fail_run_block,
+                }[boundary]
+                with patch(target, side_effect=replacement):
+                    with self.assertRaises(ControllerError):
+                        cli._run(str(root), "http://127.0.0.1:4096", runner=fake)
+                directory = root / "invocations/foundation/1/0001-auditor"
+                metadata = json.loads((directory / "metadata.json").read_text())
+                events = [
+                    json.loads(line)
+                    for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()
+                ]
+                event_types = [event["type"] for event in events]
+                if boundary == "result":
+                    self.assertFalse((directory / "result.json").exists())
+                    self.assertEqual(metadata["status"], "interrupted")
+                    self.assertEqual(event_types[-2:], ["agent.interrupted", "run.blocked"])
+                elif boundary == "transcript":
+                    self.assertTrue((directory / "result.json").is_file())
+                    self.assertFalse((directory / "transcript.json").exists())
+                    self.assertEqual(metadata["status"], "running")
+                    self.assertEqual(event_types[-1], "agent.started")
+                elif boundary == "agent_event":
+                    self.assertTrue((directory / "result.json").is_file())
+                    self.assertTrue((directory / "transcript.json").is_file())
+                    self.assertEqual(metadata["status"], "completed")
+                    self.assertEqual(event_types[-1], "agent.started")
+                else:
+                    self.assertEqual(metadata["status"], "completed")
+                    self.assertEqual(event_types[-1], "agent.completed")
+                    self.assertNotIn("run.blocked", event_types)
+
     def test_timeout_aborts_once_before_terminal_interruption_persistence(self) -> None:
         """A monotonic timeout runs the one-abort cleanup path exactly once."""
         from tests.integration.test_foundation import SprintRepositoryFixture
@@ -1222,6 +1566,698 @@ class OpenCodeExecutionTests(unittest.TestCase):
         )
         self.assertIsNone(metadata["session_id"])
         self.assertEqual(metadata["status"], "failed")
+
+    def test_http_failure_classes_and_strict_json_are_normalized(self) -> None:
+        """Transport, HTTP, redirect, malformed, and oversized responses fail distinctly."""
+        runner = OpenCodeServerRunner("http://127.0.0.1:4096")
+        url = "http://127.0.0.1:4096/global/health"
+        failures = (
+            (ConnectionRefusedError("synthetic refusal"), "server_unavailable"),
+            (TimeoutError("synthetic timeout"), "server_unavailable"),
+            (URLError(ssl.SSLError("synthetic TLS failure")), "server_unavailable"),
+            (HTTPError(url, 401, "synthetic", {}, None), "server_authentication_failed"),
+            (HTTPError(url, 403, "synthetic", {}, None), "server_unavailable"),
+            (HTTPError(url, 404, "synthetic", {}, None), "server_unavailable"),
+            (HTTPError(url, 500, "synthetic", {}, None), "server_unavailable"),
+            (
+                HTTPError(url, 302, "synthetic", {"Location": "/other"}, None),
+                "server_api_incompatible",
+            ),
+        )
+        for failure, code in failures:
+            with self.subTest(failure=type(failure).__name__, code=code):
+                with patch.object(runner._opener, "open", side_effect=failure):
+                    with self.assertRaises(ControllerError) as context:
+                        runner._request("GET", "/global/health")
+                self.assertEqual(context.exception.code, code)
+
+        malformed = (
+            b"{",
+            b'{"healthy":true,"healthy":false}',
+            b'{"healthy":NaN}',
+            b"\xff",
+        )
+        for payload in malformed:
+            with self.subTest(payload=payload):
+                response = _HTTPResponse(url, payload)
+                with patch.object(runner._opener, "open", return_value=response):
+                    with self.assertRaises(ControllerError) as context:
+                        runner._request("GET", "/global/health")
+                self.assertEqual(context.exception.code, "malformed_server_response")
+
+        redirected = _HTTPResponse("http://127.0.0.1:4096/other", b"{}")
+        with patch.object(runner._opener, "open", return_value=redirected):
+            with self.assertRaises(ControllerError) as context:
+                runner._request("GET", "/global/health")
+        self.assertEqual(context.exception.code, "server_api_incompatible")
+        with patch("opencode_sprint_loop.opencode_runner.MAX_RESPONSE_BYTES", 8):
+            response = _HTTPResponse(url, b"123456789")
+            with patch.object(runner._opener, "open", return_value=response):
+                with self.assertRaises(ControllerError) as context:
+                    runner._request("GET", "/global/health")
+        self.assertEqual(context.exception.code, "server_response_too_large")
+
+    def test_authentication_header_is_in_memory_and_origin_bound(self) -> None:
+        """Inherited Basic authentication reaches only the validated request origin."""
+        with patch.dict(
+            "os.environ",
+            {
+                "OPENCODE_SERVER_USERNAME": "synthetic-user",
+                "OPENCODE_SERVER_PASSWORD": "synthetic-password",
+            },
+            clear=True,
+        ):
+            runner = OpenCodeServerRunner("https://example.invalid")
+        observed: dict[str, str | None] = {}
+
+        def open_request(request: object, *, timeout: int) -> _HTTPResponse:
+            observed["url"] = request.full_url  # type: ignore[attr-defined]
+            observed["authorization"] = request.get_header("Authorization")  # type: ignore[attr-defined]
+            observed["timeout"] = str(timeout)
+            return _HTTPResponse("https://example.invalid/global/health", b"{}")
+
+        with patch.object(runner._opener, "open", side_effect=open_request):
+            self.assertEqual(runner._request("GET", "/global/health"), {})
+        self.assertEqual(observed["url"], "https://example.invalid/global/health")
+        self.assertTrue(observed["authorization"].startswith("Basic "))  # type: ignore[union-attr]
+        self.assertNotIn("synthetic-password", str(observed))
+
+        with patch.dict(
+            "os.environ",
+            {"OPENCODE_SERVER_USERNAME": "ignored", "OPENCODE_SERVER_PASSWORD": ""},
+            clear=True,
+        ):
+            with self.assertRaises(ControllerError) as context:
+                HTTPAuthentication.from_environment()
+        self.assertEqual(context.exception.code, "invalid_server_authentication")
+
+    def test_workspace_aliases_and_malformed_path_fields(self) -> None:
+        """Canonical aliases pass while wrong and malformed default workspaces fail closed."""
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            alias = root / "alias"
+            alias.symlink_to(root, target_is_directory=True)
+            request = ServerValidationRequest(
+                root,
+                {"builder": "builder", "auditor": "auditor", "ci_fixer": "ci-fixer"},
+                {"builder": "test/medium", "auditor": "test/strong", "ci_fixer": "test/medium"},
+            )
+            valid = {
+                "/global/health": {"healthy": True, "version": "1.17.18"},
+                "/agent": [{"name": "builder"}, {"name": "auditor"}, {"name": "ci-fixer"}],
+                "/config/providers": {"providers": ["test"]},
+                "/provider": [
+                    {
+                        "id": "test",
+                        "connected": True,
+                        "models": {"medium": {}, "strong": {}},
+                    }
+                ],
+            }
+            runner = OpenCodeServerRunner("http://127.0.0.1:4096")
+            responses = {
+                **valid,
+                "/path": {"directory": str(alias), "worktree": str(root / ".")},
+            }
+            with patch.object(
+                runner,
+                "_request",
+                side_effect=lambda _method, path, *args, **kwargs: responses[path],
+            ):
+                self.assertEqual(runner.validate_server(request).version, "1.17.18")
+            for path_response, code in (
+                ({"directory": str(root.parent), "worktree": str(root)}, "wrong_server_workspace"),
+                ({"directory": str(root), "worktree": str(root.parent)}, "wrong_server_workspace"),
+                ({"directory": None, "worktree": str(root)}, "malformed_server_response"),
+                ({"directory": str(root)}, "malformed_server_response"),
+            ):
+                with self.subTest(response=path_response):
+                    responses = {**valid, "/path": path_response}
+                    with patch.object(
+                        runner,
+                        "_request",
+                        side_effect=lambda _method, path, *args, **kwargs: responses[path],
+                    ):
+                        with self.assertRaises(ControllerError) as context:
+                            runner.validate_server(request)
+                    self.assertEqual(context.exception.code, code)
+
+    def test_all_preflight_failure_categories_are_mutation_free_with_fake(self) -> None:
+        """Every scripted server-validation category precedes records, sessions, and Git changes."""
+        from opencode_sprint_loop.cli import _run
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        fixture = SprintRepositoryFixture()
+        root = fixture.create()
+        self.addCleanup(fixture.close)
+        managed = root / "repositories/managed"
+        initial = {
+            "sprint_head": subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+            ).stdout,
+            "managed_head": subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=managed,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout,
+        }
+        codes = (
+            "server_unavailable",
+            "server_authentication_failed",
+            "server_unhealthy",
+            "unsupported_server_version",
+            "server_api_incompatible",
+            "wrong_server_workspace",
+            "configured_agent_unavailable",
+            "configured_model_unavailable",
+            "malformed_server_response",
+            "server_response_too_large",
+        )
+        for code in codes:
+            with self.subTest(code=code):
+                fake = FakeAgentRunner(
+                    ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+                    validation_error=ControllerError(code, f"Synthetic {code}"),
+                )
+                with self.assertRaises(ControllerError) as context:
+                    _run(str(root), "http://127.0.0.1:4096", runner=fake)
+                self.assertEqual(context.exception.code, code)
+                self.assertEqual(fake.created, [])
+                self.assertFalse((root / "info").exists())
+                self.assertFalse((root / "invocations").exists())
+                self.assertEqual(
+                    subprocess.run(
+                        ["git", "status", "--porcelain", "--untracked-files=all"],
+                        cwd=root,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout,
+                    "",
+                )
+                self.assertEqual(
+                    subprocess.run(
+                        ["git", "status", "--porcelain", "--untracked-files=all"],
+                        cwd=managed,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout,
+                    "",
+                )
+        self.assertEqual(
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+            ).stdout,
+            initial["sprint_head"],
+        )
+        self.assertEqual(
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=managed,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout,
+            initial["managed_head"],
+        )
+
+    def test_post_lock_local_revalidation_retains_complete_no_run_status(self) -> None:
+        """Until bounded post-lock checks finish, the durable status remains the no-run envelope."""
+        from opencode_sprint_loop import cli
+        from opencode_sprint_loop.config import load_config
+        from opencode_sprint_loop.git import validate_root
+        from opencode_sprint_loop.paths import runtime_paths
+        from opencode_sprint_loop.status import project_status
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        fixture = SprintRepositoryFixture()
+        root = fixture.create()
+        self.addCleanup(fixture.close)
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        fake = FakeAgentRunner(
+            ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+            observations=[
+                InvocationObservation(
+                    "idle", self._terminal_messages(), completed, False, False, True
+                )
+            ],
+            transcript_messages=self._terminal_messages(completed),
+        )
+        checking = threading.Event()
+        release = threading.Event()
+        original = cli.validate_preflight
+        calls = 0
+
+        def pause_second_check(*args: object, **kwargs: object) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                checking.set()
+                if not release.wait(timeout=10):
+                    raise RuntimeError("synthetic post-lock revalidation wait timed out")
+            return original(*args, **kwargs)  # type: ignore[arg-type]
+
+        outcome: list[int | BaseException] = []
+
+        def run_probe() -> None:
+            try:
+                outcome.append(cli._run(str(root), "http://127.0.0.1:4096", runner=fake))
+            except BaseException as error:  # pragma: no cover - asserted below.
+                outcome.append(error)
+
+        with patch("opencode_sprint_loop.cli.validate_preflight", side_effect=pause_second_check):
+            thread = threading.Thread(target=run_probe)
+            thread.start()
+            try:
+                self.assertTrue(checking.wait(timeout=5))
+                config = load_config(root)
+                paths = runtime_paths(root, config.multisprint, config.sprint)
+                repository = validate_root(root)
+                run_lock, _ = cli._lock_paths(repository.git_dir)
+                status = project_status(root, config, paths, run_lock)
+                self.assertFalse(status["run_exists"])
+                self.assertFalse(status["process_running"])
+                self.assertIsNone(status["state"])
+                self.assertFalse((root / "info").exists())
+                self.assertFalse((root / "invocations").exists())
+            finally:
+                release.set()
+                thread.join(timeout=15)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcome, [4])
+
+    def test_structured_result_validation_matrix_and_bounds(self) -> None:
+        """Completed/blocked/failed results pass and every schema/boundary class fails."""
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        for status in ("completed", "blocked", "failed"):
+            value = {
+                **completed,
+                "status": status,
+                "blocking_reason": None if status == "completed" else "synthetic reason",
+            }
+            self.assertEqual(validate_result(value), value)
+        invalid = [
+            None,
+            {key: value for key, value in completed.items() if key != "summary"},
+            {**completed, "unknown": None},
+            {**completed, "schema_version": True},
+            {**completed, "schema_version": 2},
+            {**completed, "status": "unknown"},
+            {**completed, "status": []},
+            {**completed, "summary": ""},
+            {**completed, "summary": 1},
+            {**completed, "summary": "x" * 4097},
+            {**completed, "checks": {}},
+            {
+                **completed,
+                "checks": [{"command": "x", "result": "passed", "details": None}],
+            },
+            {**completed, "checks": [None] * 101},
+            {**completed, "blocking_reason": "not-null"},
+            {**completed, "status": "blocked", "blocking_reason": None},
+            {**completed, "status": "failed", "blocking_reason": ""},
+            {**completed, "status": "failed", "blocking_reason": "x" * 4097},
+            {**completed, "summary": float("nan")},
+        ]
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises(ControllerError) as context:
+                    validate_result(value)
+                self.assertEqual(context.exception.code, "invalid_agent_result")
+        with patch("opencode_sprint_loop.invocations.MAX_RESULT_BYTES", 32):
+            with self.assertRaises(ControllerError) as context:
+                validate_result(completed)
+        self.assertEqual(context.exception.code, "invalid_agent_result")
+
+    def test_fake_runner_scripts_every_lifecycle_operation_and_evidence_class(self) -> None:
+        """The deterministic fake exposes success and failure controls for every runner method."""
+        from opencode_sprint_loop.agent_runner import InvocationRequest
+
+        root = Path("/tmp").resolve()
+        request = InvocationRequest(
+            "0001-auditor", 1, "auditor", "test/strong", "title", "prompt\n", root
+        )
+        categories = (
+            "server_unavailable",
+            "server_authentication_failed",
+            "server_unhealthy",
+            "unsupported_server_version",
+            "server_api_incompatible",
+            "wrong_server_workspace",
+            "configured_agent_unavailable",
+            "configured_model_unavailable",
+            "malformed_server_response",
+            "server_response_too_large",
+        )
+        for code in categories:
+            fake = FakeAgentRunner(
+                ValidatedServer("http://127.0.0.1:1", "1.17.18"),
+                validation_error=ControllerError(code, "synthetic"),
+            )
+            with self.assertRaises(ControllerError) as context:
+                fake.validate_server(ServerValidationRequest(root, {}, {}))
+            self.assertEqual(context.exception.code, code)
+
+        observations = [
+            InvocationObservation(status, [], None, False, False)
+            for status in ("busy", "retry", "idle", None, "unknown")
+        ]
+        fake = FakeAgentRunner(
+            ValidatedServer("http://127.0.0.1:1", "1.17.18"),
+            session_ids=["ses_unique", "ses_duplicate"],
+            observations=observations,
+            transcript_messages=[{"id": "m", "role": "user", "parts": []}],
+            abort_acknowledged=False,
+        )
+        fake.preexisting = {"ses_duplicate"}
+        self.assertEqual(fake.existing_session_ids(), {"ses_duplicate"})
+        session = fake.create_session(request)
+        self.assertEqual(session.session_id, "ses_unique")
+        fake.submit_prompt(session, request)
+        self.assertEqual(
+            [fake.observe(session).status for _ in range(5)],
+            [
+                "busy",
+                "retry",
+                "idle",
+                None,
+                "unknown",
+            ],
+        )
+        self.assertFalse(fake.abort(session).acknowledged)
+        self.assertEqual(len(fake.transcript(session).messages), 1)
+
+        sensitive_messages = [
+            {
+                "id": "message-1",
+                "role": "user",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "Authorization: Bearer synthetic-secret",
+                    },
+                    {"type": "text", "text": "x" * 128},
+                ],
+            }
+        ]
+        evidence_fake = FakeAgentRunner(
+            ValidatedServer("http://127.0.0.1:1", "1.17.18"),
+            transcript_messages=sensitive_messages,
+        )
+        capture = evidence_fake.transcript(session)
+        with patch("opencode_sprint_loop.invocations.MAX_STRING_BYTES", 64):
+            wrapper = transcript_wrapper(session.session_id, capture.messages)
+        self.assertIn("[REDACTED]", wrapper["content"])
+        self.assertIn("[TRUNCATED]", wrapper["content"])
+        self.assertTrue(wrapper["truncated"])
+
+        operation_errors = {
+            "session_snapshot_error": "server_unavailable",
+            "create_error": "session_creation_ambiguous",
+            "submit_error": "prompt_submission_failed",
+            "abort_error": "server_unavailable",
+            "transcript_error": "transcript_capture_failed",
+        }
+        for argument, code in operation_errors.items():
+            scripted = FakeAgentRunner(
+                ValidatedServer("http://127.0.0.1:1", "1.17.18"),
+                **{argument: ControllerError(code, "synthetic")},
+            )
+            with self.subTest(operation=argument):
+                with self.assertRaises(ControllerError) as context:
+                    if argument == "session_snapshot_error":
+                        scripted.existing_session_ids()
+                    elif argument == "create_error":
+                        scripted.create_session(request)
+                    elif argument == "submit_error":
+                        scripted.submit_prompt(session, request)
+                    elif argument == "abort_error":
+                        scripted.abort(session)
+                    else:
+                        scripted.transcript(session)
+                self.assertEqual(context.exception.code, code)
+
+    def test_cancellation_after_create_aborts_known_session_before_submission(self) -> None:
+        """Cancellation recorded by create still durably identifies and aborts its session."""
+        from opencode_sprint_loop import cli
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        fixture = SprintRepositoryFixture()
+        root = fixture.create()
+        self.addCleanup(fixture.close)
+        cancellation = cli._Cancellation()
+        fake = FakeAgentRunner(ValidatedServer("http://127.0.0.1:4096", "1.17.18"))
+        original_create = fake.create_session
+
+        def create_then_cancel(request: object) -> object:
+            session = original_create(request)  # type: ignore[arg-type]
+            cancellation.record(signal.SIGTERM, None)
+            return session
+
+        with patch.object(fake, "create_session", side_effect=create_then_cancel):
+            with self.assertRaises(cli._CancellationRequested) as context:
+                cli._run(
+                    str(root),
+                    "http://127.0.0.1:4096",
+                    runner=fake,
+                    cancellation=cancellation,
+                )
+        self.assertEqual(context.exception.exit_status, 143)
+        self.assertEqual(fake.submitted, [])
+        self.assertEqual(fake.aborted, ["ses_fake_0001"])
+        metadata = json.loads(
+            (root / "invocations/foundation/1/0001-auditor/metadata.json").read_text()
+        )
+        self.assertEqual(metadata["session_id"], "ses_fake_0001")
+        self.assertEqual(metadata["status"], "interrupted")
+
+    def test_atomic_artifact_faults_leave_absent_prior_or_next_complete_json(self) -> None:
+        """Short-write, permission, install, replacement, and sync faults never truncate JSON."""
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = allocate_paths(root, "test", 1, 1, "auditor")
+            result = {
+                "schema_version": 1,
+                "status": "completed",
+                "summary": "ok",
+                "checks": [],
+                "blocking_reason": None,
+            }
+            import opencode_sprint_loop.invocations as invocations
+
+            real_write = invocations.os.write
+
+            def short_write(descriptor: int, payload: bytes) -> int:
+                return real_write(descriptor, payload[: max(1, len(payload) // 2)])
+
+            with patch("opencode_sprint_loop.invocations.os.write", side_effect=short_write):
+                with self.assertRaises(ControllerError):
+                    write_result(paths, result)
+            self.assertFalse(paths.result.exists())
+
+            real_open = invocations.os.open
+
+            def deny_create(path: object, flags: int, *args: object, **kwargs: object) -> int:
+                if flags & os.O_CREAT:
+                    raise PermissionError("synthetic permission failure")
+                return real_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+
+            with patch("opencode_sprint_loop.invocations.os.open", side_effect=deny_create):
+                with self.assertRaises(ControllerError):
+                    write_result(paths, result)
+            self.assertFalse(paths.result.exists())
+
+            with patch(
+                "opencode_sprint_loop.invocations.os.link",
+                side_effect=OSError("synthetic pre-install failure"),
+            ):
+                with self.assertRaises(ControllerError):
+                    write_result(paths, result)
+            self.assertFalse(paths.result.exists())
+            write_result(paths, result)
+            self.assertEqual(json.loads(paths.result.read_text()), result)
+
+            metadata = new_metadata(
+                "00000000-0000-4000-8000-000000000000",
+                "0001-auditor",
+                1,
+                "test/strong",
+                "1.17.18",
+                "managed",
+            )
+            write_metadata(paths, metadata)
+            prior = paths.metadata.read_bytes()
+            replacement = deepcopy(metadata)
+            replacement["status"] = "session_created"
+            replacement["session_id"] = "ses_test"
+            replacement["started_at"] = replacement["created_at"]
+            with patch(
+                "opencode_sprint_loop.invocations.os.replace",
+                side_effect=OSError("synthetic pre-replace failure"),
+            ):
+                with self.assertRaises(ControllerError):
+                    write_metadata(paths, replacement)
+            self.assertEqual(paths.metadata.read_bytes(), prior)
+            self.assertEqual(json.loads(prior), metadata)
+
+            real_fsync = invocations.os.fsync
+
+            def fail_directory_sync(descriptor: int) -> None:
+                if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                    raise OSError("synthetic post-replace directory sync failure")
+                real_fsync(descriptor)
+
+            with patch(
+                "opencode_sprint_loop.invocations.os.fsync", side_effect=fail_directory_sync
+            ):
+                with self.assertRaises(ControllerError):
+                    write_metadata(paths, replacement)
+            self.assertEqual(json.loads(paths.metadata.read_text()), replacement)
+
+    def test_prompt_metadata_transcript_string_and_identifier_bounds(self) -> None:
+        """Every non-HTTP Sprint 2 hard bound rejects or visibly truncates as specified."""
+        with patch("opencode_sprint_loop.invocations.MAX_PROMPT_BYTES", 8):
+            with self.assertRaises(ControllerError):
+                validate_prompt("123456789")
+        metadata = new_metadata(
+            "00000000-0000-4000-8000-000000000000",
+            "0001-auditor",
+            1,
+            "test/strong",
+            "1.17.18",
+            "managed",
+        )
+        with TemporaryDirectory() as temporary:
+            paths = allocate_paths(Path(temporary), "test", 1, 1, "auditor")
+            with patch("opencode_sprint_loop.invocations.MAX_METADATA_BYTES", 8):
+                with self.assertRaises(ControllerError):
+                    write_metadata(paths, metadata)
+        messages = [
+            {
+                "id": "message-1",
+                "role": "user",
+                "parts": [{"type": "text", "text": "abcdefghijk"}],
+            }
+        ]
+        with patch("opencode_sprint_loop.invocations.MAX_STRING_BYTES", 8):
+            wrapper = transcript_wrapper("ses_test", messages)
+        self.assertTrue(wrapper["truncated"])
+        self.assertIn("[TRUNCATED]", wrapper["content"])
+        with self.assertRaises(ControllerError):
+            transcript_wrapper("s" * 1025, messages)
+        malformed = deepcopy(messages)
+        malformed[0]["id"] = "m" * 1025
+        with self.assertRaises(ControllerError):
+            transcript_wrapper("ses_test", malformed)
+
+    def test_cross_record_mismatch_matrix_fails_closed(self) -> None:
+        """Every durable identity, status, availability, truncation, and path mismatch is rejected."""
+        from opencode_sprint_loop.cli import _run
+        from opencode_sprint_loop.config import load_config
+        from opencode_sprint_loop.paths import runtime_paths
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        fixture = SprintRepositoryFixture()
+        root = fixture.create()
+        self.addCleanup(fixture.close)
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        fake = FakeAgentRunner(
+            ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+            observations=[
+                InvocationObservation(
+                    "idle", self._terminal_messages(), completed, False, False, True
+                )
+            ],
+            transcript_messages=self._terminal_messages(completed),
+        )
+        self.assertEqual(_run(str(root), "http://127.0.0.1:4096", runner=fake), 4)
+        config = load_config(root)
+        runtime = runtime_paths(root, config.multisprint, config.sprint)
+        state = json.loads(runtime.state.read_text())
+        events = [json.loads(line) for line in runtime.events.read_text().splitlines()]
+        directory = root / "invocations/foundation/1/0001-auditor"
+        paths = {
+            name: directory / name
+            for name in ("metadata.json", "prompt.md", "result.json", "transcript.json")
+        }
+        originals = {name: path.read_bytes() for name, path in paths.items()}
+
+        def mutate_metadata(field: str, value: object) -> None:
+            metadata = json.loads(originals["metadata.json"])
+            metadata[field] = value
+            paths["metadata.json"].write_text(json.dumps(metadata) + "\n")
+
+        cases = {
+            "run": lambda: mutate_metadata("run_id", "11111111-1111-4111-8111-111111111111"),
+            "invocation": lambda: mutate_metadata("invocation_id", "0002-auditor"),
+            "sequence": lambda: mutate_metadata("sequence", 2),
+            "role": lambda: mutate_metadata("role", "builder"),
+            "model": lambda: mutate_metadata("model", "test/other"),
+            "session": lambda: mutate_metadata("session_id", "ses_other"),
+            "server": lambda: mutate_metadata("server_version", "1.17.17"),
+            "input_commits": lambda: mutate_metadata("input_commits", {"other": None}),
+            "result_availability": lambda: mutate_metadata(
+                "result", {"available": False, "status": None}
+            ),
+            "transcript_availability": lambda: mutate_metadata(
+                "transcript", {"status": "unavailable", "truncated": False}
+            ),
+            "transcript_truncation": lambda: mutate_metadata(
+                "transcript", {"status": "truncated", "truncated": True}
+            ),
+            "result_status": lambda: paths["result.json"].write_text(
+                json.dumps({**completed, "status": "blocked", "blocking_reason": "synthetic"})
+                + "\n"
+            ),
+            "transcript_session": lambda: paths["transcript.json"].write_text(
+                json.dumps(
+                    {
+                        **json.loads(originals["transcript.json"]),
+                        "session_id": "ses_other",
+                    }
+                )
+                + "\n"
+            ),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(mismatch=name):
+                for artifact, payload in originals.items():
+                    paths[artifact].write_bytes(payload)
+                mutate()
+                with self.assertRaises(ControllerError) as context:
+                    validate_invocation_records(root, config, state, events)
+                self.assertEqual(context.exception.code, "inconsistent_invocation_record")
+        for artifact, payload in originals.items():
+            paths[artifact].write_bytes(payload)
+        moved = directory.with_name("0002-auditor")
+        directory.rename(moved)
+        try:
+            with self.assertRaises(ControllerError) as context:
+                validate_invocation_records(root, config, state, events)
+            self.assertEqual(context.exception.code, "inconsistent_invocation_record")
+        finally:
+            moved.rename(directory)
 
     def test_process_signals_abort_once_and_return_conventional_status(self) -> None:
         """Real SIGINT/SIGTERM delivery records orderly interruption evidence."""

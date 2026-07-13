@@ -643,6 +643,10 @@ def _run(
                 session.session_id, capture.messages, expected_result=result
             )
             write_result(invocation_paths, result)
+            # Once the immutable result exists, every later terminal write is
+            # a documented write-ahead prefix. Preserve it rather than
+            # manufacturing interruption metadata that denies the result.
+            terminal_metadata_pending = True
             write_transcript(invocation_paths, wrapper)
             transcript_status = "truncated" if wrapper["truncated"] else "complete"
             transcript_truncated = bool(wrapper["truncated"])
@@ -663,12 +667,10 @@ def _run(
                     ),
                 }
             )
-            terminal_metadata_pending = True
             # A raised write leaves immutable result/transcript artifacts as
             # the documented write-ahead prefix.  Do not later replace
             # metadata or append an agent terminal event that denies them.
             write_metadata(invocation_paths, metadata)
-            terminal_metadata_pending = False
             state = persist_observation(
                 state,
                 paths.events,
@@ -684,6 +686,7 @@ def _run(
                 },
                 {"active_invocation": None},
             )
+            terminal_metadata_pending = False
             agent_completed = True
             if transcript_error is not None:
                 raise transcript_error

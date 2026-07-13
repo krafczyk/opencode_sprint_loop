@@ -263,11 +263,15 @@ class OpenCodeServerRunner:
         names: list[str] = []
         for agent in agents:
             name = agent.get("name") if isinstance(agent, dict) else None
+            mode = agent.get("mode", "all") if isinstance(agent, dict) else None
+            disabled = agent.get("disable", False) if isinstance(agent, dict) else None
             if (
                 not isinstance(name, str)
                 or not name
-                or agent.get("mode", "all") == "disabled"
-                or agent.get("disable") is True
+                or not isinstance(mode, str)
+                or mode not in {"all", "primary", "subagent"}
+                or not isinstance(disabled, bool)
+                or disabled
             ):
                 raise ControllerError(
                     "malformed_server_response", "OpenCode agent record is invalid"
@@ -297,32 +301,41 @@ class OpenCodeServerRunner:
             raise ControllerError(
                 "malformed_server_response", "OpenCode provider response is invalid"
             )
+        configured_ids = list(configured_names)
+        if any(
+            not isinstance(provider_id, str) or not provider_id for provider_id in configured_ids
+        ) or len(set(configured_ids)) != len(configured_ids):
+            raise ControllerError(
+                "malformed_server_response", "OpenCode provider configuration is invalid"
+            )
         available: dict[str, Any] = {}
         for provider in providers:
-            if not isinstance(provider, dict) or not isinstance(provider.get("id"), str):
+            if (
+                not isinstance(provider, dict)
+                or not isinstance(provider.get("id"), str)
+                or not provider["id"]
+                or not isinstance(provider.get("connected"), bool)
+                or not isinstance(provider.get("models"), dict)
+                or any(
+                    not isinstance(model_id, str) or not model_id or not isinstance(model, dict)
+                    for model_id, model in provider["models"].items()
+                )
+                or provider["id"] in available
+            ):
                 raise ControllerError(
                     "malformed_server_response", "OpenCode provider record is invalid"
                 )
             available[provider["id"]] = provider
-        configured_ids = set(
-            configured_names if isinstance(configured_names, list) else configured_names
-        )
+        configured_id_set = set(configured_ids)
         for value in models.values():
             provider_id, _, model_id = value.partition("/")
             provider = available.get(provider_id)
-            advertised = provider.get("models") if isinstance(provider, dict) else None
-            has_model = (
-                model_id in advertised
-                if isinstance(advertised, dict)
-                else model_id in advertised
-                if isinstance(advertised, list)
-                else False
-            )
+            advertised: dict[str, Any] = provider["models"] if provider is not None else {}
             if (
-                provider_id not in configured_ids
+                provider_id not in configured_id_set
                 or provider is None
-                or provider.get("connected") is False
-                or not has_model
+                or provider["connected"] is not True
+                or model_id not in advertised
             ):
                 raise ControllerError(
                     "configured_model_unavailable", "A configured OpenCode model is unavailable"
