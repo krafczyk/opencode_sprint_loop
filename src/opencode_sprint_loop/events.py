@@ -271,7 +271,8 @@ def validate_event_history(events: list[dict[str, Any]]) -> None:
                         or probe_terminal is not None
                         or probe_identity
                         != (payload["invocation_id"], payload["role"], payload["session_id"])
-                        or set(payload) != required | {"interruption", "abort_acknowledged"}
+                        or set(payload)
+                        != required | {"interruption", "abort_acknowledged", "abort_confirmation"}
                         or not isinstance(interruption, dict)
                         or set(interruption) != {"code", "message", "details"}
                         or not _bounded_event_string(interruption.get("code"))
@@ -281,6 +282,7 @@ def validate_event_history(events: list[dict[str, Any]]) -> None:
                             payload["abort_acknowledged"] is not None
                             and not isinstance(payload["abort_acknowledged"], bool)
                         )
+                        or payload["abort_confirmation"] not in {None, "idle", "terminal"}
                     ):
                         raise ControllerError(
                             "corrupt_event_log", "Agent interruption event payload is invalid"

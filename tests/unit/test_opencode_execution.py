@@ -48,6 +48,7 @@ from opencode_sprint_loop.opencode_runner import (
     OpenCodeServerRunner,
     parse_server_url,
 )
+from opencode_sprint_loop.security import contains_credential, redact_diagnostic
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -95,7 +96,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._json([{"id": "\ud800"}] if self.mode == "surrogate_session_list" else [])
         elif self.path == "/session/status":
             status = "busy" if self.mode == "busy" else "retry" if self.mode == "retry" else "idle"
-            self._json({"ses_local": {"type": status}})
+            if self.mode == "malformed_status_scalar":
+                self._json({"ses_local": status})
+            elif self.mode == "malformed_status_missing_type":
+                self._json({"ses_local": {"status": status}})
+            else:
+                self._json({"ses_local": {"type": status}})
         elif self.path == "/session/ses_local/message":
             if self.mode == "busy":
                 self._json([])
@@ -111,13 +117,37 @@ class _Handler(BaseHTTPRequestHandler):
                     [
                         {
                             "info": {"id": "msg_user", "role": "user"},
-                            "parts": [{"type": "text", "text": "probe"}],
+                            "parts": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        self.last_prompt["parts"][0]["text"]
+                                        if self.last_prompt is not None
+                                        else "probe\n"
+                                    ),
+                                }
+                            ],
                         },
                         {
                             "info": {
                                 "id": "msg_assistant",
                                 "role": "assistant",
                                 "parentID": "msg_user",
+                                "agent": (
+                                    self.last_prompt["agent"]
+                                    if self.last_prompt is not None
+                                    else "auditor"
+                                ),
+                                "providerID": (
+                                    self.last_prompt["model"]["providerID"]
+                                    if self.last_prompt is not None
+                                    else "test"
+                                ),
+                                "modelID": (
+                                    self.last_prompt["model"]["modelID"]
+                                    if self.last_prompt is not None
+                                    else "strong"
+                                ),
                                 **(
                                     {"error": {"name": "StructuredOutputError"}}
                                     if self.mode == "structured_output_error"
@@ -162,7 +192,7 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path.endswith("/abort"):
             type(self).abort_requests += 1
             type(self).mode = "complete"
-            self._json({"acknowledged": True})
+            self._json(True)
         elif self.path.endswith("/prompt_async"):
             type(self).last_prompt = json.loads(raw.decode())
             self._json({"accepted": True})
@@ -341,10 +371,22 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     )["session_id"],
                     "ses_local",
                 )
+                validate_transcript_messages(
+                    runner.transcript(session).messages,
+                    expected_result=observation.structured_result,
+                    expected_prompt=request.prompt,
+                    expected_role=request.role,
+                    expected_model=request.model,
+                )
                 _Handler.mode = "busy"
                 self.assertEqual(runner.observe(session).status, "busy")
                 _Handler.mode = "retry"
                 self.assertEqual(runner.observe(session).status, "retry")
+                for mode in ("malformed_status_scalar", "malformed_status_missing_type"):
+                    _Handler.mode = mode
+                    with self.subTest(mode=mode), self.assertRaises(ControllerError) as context:
+                        runner.observe(session)
+                    self.assertEqual(context.exception.code, "malformed_server_response")
                 _Handler.mode = "structured_output_error"
                 errored_observation = runner.observe(session)
                 self.assertTrue(errored_observation.structured_error)
@@ -607,6 +649,74 @@ class OpenCodeExecutionTests(unittest.TestCase):
             write_prompt(paths, probe_prompt("test", 1, "0001-auditor"))
             self.assertEqual((paths.prompt.stat().st_mode & 0o777), 0o600)
 
+    def test_current_credential_forms_are_rejected_or_redacted(self) -> None:
+        """Synthetic provider tokens and URI values cannot enter durable records."""
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        values = (
+            "sk-proj-" + "A" * 24,
+            "sk-svcacct-" + "B" * 24,
+            "sk-ant-api03-" + "C" * 24,
+            "sk-ant-oat01-" + "D" * 24,
+            "sk-or-v1-" + "E" * 24,
+            "AIza" + "F" * 30,
+            *(
+                prefix + "G" * 24
+                for prefix in (
+                    "glpat-",
+                    "glcbt-",
+                    "glptt-",
+                    "glrt-",
+                    "glimt-",
+                    "glsoat-",
+                    "gldt-",
+                    "glrtr-",
+                    "glft-",
+                    "glagent-",
+                    "glwt-",
+                    "glffct-",
+                    "gloas-",
+                )
+            ),
+            "hf_" + "H" * 24,
+            "xapp-" + "I" * 24,
+            "gho_" + "J" * 36,
+            "ghs_12345_" + "J" * 40 + "." + "K" * 40 + "." + "L" * 40,
+            "ASIA" + "K" * 16,
+            "postgresql://user:synthetic-secret@example.invalid/database",
+            "ssh://user:synthetic-secret@example.invalid/repository",
+            "https://example.invalid/path?opaque=synthetic-secret",
+            "https://example.invalid/path#opaque-fragment",
+        )
+        for value in values:
+            with self.subTest(value=value.split(":", 1)[0]):
+                self.assertTrue(contains_credential(value))
+                with self.assertRaises(ControllerError) as context:
+                    validate_result({**completed, "summary": value})
+                self.assertEqual(context.exception.code, "invalid_agent_result")
+                wrapper = transcript_wrapper(
+                    "ses_test",
+                    [
+                        {
+                            "id": "message-1",
+                            "role": "user",
+                            "parts": [{"type": "text", "text": value}],
+                        }
+                    ],
+                )
+                self.assertNotIn(value, wrapper["content"])
+                self.assertIn("[REDACTED]", wrapper["content"])
+                self.assertNotIn(value, redact_diagnostic(f"external diagnostic: {value}"))
+
+    def test_credential_scan_handles_bounded_non_uri_text(self) -> None:
+        """A bounded artifact-sized benign string cannot trigger URI-pattern backtracking."""
+        self.assertFalse(contains_credential("x" * (1024 * 1024)))
+
     def test_adapter_distinguishes_definitive_create_rejection(self) -> None:
         """An HTTP rejection is definitive, unlike an unavailable create transport."""
         from opencode_sprint_loop.agent_runner import InvocationRequest
@@ -829,12 +939,18 @@ class OpenCodeExecutionTests(unittest.TestCase):
     @staticmethod
     def _terminal_messages(result: object | None = None) -> list[dict[str, object]]:
         """Return minimal sole-prompt/associated-assistant evidence for a fake probe."""
+        prompt = probe_prompt("foundation", 1, "0001-auditor")
         return [
-            {"id": "prompt-1", "role": "user", "parts": [{"type": "text", "text": "probe"}]},
+            {
+                "id": "prompt-1",
+                "role": "user",
+                "parts": [{"type": "text", "text": prompt}],
+            },
             {
                 "id": "answer-1",
                 "role": "assistant",
                 "parentID": "prompt-1",
+                "info": {"agent": "auditor", "providerID": "test", "modelID": "strong"},
                 "parts": [{"type": "structured_output", "value": {} if result is None else result}],
             },
         ]
@@ -1125,6 +1241,127 @@ class OpenCodeExecutionTests(unittest.TestCase):
         ]
         self.assertEqual(events[-2]["type"], "agent.interrupted")
         self.assertIs(events[-2]["payload"]["abort_acknowledged"], False)
+        self.assertEqual(events[-2]["payload"]["abort_confirmation"], "idle")
+
+    def test_abort_acknowledgement_response_is_strict(self) -> None:
+        """Only a documented JSON boolean abort acknowledgement is accepted verbatim."""
+        from opencode_sprint_loop.agent_runner import CreatedSession
+
+        runner = OpenCodeServerRunner("http://127.0.0.1:4096")
+        session = CreatedSession(
+            "ses_test",
+            "title",
+            Path("/tmp"),
+            ({"permission": "*", "pattern": "*", "action": "deny"},),
+        )
+        for response in (
+            None,
+            {},
+            {"acknowledged": True},
+            {"acknowledged": "yes"},
+            1,
+            "true",
+        ):
+            with (
+                self.subTest(response=response),
+                patch.object(runner, "_request", return_value=response),
+            ):
+                with self.assertRaises(ControllerError) as context:
+                    runner.abort(session)
+                self.assertEqual(context.exception.code, "malformed_server_response")
+        for response in (True, False):
+            with (
+                self.subTest(response=response),
+                patch.object(runner, "_request", return_value=response),
+            ):
+                self.assertIs(runner.abort(session).acknowledged, response)
+
+    def test_abort_confirmation_records_idle_terminal_or_unconfirmed(self) -> None:
+        """Post-abort evidence is explicitly classified without treating absence as idle."""
+        from opencode_sprint_loop.cli import _run
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        scenarios: tuple[tuple[str, list[InvocationObservation | Exception], str | None], ...] = (
+            (
+                "idle",
+                [
+                    InvocationObservation("unexpected", [], None, False, False),
+                    InvocationObservation("idle", [], None, False, False),
+                ],
+                "idle",
+            ),
+            (
+                "terminal",
+                [
+                    InvocationObservation("unexpected", [], None, False, False),
+                    InvocationObservation(
+                        "idle", self._terminal_messages(completed), completed, False, False, True
+                    ),
+                ],
+                "terminal",
+            ),
+            (
+                "unconfirmed",
+                [
+                    InvocationObservation("unexpected", [], None, False, False),
+                    ControllerError("server_unavailable", "Synthetic confirmation loss"),
+                ],
+                None,
+            ),
+        )
+        for name, observations, expected_confirmation in scenarios:
+            with self.subTest(confirmation=name):
+                fixture = SprintRepositoryFixture()
+                root = fixture.create()
+                self.addCleanup(fixture.close)
+                fake = FakeAgentRunner(
+                    ValidatedServer("http://127.0.0.1:4096", "1.17.18"), observations=observations
+                )
+                with self.assertRaises(ControllerError) as context:
+                    _run(str(root), "http://127.0.0.1:4096", runner=fake)
+                self.assertEqual(context.exception.code, "invocation_failed")
+                events = [
+                    json.loads(line)
+                    for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()
+                ]
+                self.assertEqual(events[-2]["payload"]["abort_confirmation"], expected_confirmation)
+
+    def test_abort_confirmation_uses_one_deadline_and_records_idle_evidence(self) -> None:
+        """Abort observation requests share one bounded deadline and persist their confirmation."""
+        from opencode_sprint_loop.cli import _run
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        fixture = SprintRepositoryFixture()
+        root = fixture.create()
+        self.addCleanup(fixture.close)
+        fake = FakeAgentRunner(
+            ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+            observations=[
+                InvocationObservation("unexpected", [], None, False, False),
+                InvocationObservation("busy", [], None, False, False),
+                InvocationObservation("busy", [], None, False, False),
+                InvocationObservation("idle", [], None, False, False),
+            ],
+        )
+        with patch("opencode_sprint_loop.cli.time.sleep", return_value=None):
+            with self.assertRaises(ControllerError) as context:
+                _run(str(root), "http://127.0.0.1:4096", runner=fake)
+        self.assertEqual(context.exception.code, "invocation_failed")
+        self.assertEqual(len(fake.observation_deadlines), 4)
+        self.assertTrue(all(deadline is not None for deadline in fake.observation_deadlines))
+        self.assertEqual(len(set(fake.observation_deadlines[1:])), 1)
+        events = [
+            json.loads(line)
+            for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(events[-2]["payload"]["abort_confirmation"], "idle")
 
     def test_malformed_fake_transcript_blocks_with_sanitized_evidence(self) -> None:
         """Safe malformed evidence is retained even though it cannot complete the probe."""
@@ -1501,6 +1738,52 @@ class OpenCodeExecutionTests(unittest.TestCase):
         self.assertEqual(events[-2]["type"], "agent.interrupted")
         self.assertEqual(events[-1]["type"], "run.blocked")
         self.assertNotEqual(events[-1]["payload"]["reason"]["code"], "execution_not_implemented")
+
+    def test_terminal_transcript_must_bind_prompt_agent_provider_and_model(self) -> None:
+        """Stale or misrouted terminal evidence cannot complete the execution probe."""
+        from tests.integration.test_foundation import SprintRepositoryFixture
+        from opencode_sprint_loop.cli import _run
+
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        for field, value in (
+            ("prompt", "different submitted prompt\n"),
+            ("agent", "builder"),
+            ("providerID", "other-provider"),
+            ("modelID", "other-model"),
+        ):
+            with self.subTest(field=field):
+                fixture = SprintRepositoryFixture()
+                root = fixture.create()
+                self.addCleanup(fixture.close)
+                transcript = self._terminal_messages(completed)
+                if field == "prompt":
+                    transcript[0]["parts"][0]["text"] = value  # type: ignore[index]
+                else:
+                    transcript[1]["info"][field] = value  # type: ignore[index]
+                fake = FakeAgentRunner(
+                    ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+                    observations=[
+                        InvocationObservation(
+                            "idle", self._terminal_messages(), completed, False, False, True
+                        ),
+                        InvocationObservation("idle", [], None, False, False),
+                    ],
+                    transcript_messages=transcript,
+                )
+                with self.assertRaises(ControllerError) as context:
+                    _run(str(root), "http://127.0.0.1:4096", runner=fake)
+                self.assertEqual(context.exception.code, "transcript_capture_failed")
+                directory = root / "invocations/foundation/1/0001-auditor"
+                self.assertFalse((directory / "result.json").exists())
+                self.assertTrue((directory / "transcript.json").is_file())
+                state = json.loads((root / "info/foundation/1/state.json").read_text())
+                self.assertEqual(state["reason"]["code"], "transcript_capture_failed")
 
     def test_session_id_persistence_failures_abort_once_without_submission(self) -> None:
         """Known sessions survive either session-ID persistence failure in terminal metadata."""

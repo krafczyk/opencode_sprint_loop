@@ -97,7 +97,12 @@ These exclusions do not permit controller-authored credential exposure, destruct
   user message and then rejects that same field while serving `GET
   /session/<id>/message`. The controller omits the optional hint, fails closed on
   the server's HTTP 400 response, and cannot complete the required real-server
-  result/transcript gate until the server response contract is corrected.
+  result/transcript gate until the server response contract is corrected. There
+  is no controller-side request workaround compatible with the documented
+  `json_schema` contract: omitting the optional hint still triggers the server
+  default, while supplying it repeats the rejected stored field. A complete
+  real-server demonstration therefore requires a supported server build whose
+  message-list response accepts its stored prompt format.
 
 ## 4. Scope
 
@@ -474,7 +479,8 @@ If step 3 fails, the controller must not submit the prompt and makes a best-effo
 - Poll at most once per second using `GET /session/status` and bounded message retrieval.
 - Status values `busy` and `retry` are non-terminal.
 - `idle` or absence from the status map is not sufficient by itself to declare success.
-- Completion requires the expected assistant message for the one submitted prompt, no terminal message error, and a valid structured result.
+- Completion requires the expected assistant message for the one submitted prompt, no terminal message error, and a valid structured result. Final transcript validation requires the sole user text part to equal the exact submitted prompt and the associated assistant message's documented `info.agent`, `info.providerID`, and `info.modelID` to equal the configured role and selected model identity. Absent or mismatched evidence fails closed.
+- A present `/session/status` entry must be the documented `1.17.x` object with a string `type`; only an absent map entry is normalized as missing status.
 - Unknown statuses or inconsistent message/status evidence fail closed.
 - The total invocation deadline is `limits.invocation_timeout_seconds`, measured with monotonic time.
 - Ordinary network failure during the invocation does not receive Sprint 7's server-unavailable grace period. It interrupts this invocation and preserves available evidence.
@@ -485,13 +491,13 @@ If step 3 fails, the controller must not submit the prompt and makes a best-effo
 Sprint 2 treats catchable `SIGINT` and `SIGTERM` as cooperative cancellation requests. Signal handlers record a cancellation request; they do not perform HTTP or persistence operations directly. The orchestration path finishes any active atomic persistence operation and then follows this sequence on timeout, cancellation, ambiguous prompt submission, or post-creation transport failure while terminal session state is uncertain:
 
 1. Request `POST /session/<id>/abort` once.
-2. Wait for at most 10 seconds for bounded idle/terminal evidence.
+2. Set one monotonic confirmation deadline and wait for at most 10 seconds for bounded idle or terminal evidence. Every confirmation observation request receives that same deadline; an absent status entry is not confirmation.
 3. Retrieve and sanitize available messages.
 4. Record `agent.interrupted` and clear active invocation state when persistence is possible.
 5. Enter blocked with `invocation_timed_out` or `invocation_interrupted`.
 6. Exit `130` for `SIGINT`, `143` for `SIGTERM`, or the documented non-zero blocked-run code for timeout.
 
-An abort response is acknowledgement, not proof of prior activity or complete cancellation. Failure to confirm abort is recorded in metadata and diagnostics without discarding the known session ID.
+An abort response is acknowledgement only when it is the documented exact JSON boolean; its `true` or `false` value is preserved. It is not proof of prior activity or complete cancellation. Failure to confirm abort is recorded in the interruption event and diagnostics without discarding the known session ID.
 
 `pause` and `stop` remain mutation-free `feature_not_implemented` commands in Sprint 2 and do not abort the active session. Their coordinated boundaries remain Sprint 7 work.
 
@@ -539,10 +545,10 @@ The exact Sprint 2 payloads are:
 {"previous_state":"validating","server_version":"1.17.18"}
 {"previous_state":"validating","invocation_id":"0001-auditor","role":"auditor","session_id":"ses_example"}
 {"previous_state":"validating","invocation_id":"0001-auditor","role":"auditor","session_id":"ses_example","result_status":"completed"}
-{"previous_state":"validating","invocation_id":"0001-auditor","role":"auditor","session_id":"ses_example","interruption":{"code":"invocation_timed_out","message":"OpenCode invocation exceeded its configured timeout.","details":{}},"abort_acknowledged":true}
+{"previous_state":"validating","invocation_id":"0001-auditor","role":"auditor","session_id":"ses_example","interruption":{"code":"invocation_timed_out","message":"OpenCode invocation exceeded its configured timeout.","details":{}},"abort_acknowledged":true,"abort_confirmation":"idle"}
 ```
 
-These correspond in order to `server.validated`, `agent.started`, `agent.completed`, and `agent.interrupted`. Exact fields are required. `abort_acknowledged` is boolean or null. The safe interruption object uses the existing reason shape but is named `interruption` because same-state events leave `state.reason` null. Identifier bounds from Section 14 apply. `result_status` is `completed`, `blocked`, or `failed`.
+These correspond in order to `server.validated`, `agent.started`, `agent.completed`, and `agent.interrupted`. Exact fields are required. `abort_acknowledged` is boolean or null. `abort_confirmation` is `idle`, `terminal`, or null and records whether bounded post-abort confirmation was actually obtained. The safe interruption object uses the existing reason shape but is named `interruption` because same-state events leave `state.reason` null. Identifier bounds from Section 14 apply. `result_status` is `completed`, `blocked`, or `failed`.
 
 ### 11.3 Terminal Classification
 
@@ -678,7 +684,7 @@ Exact wrapper fields are required. `content` is a UTF-8 string containing a dete
 
 The controller recursively replaces recognized credential values with the exact marker `[REDACTED]` before canonical serialization. If the complete wrapper would exceed the transcript limit, it truncates `content` at a valid UTF-8 code-point boundary to the largest deterministic prefix that permits the final wrapper to remain within the limit, appends `\n[TRUNCATED]`, and sets `truncated` true. Truncated `content` is evidence text and need not itself remain parseable JSON; untruncated `content` must parse as the complete message array. Per-string limits are applied before canonical serialization using the same `[TRUNCATED]` marker, and any such truncation also sets the wrapper flag. Redaction precedes per-string and total truncation.
 
-Before opaque serialization, the controller validates the documented message/part envelope needed to associate the terminal response and detect tool use. A permission request or tool part other than `StructuredOutput` fails the probe even though sanitized transcript evidence is retained. The controller does not invoke `opencode export` or read OpenCode local storage because the supplied server may be remote and no sanitized HTTP export is documented.
+Before opaque serialization, the controller validates the documented message/part envelope needed to associate the terminal response and detect tool use. For a successful probe it requires the exact submitted prompt and configured Auditor/provider/model identity in the associated terminal message. A permission request or tool part other than `StructuredOutput` fails the probe even though sanitized transcript evidence is retained. The controller does not invoke `opencode export` or read OpenCode local storage because the supplied server may be remote and no sanitized HTTP export is documented.
 
 Transcript capture is required after successful completion. On failure or interruption it is best effort, and metadata records `complete`, `truncated`, or `unavailable`.
 
@@ -743,7 +749,7 @@ An implementation may choose smaller documented limits. It must not silently cho
 - Controller-authored prompt and metadata content is rejected before persistence if it contains a recognized credential.
 - Credential-bearing structured results are rejected as `invalid_agent_result` and are not persisted in `result.json`.
 - Other external response and transcript strings are redacted before persistence because rejecting all evidence would impede diagnosis.
-- Redaction covers URL user-info, URL query values and fragments, HTTP authorization values, common secret-bearing key names, and supported provider token patterns.
+- Redaction covers URI user-info for every scheme, URL query values and fragments regardless of key name, HTTP authorization values, common secret-bearing key names, and supported provider token patterns including current OpenAI project, Anthropic, OpenRouter, Google, GitLab (`glpat-`, `glcbt-`, `glptt-`, `glrt-`, `glimt-`, `glsoat-`, `gldt-`, `glrtr-`, `glft-`, `glagent-`, `glwt-`, `glffct-`, and `gloas-`), Hugging Face, Slack, GitHub (including variable-length stateless `ghs_<APPID>_<JWT>` installation tokens), and AWS forms.
 - Redaction is recursive and applies before size-based truncation.
 - Logs and errors summarize response type and endpoint operation; they do not include full bodies.
 - Tests use synthetic credential values only.

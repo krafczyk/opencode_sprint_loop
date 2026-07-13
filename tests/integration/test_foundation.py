@@ -31,6 +31,7 @@ from opencode_sprint_loop.events import append_event, load_events, transition_ev
 from opencode_sprint_loop.jsonio import MAX_JSON_BYTES
 from opencode_sprint_loop.locking import advisory_lock, ownership_lock
 from opencode_sprint_loop.paths import runtime_paths
+from opencode_sprint_loop.invocations import probe_prompt
 from opencode_sprint_loop.security import redact_diagnostic
 from opencode_sprint_loop.state import load_state, new_state, validate_state, write_state_atomic
 from opencode_sprint_loop.transitions import persist_initial, transition
@@ -441,7 +442,7 @@ class SprintRepositoryFixture:
         return target
 
 
-def fake_server_runner(server_url: str) -> FakeAgentRunner:
+def fake_server_runner(server_url: str, *, multisprint: str = "foundation") -> FakeAgentRunner:
     """Return a no-network Sprint 2 runner for retained foundation tests."""
     del server_url
     result = {
@@ -452,11 +453,16 @@ def fake_server_runner(server_url: str) -> FakeAgentRunner:
         "blocking_reason": None,
     }
     messages = [
-        {"id": "prompt-1", "role": "user", "parts": [{"type": "text", "text": "probe"}]},
+        {
+            "id": "prompt-1",
+            "role": "user",
+            "parts": [{"type": "text", "text": probe_prompt(multisprint, 1, "0001-auditor")}],
+        },
         {
             "id": "answer-1",
             "role": "assistant",
             "parentID": "prompt-1",
+            "info": {"agent": "auditor", "providerID": "test", "modelID": "strong"},
             "parts": [{"type": "structured_output", "value": result}],
         },
     ]
@@ -1056,7 +1062,15 @@ class FoundationTests(unittest.TestCase):
             calls += 1
             return result
 
-        with patch("opencode_sprint_loop.cli.validate_preflight", side_effect=validate_then_change):
+        with (
+            patch("opencode_sprint_loop.cli.validate_preflight", side_effect=validate_then_change),
+            patch(
+                "opencode_sprint_loop.cli.OpenCodeServerRunner",
+                side_effect=lambda server_url: fake_server_runner(
+                    server_url, multisprint="updated"
+                ),
+            ),
+        ):
             code, _, stderr = self.invoke(
                 ["run", "--root", str(self.root), "--server-url", "opaque"]
             )
@@ -1764,6 +1778,51 @@ class FoundationTests(unittest.TestCase):
                     append_event(self.root / "info" / "events.jsonl", event)
                 self.assertEqual(context.exception.code, "persistence_failed")
                 self.assertNotIn("synthetic-secret", redact_diagnostic(value))
+
+        for value in (
+            "sk-proj-" + "A" * 24,
+            "sk-ant-api03-" + "B" * 24,
+            "ghs_12345_" + "C" * 40 + "." + "D" * 40 + "." + "E" * 40,
+            *(
+                prefix + "C" * 24
+                for prefix in (
+                    "glpat-",
+                    "glcbt-",
+                    "glptt-",
+                    "glrt-",
+                    "glimt-",
+                    "glsoat-",
+                    "gldt-",
+                    "glrtr-",
+                    "glft-",
+                    "glagent-",
+                    "glwt-",
+                    "glffct-",
+                    "gloas-",
+                )
+            ),
+            "postgresql://user:synthetic-secret@example.invalid/database",
+            "ssh://user:synthetic-secret@example.invalid/repository",
+            "https://example.invalid/path?opaque=synthetic-secret",
+            "https://example.invalid/path#opaque-fragment",
+        ):
+            with self.subTest(modern_credential=value.split(":", 1)[0]):
+                event = transition_event(
+                    new_state(load_config(self.root)),
+                    "run.started",
+                    "initializing",
+                    {"previous_state": None, "note": value},
+                )
+                with self.assertRaises(ControllerError) as context:
+                    append_event(self.root / "info" / "events.jsonl", event)
+                self.assertEqual(context.exception.code, "persistence_failed")
+                state = new_state(load_config(self.root))
+                state["state"] = "blocked"
+                state["reason"] = {"code": "test", "message": value, "details": {}}
+                with self.assertRaises(ControllerError) as context:
+                    validate_state(state)
+                self.assertEqual(context.exception.code, "corrupt_state")
+                self.assertNotIn(value, redact_diagnostic(f"diagnostic: {value}"))
 
     def test_configured_remote_secret_is_redacted_from_diagnostics(self) -> None:
         """Configuration-derived Git diagnostics cannot expose sensitive remote values."""

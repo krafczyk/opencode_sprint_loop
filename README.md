@@ -199,15 +199,20 @@ sanitized bounded `transcript.json`. The event log records `run.started`,
 checkpoint commit is made until Sprint 4.
 
 The fresh Auditor probe has a wildcard-deny tool override and a deterministic
-title. On timeout, uncertain terminal evidence, or cooperative `SIGINT`/
-`SIGTERM`, the controller sends exactly one best-effort abort, waits up to ten
-seconds for idle or terminal evidence, then captures any available sanitized
-transcript before recording the interruption. `SIGINT` and `SIGTERM` return
-statuses 130 and 143 respectively. Ambiguous session creation is not retried
-and an orphan session may remain. Interrupted work is not resumed or repaired
-in Sprint 2.
+title. Successful terminal transcript evidence must bind the exact submitted
+prompt and the configured Auditor/provider/model identity; absent or mismatched
+evidence fails closed. A present session-status entry must use the documented
+`1.17.x` object with a string `type`; only an absent entry means missing status.
+On timeout, uncertain terminal evidence, or cooperative `SIGINT`/`SIGTERM`, the
+controller sends exactly one best-effort abort, uses one monotonic ten-second
+confirmation deadline for every follow-up observation, and records both the
+strict JSON-boolean abort acknowledgement and whether idle or terminal
+confirmation was obtained before capturing any available sanitized transcript. `SIGINT` and
+`SIGTERM` return statuses 130 and 143 respectively. Ambiguous session creation
+is not retried and an orphan session may remain. Interrupted work is not resumed
+or repaired in Sprint 2.
 
-Runtime readers and writers use descriptor-anchored paths and distinct controller-owned Git-metadata lock directories. Git-managed files such as `HEAD` and `config` are never lock anchors because ordinary Git operations can replace them. State/event payloads reject credential-bearing keys and common credential-bearing values, and CLI diagnostics redact URI user-info, query values, fragments, and HTTP authorization values.
+Runtime readers and writers use descriptor-anchored paths and distinct controller-owned Git-metadata lock directories. Git-managed files such as `HEAD` and `config` are never lock anchors because ordinary Git operations can replace them. State/event payloads reject credential-bearing keys, provider tokens (including variable-length stateless GitHub App installation tokens shaped `ghs_<APPID>_<JWT>`), and every URI query value or fragment regardless of its key. CLI diagnostics redact those values along with URI user-info and HTTP authorization values. GitLab forms include `glpat-`, `glcbt-`, `glptt-`, `glrt-`, `glimt-`, `glsoat-`, `gldt-`, `glrtr-`, `glft-`, `glagent-`, `glwt-`, `glffct-`, and `gloas-`. URI user-info is recognized for every URI scheme, including database and SSH URLs.
 
 Status and existing-run validation cross-check invocation metadata, prompt,
 result, transcript, state, and terminal event identities. Missing or
@@ -260,9 +265,12 @@ an ordinary OpenCode client, and checks the invocation records and final block.
 The installed OpenCode `1.17.18` build tested on 2026-07-13 accepted a structured
 probe but then returned HTTP 400 from its message-list endpoint because its own
 persisted `json_schema` format included a default `retryCount` rejected by its
-response validator. That upstream incompatibility currently blocks the complete
-real-server demonstration; the controller does not send the optional hint and
-still fails closed without treating missing result/transcript evidence as success.
+response validator. Omitting the optional hint still triggers that default, and
+supplying it repeats the rejected stored field, so no controller-side
+schema-compatible workaround is available. A supported server build with a
+corrected message-list response is required for the complete real-server
+demonstration; until then the controller fails closed without treating missing
+result/transcript evidence as success.
 Builder handoff, commits, audits, CI, functional controls/recovery, and Neovim
 remain deliberately unimplemented.
 

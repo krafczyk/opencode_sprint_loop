@@ -563,8 +563,15 @@ class OpenCodeServerRunner:
             raise ControllerError(
                 "malformed_server_response", "OpenCode status response is invalid"
             )
-        value = statuses.get(session.session_id)
-        status = value.get("type", value.get("status")) if isinstance(value, dict) else value
+        if session.session_id not in statuses:
+            status = None
+        else:
+            value = statuses[session.session_id]
+            if not isinstance(value, dict) or not isinstance(value.get("type"), str):
+                raise ControllerError(
+                    "malformed_server_response", "OpenCode session status entry is invalid"
+                )
+            status = value["type"]
         if status is not None and not isinstance(status, str):
             raise ControllerError("malformed_server_response", "OpenCode session status is invalid")
         messages = self._messages(session, deadline=deadline)
@@ -668,12 +675,12 @@ class OpenCodeServerRunner:
     def abort(self, session: CreatedSession) -> AbortObservation:
         """Issue one documented abort request; its response is acknowledgement only."""
         response = self._request("POST", f"/session/{quote(session.session_id, safe='')}/abort", {})
-        return AbortObservation(
-            response is True
-            or response is None
-            or response == {}
-            or (isinstance(response, dict) and response.get("acknowledged", True) is True)
-        )
+        if not isinstance(response, bool):
+            raise ControllerError(
+                "malformed_server_response",
+                "OpenCode abort response is not a boolean acknowledgement",
+            )
+        return AbortObservation(response)
 
     def transcript(
         self, session: CreatedSession, *, deadline: float | None = None

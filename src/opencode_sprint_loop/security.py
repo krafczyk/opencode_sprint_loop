@@ -12,11 +12,25 @@ _SENSITIVE_FIELD = re.compile(
     r"(?:credential|password|secret|token|api[_-]?key|authorization)", re.IGNORECASE
 )
 _PROVIDER_TOKEN = (
-    r"(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})"
+    r"(?:"
+    r"ghs_[A-Za-z0-9._-]{36,}|gh[opur]_[A-Za-z0-9]{36}|"
+    r"github_pat_[A-Za-z0-9_]{20,}|"
+    r"gl(?:pat|cbt|ptt|rt|imt|soat|dt|rtr|ft|agent|wt|ffct|oas)-[A-Za-z0-9_-]{20,}|"
+    r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|"
+    r"sk-ant-(?:api|oat)\d{2}-[A-Za-z0-9_-]{20,}|sk-or-v1-[A-Za-z0-9_-]{20,}|"
+    r"sk-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{30,}|hf_[A-Za-z0-9]{20,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{20,}|x(?:app|wfp)-[A-Za-z0-9-]{20,}|"
+    r"(?:AKIA|ASIA)[0-9A-Z]{16}"
+    r")"
 )
+# Anchor a scheme to its first valid character. This keeps credential scans of
+# arbitrary long non-URI text linear while accepting every valid URI scheme.
+_URI = r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*://"
+_URI_QUERY_OR_FRAGMENT = rf"{_URI}[^\s?#]+(?:\?[^#\s]+|#[^\s]+)"
 _CREDENTIAL_VALUE = re.compile(
     r"(?:\b(?:authorization|proxy-authorization)\s*:\s*(?:basic|bearer)\s+\S+|"
-    r"https?://[^/\s@]+@|"
+    rf"{_URI}[^/\s@]*@|"
+    rf"{_URI_QUERY_OR_FRAGMENT}|"
     r"[?&#](?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)=[^&#\s]+|"
     r"(?<![a-z0-9_-])(?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)\s*(?:=|:)\s*\S+|"
     rf"{_PROVIDER_TOKEN}|"
@@ -96,12 +110,11 @@ def redact_diagnostic(message: str) -> str:
         r"\1[REDACTED]",
         message,
     )
-    uri = r"[a-z][a-z0-9+.-]*://"
-    message = re.sub(rf"(?i)({uri})[^/\s@]+@", r"\1[REDACTED]@", message)
+    message = re.sub(rf"(?i)({_URI})[^/\s@]*@", r"\1[REDACTED]@", message)
     # Query keys are not a reliable secret classifier, so no query value or
     # fragment may reach diagnostics even when it uses an unfamiliar name.
-    message = re.sub(rf"(?i)({uri}[^\s?#]+)\?[^#\s]*", r"\1?[REDACTED]", message)
-    message = re.sub(rf"(?i)({uri}[^\s#]+)#[^\s]*", r"\1#[REDACTED]", message)
+    message = re.sub(rf"(?i)({_URI}[^\s?#]+)\?[^#\s]*", r"\1?[REDACTED]", message)
+    message = re.sub(rf"(?i)({_URI}[^\s#]+)#[^\s]*", r"\1#[REDACTED]", message)
     message = re.sub(
         r"(?i)([?&#](?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)=)[^&#\s]+",
         r"\1[REDACTED]",

@@ -138,6 +138,7 @@ class FakeAgentRunner:
         self.created: list[CreatedSession] = []
         self.submitted: list[str] = []
         self.aborted: list[str] = []
+        self.observation_deadlines: list[float | None] = []
         self.preexisting: set[str] = set()
 
     def validate_server(self, request: ServerValidationRequest) -> ValidatedServer:
@@ -185,7 +186,8 @@ class FakeAgentRunner:
         self, session: CreatedSession, *, deadline: float | None = None
     ) -> InvocationObservation:
         """Return scripted observations in order, retaining pending state when exhausted."""
-        del session, deadline
+        del session
+        self.observation_deadlines.append(deadline)
         if self.observations:
             observation = self.observations.pop(0)
             if isinstance(observation, Exception):

@@ -421,6 +421,38 @@ caps. This revalidates **S2-RESULT-006**, **S2-OBS-008**,
 **S2-REVIEW-001** through **S2-REVIEW-009** and **S2-DONE-012** remain
 unchecked.
 
+Builder repair verification (2026-07-13) addressed **AUD-S2-009** through
+**AUD-S2-012**. Synthetic current-provider tokens, including all documented
+GitLab forms, plus PostgreSQL and SSH URI user-info are rejected from
+result/state/event data and redacted from transcript/diagnostic paths. Terminal
+transcript acceptance requires the exact submitted prompt and documented
+configured Auditor/provider/model identity; malformed present status entries
+are rejected rather than normalized. Abort responses strictly accept and retain
+only their documented JSON-boolean acknowledgement, all post-abort observations
+share one monotonic confirmation deadline, and interruption events record
+`idle`, `terminal`, or absent confirmation. Focused offline execution and
+foundation tests passed. These repairs revalidate the affected checked
+implementation and test items, but are not a fresh audit; **S2-REVIEW-001**
+through **S2-REVIEW-009** and **S2-DONE-012** remain unchecked.
+
+Restart verification (2026-07-13) ran the focused abort, token-sanitization,
+prompt-binding, status-entry, local-adapter, and foundation tests, followed by
+the complete offline suite (196 passing, one opt-in real-server test skipped),
+Ruff, mypy, compilation, build, clean-wheel installation, and diff checks.
+The synthetic server now returns the documented JSON-boolean abort response.
+
+Builder repair verification (2026-07-13) addressed **AUD-S2-013**. Current
+variable-length stateless GitHub App installation tokens shaped
+`ghs_<APPID>_<JWT>` now fail controller-authored result, state, and event
+validation and redact from transcript and diagnostic paths. Any URI query value
+or fragment, regardless of its key name, receives the same treatment. Focused
+credential-path tests and the complete offline suite (196 passing, one opt-in
+real-server test skipped), Ruff, mypy, compilation, build, clean-wheel
+installation, and diff checks passed. This revalidates **S2-SEC-001** through
+**S2-SEC-004**, **S2-TEST-009**, **S2-TEST-012**, and **S2-ERR-008**, but is not
+a fresh audit; **S2-REVIEW-001** through **S2-REVIEW-009** and **S2-DONE-012**
+remain unchecked.
+
 ## 28. Scope Review
 
 - [x] **S2-SCOPEREVIEW-001** Confirm no product Builder prompt or mutating-agent result schema was implemented.
@@ -471,6 +503,21 @@ preserved interruption evidence, produced no result or transcript, and left both
 repositories unchanged except expected runtime records. The temporary server was
 stopped and its health endpoint became unreachable. Successful-result demo items
 and **S2-DONE-011** remain unchecked.
+
+The smallest currently specification-compatible resolution for **AUD-S2-008**
+is a supported server build that accepts its stored `json_schema` prompt format
+when serving the documented message-list response. Omitting `retryCount` still
+causes the observed server-side default and supplying it repeats the rejected
+stored field, so no controller-side request variation is supported as a
+workaround. No genuinely compatible server was available for a successful
+result/transcript demonstration; **S2-DEMO-002** through **S2-DEMO-010** and
+**S2-DONE-011** remain unchecked.
+
+Restart investigation found two externally managed healthy OpenCode `1.17.18`
+servers, but their default workspaces were the controller source repository and
+an unrelated repository, not a clean Sprint 2 fixture. The controller was not
+run against either server. The supported real-server success demonstration
+therefore remains blocked on a compatible server rooted at the fixture.
 
 ## 30. Completion Gate
 

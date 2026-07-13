@@ -383,13 +383,18 @@ def _interrupt_active_invocation(
         # A failed abort request is evidence of an unconfirmed abort, not a
         # reason to retry a non-idempotent cancellation operation.
         abort_acknowledged = None
+    confirmation: str | None = None
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         try:
-            observation = runner.observe(session)
+            observation = runner.observe(session, deadline=deadline)
         except ControllerError:
             break
-        if observation.status in {None, "idle"} or observation.terminal_assistant:
+        if observation.terminal_assistant:
+            confirmation = "terminal"
+            break
+        if observation.status == "idle":
+            confirmation = "idle"
             break
         time.sleep(min(1, max(0, deadline - time.monotonic())))
     if transcript_evidence is None:
@@ -423,6 +428,7 @@ def _interrupt_active_invocation(
                 "details": {},
             },
             "abort_acknowledged": abort_acknowledged,
+            "abort_confirmation": confirmation,
         },
         {"active_invocation": None},
     )
@@ -647,7 +653,13 @@ def _run(
             capture = effective_runner.transcript(session, deadline=deadline)
             wrapper = transcript_wrapper(session.session_id, capture.messages)
             try:
-                validate_transcript_messages(capture.messages, expected_result=result)
+                validate_transcript_messages(
+                    capture.messages,
+                    expected_result=result,
+                    expected_prompt=prompt,
+                    expected_role=request.role,
+                    expected_model=request.model,
+                )
             except ControllerError as transcript_semantic_error:
                 # Safe opaque evidence is retained before the semantic probe
                 # violation is reported through the interruption lifecycle.

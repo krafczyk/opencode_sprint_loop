@@ -496,12 +496,17 @@ def _truncate_text(value: str, limit: int) -> tuple[str, bool]:
 
 
 def validate_transcript_messages(
-    messages: Any, expected_result: dict[str, Any] | None = None
+    messages: Any,
+    expected_result: dict[str, Any] | None = None,
+    *,
+    expected_prompt: str | None = None,
+    expected_role: str | None = None,
+    expected_model: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Validate probe message envelopes, association, and forbidden-tool evidence."""
+    """Validate probe transcript evidence against its submitted prompt and route identity."""
     if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages):
         raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
-    user_messages: list[tuple[int, str]] = []
+    user_messages: list[tuple[int, str, dict[str, Any]]] = []
     assistant_results: list[tuple[int, dict[str, Any], Any]] = []
     for index, message in enumerate(messages):
         raw_info = message.get("info")
@@ -527,7 +532,7 @@ def validate_transcript_messages(
         ):
             raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
         if role == "user":
-            user_messages.append((index, identifier))
+            user_messages.append((index, identifier, message))
         message_results: list[Any] = []
         for part in parts:
             if not isinstance(part, dict) or not isinstance(part.get("type"), str):
@@ -567,15 +572,40 @@ def validate_transcript_messages(
             )
         if len(message_results) > 1:
             raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
+        if message_results and role != "assistant":
+            raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
         if message_results:
             assistant_results.append((index, message, message_results[0]))
     if expected_result is not None:
+        if (
+            not isinstance(expected_prompt, str)
+            or not isinstance(expected_role, str)
+            or not isinstance(expected_model, str)
+        ):
+            raise ControllerError(
+                "transcript_capture_failed", "Probe transcript expectations are invalid"
+            )
+        provider_id, separator, model_id = expected_model.partition("/")
+        if not separator or not provider_id or not model_id:
+            raise ControllerError(
+                "transcript_capture_failed", "Probe transcript expectations are invalid"
+            )
         if len(user_messages) != 1 or len(assistant_results) != 1:
             raise ControllerError(
                 "transcript_capture_failed",
                 "OpenCode transcript does not contain the expected terminal response",
             )
-        user_index, user_id = user_messages[0]
+        user_index, user_id, user = user_messages[0]
+        user_parts = user["parts"]
+        if (
+            len(user_parts) != 1
+            or user_parts[0].get("type") != "text"
+            or user_parts[0].get("text") != expected_prompt
+        ):
+            raise ControllerError(
+                "transcript_capture_failed",
+                "OpenCode transcript does not contain the submitted prompt",
+            )
         assistant_index, assistant, captured_result = assistant_results[0]
         raw_info = assistant.get("info")
         info = raw_info if isinstance(raw_info, dict) else {}
@@ -588,6 +618,9 @@ def validate_transcript_messages(
             or assistant_index <= user_index
             or parent != user_id
             or info.get("error", assistant.get("error")) is not None
+            or info.get("agent") != expected_role
+            or info.get("providerID") != provider_id
+            or info.get("modelID") != model_id
             or captured_result != expected_result
         ):
             raise ControllerError(
@@ -751,7 +784,13 @@ def _load_artifact_object(path: Path, limit: int) -> dict[str, Any]:
 
 
 def _validate_transcript_wrapper(
-    wrapper: dict[str, Any], session_id: str, expected_result: dict[str, Any] | None
+    wrapper: dict[str, Any],
+    session_id: str,
+    expected_result: dict[str, Any] | None,
+    *,
+    expected_prompt: str,
+    expected_role: str,
+    expected_model: str,
 ) -> None:
     """Validate a persisted transcript wrapper and its untruncated opaque content."""
     if (
@@ -791,7 +830,13 @@ def _validate_transcript_wrapper(
                 messages, code="inconsistent_invocation_record", label="Invocation transcript"
             )
             if expected_result is not None:
-                validate_transcript_messages(messages, expected_result)
+                validate_transcript_messages(
+                    messages,
+                    expected_result,
+                    expected_prompt=expected_prompt,
+                    expected_role=expected_role,
+                    expected_model=expected_model,
+                )
         except ControllerError as error:
             raise _record_error("Invocation transcript evidence is inconsistent", error) from error
         except (json.JSONDecodeError, ValueError, RecursionError) as error:
@@ -922,7 +967,14 @@ def validate_invocation_records(
         wrapper = _load_artifact_object(paths.transcript, MAX_TRANSCRIPT_BYTES)
         if metadata["session_id"] is None:
             raise _record_error("Transcript exists without a known session")
-        _validate_transcript_wrapper(wrapper, metadata["session_id"], result)
+        _validate_transcript_wrapper(
+            wrapper,
+            metadata["session_id"],
+            result,
+            expected_prompt=expected_prompt,
+            expected_role=config.agents["auditor"],
+            expected_model=config.models["auditor"],
+        )
     metadata_terminal = metadata["status"] in _TERMINAL
     if metadata_terminal:
         if result_exists != metadata["result"]["available"]:
