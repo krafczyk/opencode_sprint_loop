@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ControllerError
-from .safeio import open_directory
+from .safeio import open_directory, open_regular
 from .security import contains_credential, redact_external_data, validate_safe_data
 from .state import RFC3339_UTC, utc_now
 
@@ -82,7 +82,8 @@ def validate_result(value: Any) -> dict[str, Any]:
     checks = value["checks"]
     reason = value["blocking_reason"]
     if (
-        status not in {"completed", "blocked", "failed"}
+        not isinstance(status, str)
+        or status not in {"completed", "blocked", "failed"}
         or not isinstance(summary, str)
         or not summary
         or len(summary.encode()) > 4096
@@ -465,11 +466,105 @@ def _truncate_text(value: str, limit: int) -> tuple[str, bool]:
     return marker, True
 
 
-def transcript_wrapper(session_id: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """Recursively redact and deterministically bound opaque message evidence."""
-    _bounded_string(session_id, "session_id")
+def validate_transcript_messages(
+    messages: Any, expected_result: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    """Validate probe message envelopes, association, and forbidden-tool evidence."""
     if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages):
         raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
+    user_messages: list[tuple[int, str]] = []
+    assistant_results: list[tuple[int, dict[str, Any], Any]] = []
+    for index, message in enumerate(messages):
+        raw_info = message.get("info")
+        if raw_info is not None and not isinstance(raw_info, dict):
+            raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
+        info: dict[str, Any] = raw_info if isinstance(raw_info, dict) else {}
+        role = message.get("role", info.get("role"))
+        identifier = message.get("id", info.get("id"))
+        parts = message.get("parts")
+        if (
+            role not in {"user", "assistant"}
+            or not isinstance(identifier, str)
+            or not identifier
+            or len(identifier.encode("utf-8")) > 1024
+            or not isinstance(parts, list)
+        ):
+            raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
+        if role == "user":
+            user_messages.append((index, identifier))
+        message_results: list[Any] = []
+        for part in parts:
+            if not isinstance(part, dict) or not isinstance(part.get("type"), str):
+                raise ControllerError(
+                    "transcript_capture_failed", "OpenCode transcript is malformed"
+                )
+            kind = part["type"]
+            if kind == "permission":
+                raise ControllerError(
+                    "unexpected_probe_tool",
+                    "Execution probe transcript contains a permission request",
+                )
+            if kind == "tool":
+                tool = part.get("tool", part.get("name"))
+                if tool == "StructuredOutputError":
+                    raise ControllerError(
+                        "invalid_agent_result",
+                        "OpenCode transcript reports structured output failure",
+                    )
+                if tool != "StructuredOutput":
+                    raise ControllerError(
+                        "unexpected_probe_tool",
+                        "Execution probe transcript contains a forbidden tool",
+                    )
+            if kind in {"structured_output", "json_schema"}:
+                message_results.append(part.get("value", part.get("output")))
+        if message.get("structured_output") is not None:
+            message_results.append(message["structured_output"])
+        if message.get("error") == "StructuredOutputError":
+            raise ControllerError(
+                "invalid_agent_result", "OpenCode transcript reports structured output failure"
+            )
+        if len(message_results) > 1:
+            raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
+        if message_results:
+            assistant_results.append((index, message, message_results[0]))
+    if expected_result is not None:
+        if len(user_messages) != 1 or len(assistant_results) != 1:
+            raise ControllerError(
+                "transcript_capture_failed",
+                "OpenCode transcript does not contain the expected terminal response",
+            )
+        user_index, user_id = user_messages[0]
+        assistant_index, assistant, captured_result = assistant_results[0]
+        raw_info = assistant.get("info")
+        info = raw_info if isinstance(raw_info, dict) else {}
+        parent = assistant.get(
+            "parentID", assistant.get("parent_id", info.get("parentID", info.get("parent_id")))
+        )
+        role = assistant.get("role", info.get("role"))
+        if (
+            role != "assistant"
+            or assistant_index <= user_index
+            or parent != user_id
+            or assistant.get("error") is not None
+            or captured_result != expected_result
+        ):
+            raise ControllerError(
+                "transcript_capture_failed",
+                "OpenCode transcript terminal response is inconsistent",
+            )
+    return messages
+
+
+def transcript_wrapper(
+    session_id: str,
+    messages: list[dict[str, Any]],
+    *,
+    expected_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate, recursively redact, and deterministically bound message evidence."""
+    _bounded_string(session_id, "session_id")
+    validate_transcript_messages(messages, expected_result)
     sanitized = redact_external_data(messages)
     truncated = False
 
@@ -543,3 +638,255 @@ def write_transcript(paths: InvocationPaths, wrapper: dict[str, Any]) -> None:
     if len(encoded) > MAX_TRANSCRIPT_BYTES:
         raise ControllerError("transcript_capture_failed", "Sanitized transcript exceeds 8 MiB")
     _atomic_write(paths.transcript, encoded, replace=False)
+
+
+def _record_error(message: str, error: BaseException | None = None) -> ControllerError:
+    """Build the stable read-side invocation consistency error."""
+    return ControllerError("inconsistent_invocation_record", message)
+
+
+def _read_artifact(path: Path, limit: int) -> bytes:
+    """Read one bounded single-link regular invocation artifact."""
+    descriptor: int | None = None
+    directory: int | None = None
+    try:
+        descriptor, directory = open_regular(path, os.O_RDONLY)
+        size = os.fstat(descriptor).st_size
+        if size > limit:
+            raise _record_error(f"Invocation artifact exceeds its bound: {path.name}")
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > limit or len(payload) != size:
+            raise _record_error(f"Invocation artifact is incomplete: {path.name}")
+        return payload
+    except ControllerError as error:
+        if error.code == "inconsistent_invocation_record":
+            raise
+        raise _record_error(f"Invocation artifact is unsafe: {path.name}", error) from error
+    except (OSError, FileNotFoundError) as error:
+        raise _record_error(f"Cannot read invocation artifact: {path.name}", error) from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory is not None:
+            os.close(directory)
+
+
+def _load_artifact_object(path: Path, limit: int) -> dict[str, Any]:
+    """Strictly decode one bounded invocation JSON object."""
+    raw = _read_artifact(path, limit)
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda item: (_ for _ in ()).throw(ValueError(item)),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as error:
+        raise _record_error(f"Invocation artifact is malformed: {path.name}", error) from error
+    if not isinstance(value, dict):
+        raise _record_error(f"Invocation artifact is not an object: {path.name}")
+    return value
+
+
+def _validate_transcript_wrapper(
+    wrapper: dict[str, Any], session_id: str, expected_result: dict[str, Any] | None
+) -> None:
+    """Validate a persisted transcript wrapper and its untruncated opaque content."""
+    if (
+        set(wrapper)
+        != {
+            "schema_version",
+            "session_id",
+            "format",
+            "sanitized",
+            "truncated",
+            "original_bytes",
+            "content",
+        }
+        or wrapper["schema_version"] != 1
+        or isinstance(wrapper["schema_version"], bool)
+        or wrapper["session_id"] != session_id
+        or wrapper["format"] != "opencode-messages-json-v1"
+        or wrapper["sanitized"] is not True
+        or not isinstance(wrapper["truncated"], bool)
+        or not isinstance(wrapper["original_bytes"], int)
+        or isinstance(wrapper["original_bytes"], bool)
+        or wrapper["original_bytes"] < 0
+        or not isinstance(wrapper["content"], str)
+    ):
+        raise _record_error("Invocation transcript wrapper is inconsistent")
+    content = wrapper["content"]
+    if not wrapper["truncated"]:
+        try:
+            messages = json.loads(
+                content,
+                object_pairs_hook=lambda pairs: dict(pairs)
+                if len({key for key, _ in pairs}) == len(pairs)
+                else (_ for _ in ()).throw(ValueError("duplicate key")),
+                parse_constant=lambda item: (_ for _ in ()).throw(ValueError(item)),
+            )
+            validate_transcript_messages(messages, expected_result)
+        except ControllerError as error:
+            raise _record_error("Invocation transcript evidence is inconsistent", error) from error
+        except (json.JSONDecodeError, ValueError, RecursionError) as error:
+            raise _record_error("Invocation transcript content is malformed", error) from error
+        canonical = json.dumps(
+            messages, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        )
+        if canonical != content or wrapper["original_bytes"] != len(content.encode("utf-8")):
+            raise _record_error("Invocation transcript content is not canonical")
+
+
+def validate_invocation_records(
+    root: Path,
+    config: Any,
+    state: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> None:
+    """Cross-validate Sprint 2 invocation metadata, artifacts, state, and events."""
+    base = root / "invocations" / config.multisprint / str(config.sprint)
+    expected_name = "0001-auditor"
+    started = [event for event in events if event["type"] == "agent.started"]
+    terminals = [
+        event for event in events if event["type"] in {"agent.completed", "agent.interrupted"}
+    ]
+    try:
+        base_descriptor = open_directory(base)
+    except FileNotFoundError:
+        if started or terminals:
+            raise _record_error("Invocation event history has no invocation record")
+        return
+    except (OSError, ControllerError) as error:
+        raise _record_error("Invocation record directory is unsafe", error) from error
+    try:
+        entries = set(os.listdir(base_descriptor))
+    finally:
+        os.close(base_descriptor)
+    if entries != {expected_name}:
+        raise _record_error("Invocation record paths do not match the configured probe")
+    paths = InvocationPaths(
+        base / expected_name,
+        base / expected_name / "metadata.json",
+        base / expected_name / "prompt.md",
+        base / expected_name / "result.json",
+        base / expected_name / "transcript.json",
+    )
+    try:
+        invocation_descriptor = open_directory(paths.directory)
+        try:
+            artifact_names = set(os.listdir(invocation_descriptor))
+        finally:
+            os.close(invocation_descriptor)
+    except (OSError, ControllerError) as error:
+        raise _record_error("Invocation artifact directory is unsafe", error) from error
+    if not {"metadata.json", "prompt.md"} <= artifact_names or not artifact_names <= {
+        "metadata.json",
+        "prompt.md",
+        "result.json",
+        "transcript.json",
+    }:
+        raise _record_error("Invocation artifact paths do not match the probe contract")
+    metadata = _load_artifact_object(paths.metadata, MAX_METADATA_BYTES)
+    try:
+        validate_metadata(metadata)
+    except ControllerError as error:
+        raise _record_error("Invocation metadata is invalid", error) from error
+    expected_prompt = probe_prompt(config.multisprint, config.sprint, expected_name)
+    prompt = _read_artifact(paths.prompt, MAX_PROMPT_BYTES)
+    if prompt != expected_prompt.encode("utf-8"):
+        raise _record_error("Invocation prompt does not match the configured probe")
+    if (
+        metadata["run_id"] != state["run_id"]
+        or metadata["invocation_id"] != expected_name
+        or metadata["sequence"] != 1
+        or metadata["role"] != "auditor"
+        or metadata["model"] != config.models["auditor"]
+        or metadata["server_version"] != state["server"]["version"]
+        or set(metadata["input_commits"]) != {config.repositories[0].name}
+    ):
+        raise _record_error("Invocation metadata identity is inconsistent")
+    if len(started) > 1 or len(terminals) > 1:
+        raise _record_error("Invocation event history has repeated lifecycle events")
+    if terminals and not started:
+        raise _record_error("Terminal invocation event has no matching start")
+    if started:
+        start_payload = started[0]["payload"]
+        if any(
+            start_payload[field] != metadata[field]
+            for field in ("invocation_id", "role", "session_id")
+        ):
+            raise _record_error("Invocation metadata does not match its start event")
+    if terminals:
+        terminal = terminals[0]
+        payload = terminal["payload"]
+        if any(
+            payload[field] != started[0]["payload"][field]
+            for field in ("invocation_id", "role", "session_id")
+        ):
+            raise _record_error("Terminal invocation event does not match its start event")
+        if terminal["type"] == "agent.completed":
+            if (
+                metadata["status"] not in {"completed", "blocked", "failed"}
+                or payload["result_status"] != metadata["status"]
+            ):
+                raise _record_error("Completion event does not match terminal metadata")
+        elif metadata["status"] not in {"timed_out", "interrupted"}:
+            raise _record_error("Interruption event does not match terminal metadata")
+    active = state["active_invocation"]
+    if active is not None and any(
+        active[field] != metadata[field]
+        for field in ("invocation_id", "sequence", "role", "model", "session_id", "started_at")
+    ):
+        raise _record_error("Active state does not match invocation metadata")
+    result_exists = os.path.lexists(paths.result)
+    transcript_exists = os.path.lexists(paths.transcript)
+    result: dict[str, Any] | None = None
+    if result_exists:
+        result = _load_artifact_object(paths.result, MAX_RESULT_BYTES)
+        try:
+            validate_result(result)
+        except ControllerError as error:
+            raise _record_error("Invocation result artifact is invalid", error) from error
+    wrapper: dict[str, Any] | None = None
+    if transcript_exists:
+        wrapper = _load_artifact_object(paths.transcript, MAX_TRANSCRIPT_BYTES)
+        if metadata["session_id"] is None:
+            raise _record_error("Transcript exists without a known session")
+        _validate_transcript_wrapper(wrapper, metadata["session_id"], result)
+    metadata_terminal = metadata["status"] in _TERMINAL
+    if metadata_terminal:
+        if result_exists != metadata["result"]["available"]:
+            raise _record_error("Invocation result availability contradicts metadata")
+        if result is not None and result["status"] != metadata["result"]["status"]:
+            raise _record_error("Invocation result status contradicts metadata")
+        transcript_status = metadata["transcript"]["status"]
+        if transcript_exists != (transcript_status in {"complete", "truncated"}):
+            raise _record_error("Invocation transcript availability contradicts metadata")
+        if wrapper is not None and wrapper["truncated"] != (transcript_status == "truncated"):
+            raise _record_error("Invocation transcript truncation contradicts metadata")
+    elif metadata["status"] == "planned" and (result_exists or transcript_exists):
+        raise _record_error("Planned invocation has impossible write-ahead artifacts")
+    if state["reason"] is not None and state["reason"]["code"] == "execution_not_implemented":
+        if (
+            not terminals
+            or terminals[0]["type"] != "agent.completed"
+            or metadata["status"] != "completed"
+            or metadata["transcript"]["status"] not in {"complete", "truncated"}
+        ):
+            raise _record_error("Execution placeholder lacks a complete invocation record")

@@ -10,6 +10,7 @@ from . import __version__
 from .config import SprintConfig
 from .errors import ControllerError
 from .events import load_events_at, validate_event_history
+from .invocations import validate_invocation_records
 from .locking import exclusive_lock_pid
 from .paths import RuntimePaths
 from .safeio import open_directory, path_exists, require_current_directory
@@ -221,6 +222,7 @@ def validate_persistence(
             raise ControllerError(
                 "inconsistent_persistence", "Agent start event requires active invocation state"
             )
+        validate_invocation_records(paths.info_dir.parents[2], config, state, events)
         require_current_directory(paths.info_dir, directory)
         return state, events
     finally:

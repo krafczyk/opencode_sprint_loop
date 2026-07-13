@@ -72,7 +72,9 @@ sprint-loop stop --root <sprint-repository>
 In Sprint 2, `run` requires an already-running OpenCode server rooted at the
 sprint repository. The URL must be a credential-free absolute HTTP(S) origin,
 such as `http://127.0.0.1:4096`; paths, query strings, fragments, and user-info
-are rejected. HTTP is only appropriate on the trusted local mkchad transport;
+are rejected. A trailing port separator without a port, such as
+`http://127.0.0.1:`, is also invalid rather than selecting the default port.
+HTTP is only appropriate on the trusted local mkchad transport;
 use HTTPS and server authentication outside that boundary. Supported OpenCode
 release versions are `>=1.17.0, <1.18.0`.
 
@@ -202,6 +204,12 @@ and an orphan session may remain. Interrupted work is not resumed or repaired
 in Sprint 2.
 
 Runtime readers and writers use descriptor-anchored paths and distinct controller-owned Git-metadata lock directories. Git-managed files such as `HEAD` and `config` are never lock anchors because ordinary Git operations can replace them. State/event payloads reject credential-bearing keys and common credential-bearing values, and CLI diagnostics redact URI user-info, query values, fragments, and HTTP authorization values.
+
+Status and existing-run validation cross-check invocation metadata, prompt,
+result, transcript, state, and terminal event identities. Missing or
+contradictory terminal evidence fails with `inconsistent_invocation_record`.
+Documented result/transcript-before-metadata write-ahead prefixes remain
+nonterminal interruption evidence and are never promoted to probe success.
 
 Use `status --json` for integrations. It emits one JSON object and writes diagnostics only to standard error. Its stable top-level fields are `schema_version`, `controller_version`, `sprint_root`, `run_exists`, `process_running`, `run_id`, `sprint`, `state`, `reason`, `active`, `commits`, `audit`, `ci`, `counters`, `checklist`, `last_event`, and `updated_at`. The complete V1 Sprint 1 JSON schema is defined in [the status contract](docs/controller-v1/1/sprint_spec.md#12-status-json-contract).
 

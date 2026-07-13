@@ -168,6 +168,8 @@ class OpenCodeExecutionTests(unittest.TestCase):
             "http://host?q=x",
             "http://host#x",
             "http://host:%zz",
+            "http://host:",
+            "http://[::1]:",
             "http://bad_host",
             "http://host:0",
             "http://host..invalid",
@@ -215,7 +217,17 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 self.assertEqual(context.exception.code, "invocation_record_failed")
 
         with patch("opencode_sprint_loop.invocations.MAX_TRANSCRIPT_BYTES", 1024):
-            wrapper = transcript_wrapper("ses_large", [{"body": "x" * 500} for _ in range(3)])
+            wrapper = transcript_wrapper(
+                "ses_large",
+                [
+                    {
+                        "id": f"message-{index}",
+                        "role": "user",
+                        "parts": [{"type": "text", "text": "x" * 500}],
+                    }
+                    for index in range(3)
+                ],
+            )
             self.assertTrue(wrapper["truncated"])
             self.assertTrue(wrapper["content"].endswith("\n[TRUNCATED]"))
             with TemporaryDirectory() as temporary:
@@ -414,13 +426,27 @@ class OpenCodeExecutionTests(unittest.TestCase):
             {**completed, "unknown": True},
             {**completed, "checks": [{"command": "x"}]},
             {**completed, "summary": "token=synthetic-secret"},
+            {**completed, "status": []},
+            {**completed, "status": {}},
         ):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(ControllerError):
                     validate_result(invalid)
         wrapper = transcript_wrapper(
             "ses_test",
-            [{"token": "synthetic-secret", "body": "Authorization: Bearer synthetic-secret"}],
+            [
+                {
+                    "id": "message-1",
+                    "role": "user",
+                    "parts": [
+                        {
+                            "type": "text",
+                            "text": "Authorization: Bearer synthetic-secret",
+                        }
+                    ],
+                    "token": "synthetic-secret",
+                }
+            ],
         )
         self.assertIn("[REDACTED]", wrapper["content"])
         with TemporaryDirectory() as temporary:
@@ -512,7 +538,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     "idle", self._terminal_messages(), completed, False, False, True
                 )
             ],
-            transcript_messages=self._terminal_messages(),
+            transcript_messages=self._terminal_messages(completed),
         )
         self.assertEqual(_run(str(root), "http://127.0.0.1:4096", runner=fake), 4)
         config = load_config(root)
@@ -562,8 +588,16 @@ class OpenCodeExecutionTests(unittest.TestCase):
         with self.assertRaises(ControllerError):
             validate_event_history(invalid_interruption)
 
+        mismatched_terminal = deepcopy(events)
+        mismatched_terminal[4]["payload"]["session_id"] = "ses_other"
+        with self.assertRaises(ControllerError):
+            validate_event_history(mismatched_terminal)
+        repeated_terminal = [*events[:5], deepcopy(events[4]), *events[5:]]
+        with self.assertRaises(ControllerError):
+            validate_event_history(repeated_terminal)
+
     @staticmethod
-    def _terminal_messages() -> list[dict[str, object]]:
+    def _terminal_messages(result: object | None = None) -> list[dict[str, object]]:
         """Return minimal sole-prompt/associated-assistant evidence for a fake probe."""
         return [
             {"id": "prompt-1", "role": "user", "parts": [{"type": "text", "text": "probe"}]},
@@ -571,7 +605,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 "id": "answer-1",
                 "role": "assistant",
                 "parentID": "prompt-1",
-                "parts": [{"type": "structured_output", "value": {}}],
+                "parts": [{"type": "structured_output", "value": {} if result is None else result}],
             },
         ]
 
@@ -601,7 +635,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                             "idle", self._terminal_messages(), result, False, False, True
                         )
                     ],
-                    transcript_messages=self._terminal_messages(),
+                    transcript_messages=self._terminal_messages(result),
                 )
                 with self.assertRaises(ControllerError) as context:
                     _run(str(root), "http://127.0.0.1:4096", runner=fake)
@@ -618,6 +652,55 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 self.assertEqual(metadata["status"], status)
                 self.assertEqual(metadata["result"], {"available": True, "status": status})
                 self.assertEqual(load_config(root).sprint, 1)
+
+    def test_persistence_reader_cross_validates_invocation_artifacts(self) -> None:
+        """Missing and contradictory terminal artifacts fail as invocation-record corruption."""
+        from opencode_sprint_loop.cli import _run
+        from opencode_sprint_loop.config import load_config
+        from opencode_sprint_loop.paths import runtime_paths
+        from opencode_sprint_loop.status import validate_persistence
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        for corruption in ("missing_transcript", "result_status", "transcript_session"):
+            with self.subTest(corruption=corruption):
+                fixture = SprintRepositoryFixture()
+                root = fixture.create()
+                self.addCleanup(fixture.close)
+                fake = FakeAgentRunner(
+                    ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+                    observations=[
+                        InvocationObservation(
+                            "idle", self._terminal_messages(), completed, False, False, True
+                        )
+                    ],
+                    transcript_messages=self._terminal_messages(completed),
+                )
+                self.assertEqual(_run(str(root), "http://127.0.0.1:4096", runner=fake), 4)
+                directory = root / "invocations/foundation/1/0001-auditor"
+                if corruption == "missing_transcript":
+                    (directory / "transcript.json").unlink()
+                elif corruption == "result_status":
+                    result = json.loads((directory / "result.json").read_text())
+                    result["status"] = "blocked"
+                    result["blocking_reason"] = "synthetic contradiction"
+                    (directory / "result.json").write_text(json.dumps(result) + "\n")
+                else:
+                    transcript = json.loads((directory / "transcript.json").read_text())
+                    transcript["session_id"] = "ses_other"
+                    (directory / "transcript.json").write_text(json.dumps(transcript) + "\n")
+                config = load_config(root)
+                with self.assertRaises(ControllerError) as context:
+                    validate_persistence(
+                        runtime_paths(root, config.multisprint, config.sprint), config
+                    )
+                self.assertEqual(context.exception.code, "inconsistent_invocation_record")
 
     def test_unexpected_probe_repository_change_is_preserved_and_blocks(self) -> None:
         """Post-probe Git verification reports but never repairs an accidental agent edit."""
@@ -641,7 +724,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     "idle", self._terminal_messages(), completed, False, False, True
                 )
             ],
-            transcript_messages=self._terminal_messages(),
+            transcript_messages=self._terminal_messages(completed),
         )
         original_submit = fake.submit_prompt
 
@@ -659,8 +742,8 @@ class OpenCodeExecutionTests(unittest.TestCase):
         state = json.loads((root / "info/foundation/1/state.json").read_text())
         self.assertEqual(state["reason"]["code"], "unexpected_agent_repository_change")
 
-    def test_transcript_failure_after_result_keeps_completed_metadata(self) -> None:
-        """A result artifact is never contradicted when later transcript capture fails."""
+    def test_transcript_failure_prevents_result_acceptance(self) -> None:
+        """Required terminal transcript failure interrupts before accepting a result."""
         from tests.integration.test_foundation import SprintRepositoryFixture
         from opencode_sprint_loop.cli import _run
 
@@ -694,11 +777,12 @@ class OpenCodeExecutionTests(unittest.TestCase):
             json.loads(line)
             for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()
         ]
-        self.assertEqual(metadata["status"], "completed")
-        self.assertEqual(metadata["result"], {"available": True, "status": "completed"})
+        self.assertEqual(metadata["status"], "interrupted")
+        self.assertEqual(metadata["result"], {"available": False, "status": None})
         self.assertEqual(metadata["transcript"]["status"], "unavailable")
-        self.assertTrue((directory / "result.json").is_file())
-        self.assertNotIn("agent.interrupted", [event["type"] for event in events])
+        self.assertFalse((directory / "result.json").exists())
+        self.assertNotIn("agent.completed", [event["type"] for event in events])
+        self.assertEqual(events[-2]["type"], "agent.interrupted")
 
     def test_terminal_result_without_associated_assistant_evidence_is_interrupted(self) -> None:
         """Idle structured output without sole-prompt assistant evidence cannot pass."""
@@ -731,6 +815,96 @@ class OpenCodeExecutionTests(unittest.TestCase):
             for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()
         ]
         self.assertIn("agent.interrupted", [event["type"] for event in events])
+
+    def test_unhashable_result_status_uses_durable_invalid_result_path(self) -> None:
+        """List and object statuses cannot escape result failure persistence as TypeError."""
+        from opencode_sprint_loop.cli import _run
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        for status in ([], {}):
+            with self.subTest(status=status):
+                fixture = SprintRepositoryFixture()
+                root = fixture.create()
+                self.addCleanup(fixture.close)
+                malformed = {
+                    "schema_version": 1,
+                    "status": status,
+                    "summary": "ok",
+                    "checks": [],
+                    "blocking_reason": None,
+                }
+                fake = FakeAgentRunner(
+                    ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+                    observations=[
+                        InvocationObservation(
+                            "idle", self._terminal_messages(), malformed, False, False, True
+                        ),
+                        InvocationObservation("idle", [], None, False, False),
+                    ],
+                    transcript_messages=self._terminal_messages(),
+                )
+                with self.assertRaises(ControllerError) as context:
+                    _run(str(root), "http://127.0.0.1:4096", runner=fake)
+                self.assertEqual(context.exception.code, "invalid_agent_result")
+                metadata = json.loads(
+                    (root / "invocations/foundation/1/0001-auditor/metadata.json").read_text()
+                )
+                events = [
+                    json.loads(line)
+                    for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()
+                ]
+                state = json.loads((root / "info/foundation/1/state.json").read_text())
+                self.assertEqual(metadata["status"], "interrupted")
+                self.assertFalse(
+                    (root / "invocations/foundation/1/0001-auditor/result.json").exists()
+                )
+                self.assertEqual(events[-2]["type"], "agent.interrupted")
+                self.assertEqual(events[-1]["type"], "run.blocked")
+                self.assertEqual(state["reason"]["code"], "invalid_agent_result")
+
+    def test_delayed_transcript_tool_evidence_prevents_probe_success(self) -> None:
+        """A forbidden tool appearing only in final transcript capture fails closed."""
+        from opencode_sprint_loop.cli import _run
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        fixture = SprintRepositoryFixture()
+        root = fixture.create()
+        self.addCleanup(fixture.close)
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        transcript = self._terminal_messages()
+        transcript[1]["parts"].append({"type": "tool", "tool": "shell"})  # type: ignore[union-attr]
+        fake = FakeAgentRunner(
+            ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+            observations=[
+                InvocationObservation(
+                    "idle", self._terminal_messages(), completed, False, False, True
+                ),
+                InvocationObservation("idle", [], None, False, False),
+            ],
+            transcript_messages=transcript,
+        )
+        with self.assertRaises(ControllerError) as context:
+            _run(str(root), "http://127.0.0.1:4096", runner=fake)
+        self.assertEqual(context.exception.code, "unexpected_probe_tool")
+        directory = root / "invocations/foundation/1/0001-auditor"
+        metadata = json.loads((directory / "metadata.json").read_text())
+        events = [
+            json.loads(line)
+            for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()
+        ]
+        state = json.loads((root / "info/foundation/1/state.json").read_text())
+        self.assertFalse((directory / "result.json").exists())
+        self.assertEqual(metadata["status"], "interrupted")
+        self.assertEqual(metadata["transcript"]["status"], "unavailable")
+        self.assertNotIn("agent.completed", [event["type"] for event in events])
+        self.assertEqual(events[-2]["type"], "agent.interrupted")
+        self.assertEqual(state["reason"]["code"], "unexpected_probe_tool")
 
     def test_missing_structured_output_fails_immediately_without_corrective_retry(self) -> None:
         """A terminal free-form answer is invalid output and takes the one-abort path."""
@@ -930,7 +1104,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     "idle", self._terminal_messages(), completed, False, False, True
                 )
             ],
-            transcript_messages=self._terminal_messages(),
+            transcript_messages=self._terminal_messages(completed),
         )
         original_metadata = cli.write_metadata
 
@@ -963,6 +1137,14 @@ class OpenCodeExecutionTests(unittest.TestCase):
         self.assertNotIn("agent.completed", [event["type"] for event in events])
         self.assertNotIn("agent.interrupted", [event["type"] for event in events])
         self.assertNotIn("run.blocked", [event["type"] for event in events])
+        from opencode_sprint_loop.config import load_config
+        from opencode_sprint_loop.paths import runtime_paths
+        from opencode_sprint_loop.status import validate_persistence
+
+        config = load_config(root)
+        state, _ = validate_persistence(runtime_paths(root, "foundation", 1), config)
+        self.assertEqual(state["state"], "validating")
+        self.assertIsNotNone(state["active_invocation"])
 
     def test_timeout_aborts_once_before_terminal_interruption_persistence(self) -> None:
         """A monotonic timeout runs the one-abort cleanup path exactly once."""

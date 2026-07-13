@@ -223,10 +223,10 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S2-INV-009** Retain known session identity and prior complete fields across updates.
 - [x] **S2-INV-010** Record unavailable result/transcript evidence accurately after failure or interruption.
 - [x] **S2-INV-011** Permit terminal infrastructure-failed metadata with null session/start values after definitive or ambiguous creation failure.
-- [ ] **S2-INV-012** Cross-validate run, invocation, sequence, role, model, session, server, path, result, and transcript identities across every durable record.
-- [ ] **S2-INV-013** Require result-file existence/status and transcript-file existence/status/truncation to agree exactly with metadata and terminal events.
+- [x] **S2-INV-012** Cross-validate run, invocation, sequence, role, model, session, server, path, result, and transcript identities across every durable record.
+- [x] **S2-INV-013** Require result-file existence/status and transcript-file existence/status/truncation to agree exactly with metadata and terminal events.
 - [x] **S2-INV-014** Persist terminal records in result, transcript, metadata, agent-event/state, then run-block order, skipping unavailable artifacts explicitly.
-- [ ] **S2-INV-015** Accept only documented in-progress ordering prefixes and fail impossible or contradictory combinations as `inconsistent_invocation_record` without repair.
+- [x] **S2-INV-015** Accept only documented in-progress ordering prefixes and fail impossible or contradictory combinations as `inconsistent_invocation_record` without repair.
 
 ## 18. Prompt, Result, and Transcript Artifacts
 

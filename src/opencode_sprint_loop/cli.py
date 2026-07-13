@@ -635,10 +635,18 @@ def _run(
                 raise ControllerError(
                     "invocation_timed_out", "OpenCode invocation exceeded its configured timeout"
                 )
-            write_result(invocation_paths, result)
-            transcript_status, transcript_truncated, transcript_error = _capture_transcript(
-                effective_runner, session, invocation_paths
+            # Re-fetch and validate the durable transcript before accepting the
+            # earlier polling observation. The server may expose delayed tool
+            # or permission evidence only in this later message response.
+            capture = effective_runner.transcript(session)
+            wrapper = transcript_wrapper(
+                session.session_id, capture.messages, expected_result=result
             )
+            write_result(invocation_paths, result)
+            write_transcript(invocation_paths, wrapper)
+            transcript_status = "truncated" if wrapper["truncated"] else "complete"
+            transcript_truncated = bool(wrapper["truncated"])
+            transcript_error = None
             metadata.update(
                 {
                     "status": result["status"],

@@ -451,10 +451,19 @@ def fake_server_runner(server_url: str) -> FakeAgentRunner:
         "checks": [],
         "blocking_reason": None,
     }
+    messages = [
+        {"id": "prompt-1", "role": "user", "parts": [{"type": "text", "text": "probe"}]},
+        {
+            "id": "answer-1",
+            "role": "assistant",
+            "parentID": "prompt-1",
+            "parts": [{"type": "structured_output", "value": result}],
+        },
+    ]
     return FakeAgentRunner(
         ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
-        observations=[InvocationObservation("idle", [], result, False, False, True)],
-        transcript_messages=[],
+        observations=[InvocationObservation("idle", messages, result, False, False, True)],
+        transcript_messages=messages,
     )
 
 

@@ -46,7 +46,11 @@ def parse_server_url(value: str) -> str:
         )
     try:
         parsed = urlsplit(value)
+        if parsed.netloc.rsplit("@", 1)[-1].endswith(":"):
+            raise ControllerError("invalid_server_url", "Server URL has an empty port")
         port = parsed.port
+    except ControllerError:
+        raise
     except ValueError as error:
         raise ControllerError("invalid_server_url", "Server URL has an invalid port") from error
     if (

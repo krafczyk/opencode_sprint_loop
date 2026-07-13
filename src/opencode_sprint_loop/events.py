@@ -195,6 +195,7 @@ def validate_event_history(events: list[dict[str, Any]]) -> None:
     previous = "initializing"
     server_validated = False
     probe_started = False
+    probe_identity: tuple[str, str, str] | None = None
     probe_terminal: str | None = None
     for event in events[1:]:
         destination = event["state"]
@@ -244,9 +245,17 @@ def validate_event_history(events: list[dict[str, Any]]) -> None:
                             "corrupt_event_log", "Agent start event order is invalid"
                         )
                     probe_started = True
+                    probe_identity = (
+                        payload["invocation_id"],
+                        payload["role"],
+                        payload["session_id"],
+                    )
                 elif event["type"] == "agent.completed":
                     if (
                         not probe_started
+                        or probe_terminal is not None
+                        or probe_identity
+                        != (payload["invocation_id"], payload["role"], payload["session_id"])
                         or set(payload) != required | {"result_status"}
                         or payload["result_status"] not in {"completed", "blocked", "failed"}
                     ):
@@ -259,6 +268,9 @@ def validate_event_history(events: list[dict[str, Any]]) -> None:
                     interruption = payload.get("interruption")
                     if (
                         not probe_started
+                        or probe_terminal is not None
+                        or probe_identity
+                        != (payload["invocation_id"], payload["role"], payload["session_id"])
                         or set(payload) != required | {"interruption", "abort_acknowledged"}
                         or not isinstance(interruption, dict)
                         or set(interruption) != {"code", "message", "details"}
