@@ -268,15 +268,15 @@ These variables contain no credentials; Basic authentication remains inherited
 through the OpenCode variables documented above. The complete real-server exit
 demonstration additionally runs `sprint-loop run`, observes its fresh session in
 an ordinary OpenCode client, and checks the invocation records and final block.
-The installed OpenCode `1.17.18` build tested on 2026-07-13 accepted a structured
-probe but then returned HTTP 400 from its message-list endpoint because its own
-persisted `json_schema` format included a default `retryCount` rejected by its
-response validator. Omitting the optional hint still triggers that default, and
-supplying it repeats the rejected stored field, so no controller-side
-schema-compatible workaround is available. A supported server build with a
-corrected message-list response is required for the complete real-server
-demonstration; until then the controller fails closed without treating missing
-result/transcript evidence as success.
+Real exercises on 2026-07-13 of OpenCode `1.17.18` and the then-current
+`1.17.20` release both accepted a structured probe but returned HTTP 400 from
+the message-list endpoint. Their persisted `json_schema` format included a
+default `retryCount` rejected by the server's own response validator. Omitting
+the optional hint still triggers that default, and supplying it repeats the
+rejected stored field, so no controller-side schema-compatible workaround is
+available. A supported server build with a corrected message-list response is
+required for the complete real-server demonstration; until then the controller
+fails closed without treating missing result/transcript evidence as success.
 Builder handoff, commits, audits, CI, functional controls/recovery, and Neovim
 remain deliberately unimplemented.
 

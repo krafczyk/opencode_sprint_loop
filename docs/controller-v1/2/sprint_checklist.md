@@ -529,8 +529,46 @@ result/transcript demonstration; **S2-DEMO-002** through **S2-DEMO-010** and
 Restart investigation found two externally managed healthy OpenCode `1.17.18`
 servers, but their default workspaces were the controller source repository and
 an unrelated repository, not a clean Sprint 2 fixture. The controller was not
-run against either server. The supported real-server success demonstration
-therefore remains blocked on a compatible server rooted at the fixture.
+run against either server.
+
+On 2026-07-13, the complete demonstration was retried with an externally
+launched, authenticated OpenCode `1.17.20` server, the then-current
+`opencode-ai` release. The server was started outside the controller from a
+clean temporary real-submodule fixture using `serve --pure --hostname
+127.0.0.1 --port 59761`; synthetic Basic credentials were inherited only by
+the server and controller processes. The fixture contained project-local
+`builder`, `auditor`, and `ci-fixer` agents and configured all roles for the
+advertised `openai/gpt-5.6-sol` model. The opt-in real preflight passed. The
+server's bootstrap generated ignored `.opencode` dependency artifacts, which
+were allowed to settle and removed from this disposable fixture before the
+controller's clean-worktree preflight; no server behavior was patched or
+substituted.
+
+The installed controller was given only the credential-free localhost origin.
+It created the fresh titled `0001-auditor` session; while it was active, status
+reported role `auditor`, invocation `0001-auditor`, and a non-empty session ID,
+and the ordinary server session collection contained that title. The server
+then rejected `GET /session/<id>/message` with HTTP 400 because its stored
+`json_schema` format contained default `retryCount: 2`, the same incompatibility
+seen on `1.17.18`. The controller recorded ordered events
+`run.started`, `state.entered`, `server.validated`, `agent.started`,
+`agent.interrupted`, and `run.blocked`, preserved the known session identity,
+and exited `blocked/server_unavailable` (status 2). `prompt.md` and terminal
+metadata were present, but no validated `result.json` or sanitized
+`transcript.json` could be captured; this is a failed-closed demonstration, not
+`execution_not_implemented` success. Both Git heads and the managed worktree
+were unchanged; the sprint repository contained only the expected uncommitted
+Sprint 2 runtime records. The server was stopped and all generated fixtures,
+logs, transcripts, and synthetic credentials must remain untracked and be
+removed after recording this summary.
+
+Registry metadata queried on the same date listed releases `1.17.0` through
+`1.17.20` and identified `1.17.20` as current. The two exercised compatible
+builds (`1.17.18` and `1.17.20`) both reproduce the message-list failure, so no
+genuinely compatible available release was demonstrated. **S2-DEMO-002**
+through **S2-DEMO-010** and **S2-DONE-011** remain unchecked pending a
+supported release that can serve its stored structured prompt through the
+documented message endpoint.
 
 ## 30. Completion Gate
 
