@@ -22,7 +22,6 @@ from .agent_runner import (
     InvocationObservation,
     InvocationRequest,
     ServerValidationRequest,
-    TranscriptCapture,
     ValidatedServer,
 )
 from .errors import ControllerError
@@ -479,19 +478,27 @@ class OpenCodeServerRunner:
         return CreatedSession(identifier, title, directory, _PERMISSIONS)
 
     @staticmethod
-    def _consistent_alias(response: dict[str, Any], first: str, second: str) -> Any:
+    def _consistent_alias(
+        response: dict[str, Any], first: str, second: str, *, code: str = "session_creation_failed"
+    ) -> Any:
         """Return one API spelling while rejecting contradictory duplicate aliases."""
         if first in response and second in response and response[first] != response[second]:
             raise ControllerError(
-                "session_creation_failed",
+                code,
                 "Created session contains inconsistent compatibility fields",
             )
         return response[first] if first in response else response.get(second)
 
-    def submit_prompt(
+    def execute_prompt(
         self, session: CreatedSession, request: InvocationRequest, *, deadline: float | None = None
-    ) -> None:
-        """Submit the fixed structured-output request after session durability is complete."""
+    ) -> InvocationObservation:
+        """Synchronously submit one structured prompt and retain its assistant response.
+
+        This deliberately uses the documented ``POST /message`` route rather
+        than the broken message-list endpoint.  The returned assistant object
+        is retained verbatim; only the exact persisted user prompt is
+        reconstructed, bound by the assistant's returned parent ID.
+        """
         provider_id, _, model_id = request.model.partition("/")
         schema = {
             "type": "object",
@@ -508,7 +515,7 @@ class OpenCodeServerRunner:
         try:
             response = self._request(
                 "POST",
-                f"/session/{quote(session.session_id, safe='')}/prompt_async",
+                f"/session/{quote(session.session_id, safe='')}/message",
                 {
                     "agent": request.role,
                     "model": {"providerID": provider_id, "modelID": model_id},
@@ -524,35 +531,98 @@ class OpenCodeServerRunner:
                     "prompt_submission_failed", "Probe prompt submission outcome is unknown"
                 ) from error
             raise
-        if not (
-            response is None
-            or response == {}
-            or (isinstance(response, dict) and response.get("accepted") is True)
-        ):
+        if not isinstance(response, dict):
             raise ControllerError(
-                "prompt_submission_failed", "OpenCode did not accept the asynchronous probe prompt"
+                "prompt_submission_failed", "OpenCode did not return an assistant probe response"
             )
+        return self._synchronous_response(response, request)
 
-    def _messages(
-        self, session: CreatedSession, *, deadline: float | None = None
-    ) -> list[dict[str, Any]]:
-        """Fetch the documented message collection without interpreting prose as output."""
-        response = self._request(
-            "GET", f"/session/{quote(session.session_id, safe='')}/message", deadline=deadline
-        )
-        messages = response.get("messages") if isinstance(response, dict) else response
-        if not isinstance(messages, list) or not all(
-            isinstance(message, dict) for message in messages
-        ):
-            raise ControllerError(
-                "malformed_server_response", "OpenCode message response is invalid"
-            )
-        return messages
-
-    def observe(
-        self, session: CreatedSession, *, deadline: float | None = None
+    def _synchronous_response(
+        self, message: dict[str, Any], request: InvocationRequest
     ) -> InvocationObservation:
-        """Read one status map and message collection, detecting structured and tool evidence."""
+        """Validate terminal response and reconstruct its one directly bound user prompt."""
+        raw_info = message.get("info")
+        if not isinstance(raw_info, dict):
+            raise ControllerError(
+                "malformed_server_response", "OpenCode assistant response lacks info"
+            )
+        info = raw_info
+        role = message.get("role", info.get("role"))
+        parent = self._consistent_alias(
+            message, "parentID", "parent_id", code="malformed_server_response"
+        )
+        info_parent = self._consistent_alias(
+            info, "parentID", "parent_id", code="malformed_server_response"
+        )
+        if parent is not None and info_parent is not None and parent != info_parent:
+            raise ControllerError(
+                "malformed_server_response",
+                "OpenCode assistant response has conflicting parent IDs",
+            )
+        parent = parent if parent is not None else info_parent
+        provider_id, _, model_id = request.model.partition("/")
+        if (
+            role != "assistant"
+            or not _bounded_identifier(parent)
+            or info.get("agent") != request.role
+            or info.get("providerID") != provider_id
+            or info.get("modelID") != model_id
+            or not isinstance(message.get("parts"), list)
+        ):
+            raise ControllerError(
+                "malformed_server_response", "OpenCode assistant response identity is invalid"
+            )
+        values: list[Any] = []
+        for key in ("structured", "structured_output"):
+            if key in info and info[key] is not None:
+                values.append(info[key])
+        if message.get("structured_output") is not None:
+            values.append(message["structured_output"])
+        structured_error = False
+        unexpected_tool = False
+        for part in message["parts"]:
+            if not isinstance(part, dict) or not isinstance(part.get("type"), str):
+                raise ControllerError(
+                    "malformed_server_response", "OpenCode message part is invalid"
+                )
+            kind = part["type"]
+            if kind in {"structured_output", "json_schema"}:
+                values.append(part.get("value", part.get("output")))
+            if kind == "permission":
+                unexpected_tool = True
+            if kind == "tool":
+                tool = part.get("tool", part.get("name"))
+                if tool == "StructuredOutputError":
+                    structured_error = True
+                elif tool != "StructuredOutput":
+                    unexpected_tool = True
+        error = info.get("error", message.get("error"))
+        if error == "StructuredOutputError" or (
+            isinstance(error, dict) and error.get("name") == "StructuredOutputError"
+        ):
+            structured_error = True
+        if len(values) > 1:
+            raise ControllerError(
+                "malformed_server_response",
+                "OpenCode message has conflicting structured output aliases",
+            )
+        return InvocationObservation(
+            "idle",
+            [
+                {"id": parent, "role": "user", "parts": [{"type": "text", "text": request.prompt}]},
+                message,
+            ],
+            values[0] if values else None,
+            structured_error,
+            unexpected_tool,
+            True,
+            error is not None,
+        )
+
+    def observe_status(
+        self, session: CreatedSession, *, deadline: float | None = None
+    ) -> str | None:
+        """Read one documented status-map entry only for bounded abort confirmation."""
         status_response = self._request("GET", "/session/status", deadline=deadline)
         statuses = (
             status_response.get("statuses", status_response)
@@ -574,103 +644,7 @@ class OpenCodeServerRunner:
             status = value["type"]
         if status is not None and not isinstance(status, str):
             raise ControllerError("malformed_server_response", "OpenCode session status is invalid")
-        messages = self._messages(session, deadline=deadline)
-        result: Any | None = None
-        structured_error = False
-        unexpected_tool = False
-        terminal_assistant_error = False
-        user_messages: list[tuple[int, str]] = []
-        assistant_messages: list[tuple[int, dict[str, Any]]] = []
-        assistant_results: list[tuple[int, dict[str, Any], Any]] = []
-        for index, message in enumerate(messages):
-            raw_info = message.get("info")
-            info: dict[str, Any] = raw_info if isinstance(raw_info, dict) else {}
-            role = message.get("role", info.get("role"))
-            identifier = message.get("id", info.get("id"))
-            if role == "user" and isinstance(identifier, str) and identifier:
-                user_messages.append((index, identifier))
-            if role == "assistant":
-                assistant_messages.append((index, message))
-            message_results: list[Any] = []
-            if info.get("structured") is not None:
-                message_results.append(info["structured"])
-            for part in (
-                message.get("parts", []) if isinstance(message.get("parts", []), list) else []
-            ):
-                if not isinstance(part, dict):
-                    raise ControllerError(
-                        "malformed_server_response", "OpenCode message part is invalid"
-                    )
-                kind = part.get("type")
-                if kind in {"structured_output", "json_schema"}:
-                    message_results.append(part.get("value", part.get("output")))
-                if kind == "tool":
-                    tool = part.get("tool", part.get("name"))
-                    if tool == "StructuredOutputError":
-                        structured_error = True
-                    elif tool != "StructuredOutput":
-                        unexpected_tool = True
-                if kind == "permission":
-                    unexpected_tool = True
-            if message.get("structured_output") is not None:
-                message_results.append(message["structured_output"])
-            message_error = info.get("error", message.get("error"))
-            if message_error == "StructuredOutputError" or (
-                isinstance(message_error, dict)
-                and message_error.get("name") == "StructuredOutputError"
-            ):
-                structured_error = True
-            if len(message_results) > 1:
-                raise ControllerError(
-                    "malformed_server_response",
-                    "OpenCode message has conflicting structured output",
-                )
-            if message_results:
-                assistant_results.append((index, message, message_results[0]))
-        terminal_assistant = False
-        if len(user_messages) == 1:
-            user_index, user_id = user_messages[0]
-            terminal_candidates: list[tuple[int, dict[str, Any]]] = []
-            for assistant_index, assistant in assistant_messages:
-                raw_assistant_info = assistant.get("info")
-                assistant_info: dict[str, Any] = (
-                    raw_assistant_info if isinstance(raw_assistant_info, dict) else {}
-                )
-                parent = assistant.get(
-                    "parentID",
-                    assistant.get(
-                        "parent_id",
-                        assistant_info.get("parentID", assistant_info.get("parent_id")),
-                    ),
-                )
-                if assistant_index > user_index and parent == user_id:
-                    terminal_candidates.append((assistant_index, assistant))
-            if len(terminal_candidates) == 1:
-                terminal_assistant = True
-                assistant_index, assistant = terminal_candidates[0]
-                raw_assistant_info = assistant.get("info")
-                assistant_info = raw_assistant_info if isinstance(raw_assistant_info, dict) else {}
-                terminal_assistant_error = (
-                    assistant_info.get("error", assistant.get("error")) is not None
-                )
-                terminal_results = [
-                    value
-                    for index, _message, value in assistant_results
-                    if index == assistant_index
-                ]
-                if len(terminal_results) == 1:
-                    result = terminal_results[0]
-        if result is None and assistant_results:
-            result = assistant_results[-1][2]
-        return InvocationObservation(
-            status,
-            messages,
-            result,
-            structured_error,
-            unexpected_tool,
-            terminal_assistant,
-            terminal_assistant_error,
-        )
+        return status
 
     def abort(self, session: CreatedSession) -> AbortObservation:
         """Issue one documented abort request; its response is acknowledgement only."""
@@ -681,9 +655,3 @@ class OpenCodeServerRunner:
                 "OpenCode abort response is not a boolean acknowledgement",
             )
         return AbortObservation(response)
-
-    def transcript(
-        self, session: CreatedSession, *, deadline: float | None = None
-    ) -> TranscriptCapture:
-        """Return the raw message array for bounded controller-side persistence."""
-        return TranscriptCapture(self._messages(session, deadline=deadline))

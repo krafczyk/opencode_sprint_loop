@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -86,23 +87,18 @@ class AgentRunner(Protocol):
     def create_session(self, request: InvocationRequest) -> CreatedSession:
         """Create exactly one fresh, non-mutating session without submitting work."""
 
-    def submit_prompt(
+    def execute_prompt(
         self, session: CreatedSession, request: InvocationRequest, *, deadline: float | None = None
-    ) -> None:
-        """Submit the one asynchronous structured-output prompt within its deadline."""
-
-    def observe(
-        self, session: CreatedSession, *, deadline: float | None = None
     ) -> InvocationObservation:
-        """Return one bounded session status/message observation within its deadline."""
+        """Synchronously submit one prompt and return its terminal assistant evidence."""
+
+    def observe_status(
+        self, session: CreatedSession, *, deadline: float | None = None
+    ) -> str | None:
+        """Return one bounded status observation solely for abort confirmation."""
 
     def abort(self, session: CreatedSession) -> AbortObservation:
         """Request one best-effort cooperative abort for an active session."""
-
-    def transcript(
-        self, session: CreatedSession, *, deadline: float | None = None
-    ) -> TranscriptCapture:
-        """Retrieve bounded raw message evidence within its deadline."""
 
 
 class FakeAgentRunner:
@@ -173,27 +169,67 @@ class FakeAgentRunner:
         self.created.append(session)
         return session
 
-    def submit_prompt(
+    def execute_prompt(
         self, session: CreatedSession, request: InvocationRequest, *, deadline: float | None = None
-    ) -> None:
-        """Record a prompt submission without performing external work."""
+    ) -> InvocationObservation:
+        """Return the next terminal scripted response without transport I/O."""
         self.submitted.append(session.session_id)
         del request, deadline
         if self.submit_error is not None:
             raise self.submit_error
+        if self.observations:
+            observation = self.observations.pop(0)
+            if isinstance(observation, Exception):
+                raise observation
+            if self.transcript_messages:
+                messages = deepcopy(self.transcript_messages)
+                if observation.structured_result is not None:
+                    for message in messages:
+                        info = message.get("info")
+                        if isinstance(info, dict):
+                            for key in ("structured", "structured_output"):
+                                if key in info:
+                                    info[key] = observation.structured_result
+                        for part in message.get("parts", []):
+                            if isinstance(part, dict) and part.get("type") in {
+                                "structured_output",
+                                "json_schema",
+                            }:
+                                part["value"] = observation.structured_result
+                return replace(observation, messages=messages)
+            return observation
+        from .errors import ControllerError
 
-    def observe(
+        raise ControllerError("invocation_timed_out", "Fake synchronous response was not scripted")
+
+    def observe_status(
         self, session: CreatedSession, *, deadline: float | None = None
-    ) -> InvocationObservation:
-        """Return scripted observations in order, retaining pending state when exhausted."""
+    ) -> str | None:
+        """Return scripted status only for bounded abort confirmation."""
         del session
         self.observation_deadlines.append(deadline)
         if self.observations:
             observation = self.observations.pop(0)
             if isinstance(observation, Exception):
                 raise observation
-            return observation
-        return InvocationObservation("busy", [], None, False, False)
+            return observation.status
+        return "idle"
+
+    # Retained only for older fake-focused callers; controller execution uses
+    # execute_prompt and never performs normal observation polling.
+    def submit_prompt(
+        self, session: CreatedSession, request: InvocationRequest, *, deadline: float | None = None
+    ) -> InvocationObservation:
+        """Compatibility wrapper for one scripted synchronous response."""
+        return self.execute_prompt(session, request, deadline=deadline)
+
+    def observe(
+        self, session: CreatedSession, *, deadline: float | None = None
+    ) -> InvocationObservation:
+        """Compatibility status wrapper without HTTP message retrieval."""
+        return InvocationObservation(
+            self.observe_status(session, deadline=deadline), [], None, False, False
+        )
 
     def abort(self, session: CreatedSession) -> AbortObservation:
         """Record a scripted abort acknowledgement."""
@@ -201,12 +237,3 @@ class FakeAgentRunner:
         if self.abort_error is not None:
             raise self.abort_error
         return AbortObservation(self.abort_acknowledged)
-
-    def transcript(
-        self, session: CreatedSession, *, deadline: float | None = None
-    ) -> TranscriptCapture:
-        """Return the scripted transcript independently of observations."""
-        del session, deadline
-        if self.transcript_error is not None:
-            raise self.transcript_error
-        return TranscriptCapture(list(self.transcript_messages))

@@ -195,9 +195,46 @@ class _Handler(BaseHTTPRequestHandler):
             type(self).abort_requests += 1
             type(self).mode = "complete"
             self._json(True)
-        elif self.path.endswith("/prompt_async"):
+        elif self.path.endswith("/message"):
             type(self).last_prompt = json.loads(raw.decode())
-            self._json({"accepted": True})
+            while self.mode == "busy":
+                time.sleep(0.01)
+            result = {
+                "schema_version": 1,
+                "status": "completed",
+                "summary": "ok",
+                "checks": [],
+                "blocking_reason": None,
+            }
+            self._json(
+                {
+                    "info": {
+                        "id": "msg_assistant",
+                        "role": "assistant",
+                        "parentID": "msg_user",
+                        "agent": self.last_prompt["agent"],
+                        "providerID": self.last_prompt["model"]["providerID"],
+                        "modelID": self.last_prompt["model"]["modelID"],
+                        **(
+                            {"error": {"name": "StructuredOutputError"}}
+                            if self.mode == "structured_output_error"
+                            else {}
+                        ),
+                        **(
+                            {}
+                            if self.mode == "structured_output_error"
+                            else {"structured_output": result}
+                        ),
+                    },
+                    "parts": [
+                        *(
+                            [{"type": "tool", "tool": "shell"}]
+                            if self.mode == "unexpected_tool"
+                            else []
+                        )
+                    ],
+                }
+            )
         else:
             self.send_error(404)
 
@@ -358,44 +395,39 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 )
                 self.assertEqual(runner.existing_session_ids(), set())
                 session = runner.create_session(request)
-                runner.submit_prompt(session, request)
+                observation = runner.execute_prompt(session, request)
                 self.assertNotIn("retryCount", _Handler.last_prompt)  # type: ignore[operator]
                 self.assertNotIn("retryCount", _Handler.last_prompt["format"])  # type: ignore[index]
-                observation = runner.observe(session)
                 self.assertEqual(observation.structured_result["status"], "completed")
                 self.assertTrue(observation.terminal_assistant)
                 self.assertFalse(observation.terminal_assistant_error)
                 self.assertEqual(
                     transcript_wrapper(
                         session.session_id,
-                        runner.transcript(session).messages,
+                        observation.messages,
                         expected_result=observation.structured_result,
                     )["session_id"],
                     "ses_local",
                 )
                 validate_transcript_messages(
-                    runner.transcript(session).messages,
+                    observation.messages,
                     expected_result=observation.structured_result,
                     expected_prompt=request.prompt,
                     expected_role=request.role,
                     expected_model=request.model,
                 )
-                _Handler.mode = "busy"
-                self.assertEqual(runner.observe(session).status, "busy")
-                _Handler.mode = "retry"
-                self.assertEqual(runner.observe(session).status, "retry")
                 for mode in ("malformed_status_scalar", "malformed_status_missing_type"):
                     _Handler.mode = mode
                     with self.subTest(mode=mode), self.assertRaises(ControllerError) as context:
-                        runner.observe(session)
+                        runner.observe_status(session)
                     self.assertEqual(context.exception.code, "malformed_server_response")
                 _Handler.mode = "structured_output_error"
-                errored_observation = runner.observe(session)
+                errored_observation = runner.execute_prompt(session, request)
                 self.assertTrue(errored_observation.structured_error)
                 self.assertTrue(errored_observation.terminal_assistant)
                 self.assertTrue(errored_observation.terminal_assistant_error)
                 _Handler.mode = "unexpected_tool"
-                self.assertTrue(runner.observe(session).unexpected_tool)
+                self.assertTrue(runner.execute_prompt(session, request).unexpected_tool)
                 self.assertTrue(runner.abort(session).acknowledged)
                 self.assertEqual(_Handler.abort_requests, 1)
                 _Handler.mode = "surrogate_session_list"
@@ -845,7 +877,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
             ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
             observations=[
                 InvocationObservation(
-                    "idle", self._terminal_messages(), completed, False, False, True
+                    "idle", self._terminal_messages(completed), completed, False, False, True
                 )
             ],
             transcript_messages=self._terminal_messages(completed),
@@ -1082,20 +1114,21 @@ class OpenCodeExecutionTests(unittest.TestCase):
             ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
             observations=[
                 InvocationObservation(
-                    "idle", self._terminal_messages(), completed, False, False, True
+                    "idle", self._terminal_messages(completed), completed, False, False, True
                 )
             ],
             transcript_messages=self._terminal_messages(completed),
         )
-        original_submit = fake.submit_prompt
+        original_submit = fake.execute_prompt
 
         def mutate_after_submit(
             session: object, request: object, *, deadline: float | None = None
-        ) -> None:
-            original_submit(session, request, deadline=deadline)  # type: ignore[arg-type]
+        ) -> InvocationObservation:
+            response = original_submit(session, request, deadline=deadline)  # type: ignore[arg-type]
             (root / "repositories/managed/unexpected.txt").write_text("preserve me\n")
+            return response
 
-        with patch.object(fake, "submit_prompt", side_effect=mutate_after_submit):
+        with patch.object(fake, "execute_prompt", side_effect=mutate_after_submit):
             with self.assertRaises(ControllerError) as context:
                 _run(str(root), "http://127.0.0.1:4096", runner=fake)
         self.assertEqual(context.exception.code, "unexpected_agent_repository_change")
@@ -1124,28 +1157,24 @@ class OpenCodeExecutionTests(unittest.TestCase):
             ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
             observations=[
                 InvocationObservation(
-                    "idle", self._terminal_messages(), completed, False, False, True
+                    "idle", self._terminal_messages(completed), completed, False, False, True
                 )
             ],
             transcript_error=ControllerError(
                 "transcript_capture_failed", "Synthetic transcript failure"
             ),
         )
-        with self.assertRaises(ControllerError) as context:
-            _run(str(root), "http://127.0.0.1:4096", runner=fake)
-        self.assertEqual(context.exception.code, "transcript_capture_failed")
+        self.assertEqual(_run(str(root), "http://127.0.0.1:4096", runner=fake), 4)
         directory = root / "invocations/foundation/1/0001-auditor"
         metadata = json.loads((directory / "metadata.json").read_text())
         events = [
             json.loads(line)
             for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()
         ]
-        self.assertEqual(metadata["status"], "interrupted")
-        self.assertEqual(metadata["result"], {"available": False, "status": None})
-        self.assertEqual(metadata["transcript"]["status"], "unavailable")
-        self.assertFalse((directory / "result.json").exists())
-        self.assertNotIn("agent.completed", [event["type"] for event in events])
-        self.assertEqual(events[-2]["type"], "agent.interrupted")
+        self.assertEqual(metadata["status"], "completed")
+        self.assertEqual(metadata["transcript"]["status"], "complete")
+        self.assertTrue((directory / "result.json").exists())
+        self.assertIn("agent.completed", [event["type"] for event in events])
 
     def test_terminal_result_without_associated_assistant_evidence_is_interrupted(self) -> None:
         """Idle structured output without sole-prompt assistant evidence cannot pass."""
@@ -1171,7 +1200,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
         )
         with self.assertRaises(ControllerError) as context:
             _run(str(root), "http://127.0.0.1:4096", runner=fake)
-        self.assertEqual(context.exception.code, "invocation_failed")
+        self.assertEqual(context.exception.code, "transcript_capture_failed")
         self.assertEqual(fake.aborted, ["ses_fake_0001"])
         events = [
             json.loads(line)
@@ -1179,8 +1208,8 @@ class OpenCodeExecutionTests(unittest.TestCase):
         ]
         self.assertIn("agent.interrupted", [event["type"] for event in events])
 
-    def test_busy_retry_idle_missing_unknown_and_inconsistent_observations(self) -> None:
-        """Pending observations wait, while unknown and contradictory evidence fail closed."""
+    def test_synchronous_response_needs_no_normal_observation_polling(self) -> None:
+        """A terminal synchronous response completes without status or message polling."""
         from opencode_sprint_loop.cli import _run
         from tests.integration.test_foundation import SprintRepositoryFixture
 
@@ -1191,45 +1220,61 @@ class OpenCodeExecutionTests(unittest.TestCase):
             "checks": [],
             "blocking_reason": None,
         }
-        scenarios = {
-            "pending_then_complete": (
-                [
-                    InvocationObservation("busy", [], None, False, False),
-                    InvocationObservation("retry", [], None, False, False),
-                    InvocationObservation("idle", [], None, False, False),
-                    InvocationObservation(None, [], None, False, False),
-                    InvocationObservation(
-                        "idle", self._terminal_messages(), completed, False, False, True
-                    ),
-                ],
-                None,
-            ),
-            "unknown": (
-                [InvocationObservation("unexpected", [], None, False, False)],
-                "invocation_failed",
-            ),
-            "active_with_result": (
-                [InvocationObservation("busy", self._terminal_messages(), completed, False, False)],
-                "invocation_failed",
-            ),
-        }
-        for name, (observations, expected_error) in scenarios.items():
-            with self.subTest(scenario=name):
-                fixture = SprintRepositoryFixture()
-                root = fixture.create()
-                self.addCleanup(fixture.close)
-                fake = FakeAgentRunner(
-                    ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
-                    observations=observations,
-                    transcript_messages=self._terminal_messages(completed),
+        fixture = SprintRepositoryFixture()
+        root = fixture.create()
+        self.addCleanup(fixture.close)
+        fake = FakeAgentRunner(
+            ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+            observations=[
+                InvocationObservation(
+                    "idle", self._terminal_messages(completed), completed, False, False, True
                 )
-                with patch("opencode_sprint_loop.cli.time.sleep", return_value=None):
-                    if expected_error is None:
-                        self.assertEqual(_run(str(root), "http://127.0.0.1:4096", runner=fake), 4)
-                    else:
-                        with self.assertRaises(ControllerError) as context:
-                            _run(str(root), "http://127.0.0.1:4096", runner=fake)
-                        self.assertEqual(context.exception.code, expected_error)
+            ],
+        )
+        self.assertEqual(_run(str(root), "http://127.0.0.1:4096", runner=fake), 4)
+        self.assertEqual(fake.observation_deadlines, [])
+
+    def test_blocked_synchronous_worker_cancels_without_polling_or_waiting_for_shutdown(
+        self,
+    ) -> None:
+        """Cancellation aborts one daemon-held POST while the main thread blocks on a queue."""
+        from opencode_sprint_loop import cli
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        fixture = SprintRepositoryFixture()
+        root = fixture.create()
+        self.addCleanup(fixture.close)
+        fake = FakeAgentRunner(ValidatedServer("http://127.0.0.1:4096", "1.17.18"))
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_response(*_arguments: object, **_keywords: object) -> InvocationObservation:
+            entered.set()
+            release.wait(timeout=10)
+            return InvocationObservation("idle", [], None, False, False)
+
+        cancellation = cli._Cancellation()
+        original_abort = fake.abort
+
+        def abort_and_release(session: object) -> object:
+            release.set()
+            return original_abort(session)  # type: ignore[arg-type]
+
+        def request_cancel() -> None:
+            self.assertTrue(entered.wait(timeout=2))
+            cancellation.signal_number = signal.SIGINT
+
+        canceller = threading.Thread(target=request_cancel)
+        canceller.start()
+        with (
+            patch.object(fake, "execute_prompt", side_effect=blocked_response),
+            patch.object(fake, "abort", side_effect=abort_and_release),
+        ):
+            with self.assertRaises(cli._CancellationRequested):
+                cli._run(str(root), "http://127.0.0.1:4096", runner=fake, cancellation=cancellation)
+        canceller.join(timeout=2)
+        self.assertEqual(fake.aborted, ["ses_fake_0001"])
+        self.assertEqual(len(fake.observation_deadlines), 1)
 
     def test_abort_non_acknowledgement_is_persisted(self) -> None:
         """A false abort acknowledgement remains explicit interruption evidence."""
@@ -1313,14 +1358,14 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 "idle",
             ),
             (
-                "terminal",
+                "status_idle",
                 [
                     InvocationObservation("unexpected", [], None, False, False),
                     InvocationObservation(
                         "idle", self._terminal_messages(completed), completed, False, False, True
                     ),
                 ],
-                "terminal",
+                "idle",
             ),
             (
                 "unconfirmed",
@@ -1342,7 +1387,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 diagnostics = StringIO()
                 with redirect_stderr(diagnostics), self.assertRaises(ControllerError) as context:
                     _run(str(root), "http://127.0.0.1:4096", runner=fake)
-                self.assertEqual(context.exception.code, "invocation_failed")
+                self.assertEqual(context.exception.code, "invalid_agent_result")
                 if expected_confirmation is None:
                     self.assertIn(
                         "OpenCode cancellation could not be confirmed; the session may remain active.",
@@ -1376,8 +1421,8 @@ class OpenCodeExecutionTests(unittest.TestCase):
         with patch("opencode_sprint_loop.cli.time.sleep", return_value=None):
             with self.assertRaises(ControllerError) as context:
                 _run(str(root), "http://127.0.0.1:4096", runner=fake)
-        self.assertEqual(context.exception.code, "invocation_failed")
-        self.assertEqual(len(fake.observation_deadlines), 4)
+        self.assertEqual(context.exception.code, "invalid_agent_result")
+        self.assertEqual(len(fake.observation_deadlines), 3)
         self.assertTrue(all(deadline is not None for deadline in fake.observation_deadlines))
         self.assertEqual(len(set(fake.observation_deadlines[1:])), 1)
         events = [
@@ -2550,19 +2595,18 @@ class OpenCodeExecutionTests(unittest.TestCase):
         self.assertEqual(fake.existing_session_ids(), {"ses_duplicate"})
         session = fake.create_session(request)
         self.assertEqual(session.session_id, "ses_unique")
-        fake.submit_prompt(session, request)
+        fake.execute_prompt(session, request)
         self.assertEqual(
             [fake.observe(session).status for _ in range(5)],
             [
-                "busy",
                 "retry",
                 "idle",
                 None,
                 "unknown",
+                "idle",
             ],
         )
         self.assertFalse(fake.abort(session).acknowledged)
-        self.assertEqual(len(fake.transcript(session).messages), 1)
 
         sensitive_messages = [
             {
@@ -2577,13 +2621,8 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 ],
             }
         ]
-        evidence_fake = FakeAgentRunner(
-            ValidatedServer("http://127.0.0.1:1", "1.17.18"),
-            transcript_messages=sensitive_messages,
-        )
-        capture = evidence_fake.transcript(session)
         with patch("opencode_sprint_loop.invocations.MAX_STRING_BYTES", 64):
-            wrapper = transcript_wrapper(session.session_id, capture.messages)
+            wrapper = transcript_wrapper(session.session_id, sensitive_messages)
         self.assertIn("[REDACTED]", wrapper["content"])
         self.assertIn("[TRUNCATED]", wrapper["content"])
         self.assertTrue(wrapper["truncated"])
@@ -2593,7 +2632,6 @@ class OpenCodeExecutionTests(unittest.TestCase):
             "create_error": "session_creation_ambiguous",
             "submit_error": "prompt_submission_failed",
             "abort_error": "server_unavailable",
-            "transcript_error": "transcript_capture_failed",
         }
         for argument, code in operation_errors.items():
             scripted = FakeAgentRunner(
@@ -2610,8 +2648,6 @@ class OpenCodeExecutionTests(unittest.TestCase):
                         scripted.submit_prompt(session, request)
                     elif argument == "abort_error":
                         scripted.abort(session)
-                    else:
-                        scripted.transcript(session)
                 self.assertEqual(context.exception.code, code)
 
     def test_cancellation_after_create_aborts_known_session_before_submission(self) -> None:

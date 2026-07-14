@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import json
 import os
+import queue
 import secrets
 import signal
 import socket
@@ -44,7 +45,7 @@ from .invocations import (
 from .locking import ownership_lock, persistence_lock as persistence_advisory_lock
 from .paths import RuntimePaths, canonical_root, ensure_runtime_paths_safe, runtime_paths
 from .safeio import open_directory
-from .security import redact_diagnostic
+from .security import redact_diagnostic, validate_external_utf8
 from .state import _rename_exchange, new_state, process_start_identity, utc_now
 from .status import format_status, project_status, validate_persistence
 from .transitions import observe as persist_observation
@@ -338,12 +339,11 @@ def _terminal_metadata(
 
 
 def _capture_transcript(
-    runner: AgentRunner, session: CreatedSession, paths: InvocationPaths
+    session: CreatedSession, messages: list[dict[str, Any]], paths: InvocationPaths
 ) -> tuple[str, bool, ControllerError | None]:
-    """Best-effort capture after a terminal result or cancellation boundary."""
+    """Persist already-returned response evidence without message-list retrieval."""
     try:
-        capture = runner.transcript(session)
-        wrapper = transcript_wrapper(session.session_id, capture.messages)
+        wrapper = transcript_wrapper(session.session_id, messages)
         write_transcript(paths, wrapper)
         return (
             "truncated" if wrapper["truncated"] else "complete",
@@ -387,20 +387,15 @@ def _interrupt_active_invocation(
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         try:
-            observation = runner.observe(session, deadline=deadline)
+            status = runner.observe_status(session, deadline=deadline)
         except ControllerError:
             break
-        if observation.terminal_assistant:
-            confirmation = "terminal"
-            break
-        if observation.status == "idle":
+        if status == "idle":
             confirmation = "idle"
             break
         time.sleep(min(1, max(0, deadline - time.monotonic())))
     if transcript_evidence is None:
-        transcript_status, transcript_truncated, _ = _capture_transcript(
-            runner, session, invocation_paths
-        )
+        transcript_status, transcript_truncated = "unavailable", False
     else:
         transcript_status, transcript_truncated = transcript_evidence
     if confirmation is None:
@@ -440,6 +435,50 @@ def _interrupt_active_invocation(
         },
         {"active_invocation": None},
     )
+
+
+def _wait_for_synchronous_response(
+    runner: AgentRunner,
+    session: CreatedSession,
+    request: InvocationRequest,
+    deadline: float,
+    cancellation: _Cancellation,
+) -> Any:
+    """Wait without polling while a daemon worker owns one non-idempotent POST.
+
+    Socket I/O blocks in the worker and ``Queue.get`` blocks the controller
+    thread, so idle waiting consumes negligible CPU while wall-clock timeout is
+    still the configured monotonic invocation deadline.  The worker never
+    receives persistence objects and a late result is intentionally ignored.
+    """
+    completed: queue.Queue[tuple[Any | None, BaseException | None]] = queue.Queue(maxsize=1)
+
+    def invoke() -> None:
+        try:
+            completed.put((runner.execute_prompt(session, request, deadline=deadline), None))
+        except BaseException as error:  # pragma: no cover - normalized by caller
+            completed.put((None, error))
+
+    worker = threading.Thread(target=invoke, name="opencode-sync-prompt", daemon=True)
+    worker.start()
+    while True:
+        cancellation.check()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ControllerError(
+                "invocation_timed_out", "OpenCode invocation exceeded its configured timeout"
+            )
+        try:
+            observation, error = completed.get(timeout=min(0.25, remaining))
+        except queue.Empty:
+            continue
+        if error is not None:
+            if isinstance(error, ControllerError):
+                raise error
+            raise ControllerError(
+                "prompt_submission_failed", "OpenCode synchronous prompt failed"
+            ) from error
+        return observation
 
 
 def _run(
@@ -596,11 +635,20 @@ def _run(
             write_metadata(invocation_paths, metadata)
             cancellation.check()
             deadline = time.monotonic() + config.limits["invocation_timeout_seconds"]
-            effective_runner.submit_prompt(session, request, deadline=deadline)
-            result: dict[str, object] | None = None
-            while time.monotonic() < deadline:
-                cancellation.check()
-                observation = effective_runner.observe(session, deadline=deadline)
+            observation = _wait_for_synchronous_response(
+                effective_runner, session, request, deadline, cancellation
+            )
+            if observation.structured_result is not None:
+                validate_external_utf8(
+                    observation.structured_result,
+                    code="invalid_agent_result",
+                    label="OpenCode structured result",
+                )
+            # Preserve the complete returned assistant object before reporting
+            # semantic violations. Its paired user record is reconstructed from
+            # the exact prompt plus the returned assistant parent identifier.
+            wrapper = transcript_wrapper(session.session_id, observation.messages)
+            try:
                 if observation.unexpected_tool:
                     raise ControllerError(
                         "unexpected_probe_tool", "Execution probe attempted a forbidden tool"
@@ -613,61 +661,19 @@ def _run(
                     raise ControllerError(
                         "invocation_failed", "OpenCode terminal assistant message reported an error"
                     )
-                if observation.status not in {None, "busy", "retry", "idle"}:
-                    raise ControllerError(
-                        "invocation_failed", "OpenCode returned an unknown session status"
-                    )
-                if observation.structured_result is not None and observation.status in {
-                    "busy",
-                    "retry",
-                }:
-                    raise ControllerError(
-                        "invocation_failed",
-                        "OpenCode returned terminal output while the session remained active",
-                    )
-                if (
-                    observation.structured_result is not None
-                    and observation.status in {None, "idle"}
-                    and not observation.terminal_assistant
-                ):
-                    raise ControllerError(
-                        "invocation_failed",
-                        "OpenCode terminal result lacks an associated assistant message",
-                    )
-                if (
-                    observation.status in {None, "idle"}
-                    and observation.terminal_assistant
-                    and observation.structured_result is None
-                ):
+                if observation.structured_result is None:
                     raise ControllerError(
                         "invalid_agent_result",
                         "OpenCode terminal assistant message omitted structured output",
                     )
-                if (
-                    observation.structured_result is not None
-                    and observation.status in {None, "idle"}
-                    and observation.terminal_assistant
-                ):
-                    result = validate_result(observation.structured_result)
-                    break
-                time.sleep(1)
-            if result is None:
-                raise ControllerError(
-                    "invocation_timed_out", "OpenCode invocation exceeded its configured timeout"
-                )
-            # Re-fetch and validate the durable transcript before accepting the
-            # earlier polling observation. The server may expose delayed tool
-            # or permission evidence only in this later message response.
-            capture = effective_runner.transcript(session, deadline=deadline)
-            wrapper = transcript_wrapper(session.session_id, capture.messages)
-            try:
                 validate_transcript_messages(
-                    capture.messages,
-                    expected_result=result,
+                    observation.messages,
+                    expected_result=observation.structured_result,
                     expected_prompt=prompt,
                     expected_role=request.role,
                     expected_model=request.model,
                 )
+                result = validate_result(observation.structured_result)
             except ControllerError as transcript_semantic_error:
                 # Safe opaque evidence is retained before the semantic probe
                 # violation is reported through the interruption lifecycle.

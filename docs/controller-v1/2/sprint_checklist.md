@@ -24,7 +24,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S2-ARCH-004** Permit the controller to persist a session ID before prompt submission.
 - [x] **S2-ARCH-005** Add concise contract and side-effect docstrings to public Sprint 2 APIs.
 - [x] **S2-ARCH-006** Use monotonic time for invocation deadlines and UTC RFC 3339 timestamps for durable records.
-- [x] **S2-ARCH-007** Use standard-library synchronous HTTP and polling, or document and pin any justified runtime dependency before use.
+- [x] **S2-ARCH-007** Use standard-library synchronous HTTP and bounded queue/status waits, or document and pin any justified runtime dependency before use.
 - [x] **S2-ARCH-008** Keep network calls and large artifact processing outside the short persistence-lock critical section.
 - [x] **S2-ARCH-009** Keep the default package and test suite usable without a real OpenCode server.
 
@@ -126,7 +126,7 @@ fixtures use those documented shapes.
 - [x] **S2-PROBE-004** Exclude irrelevant product specifications, source content, findings, and commit-message paths from the probe prompt.
 - [x] **S2-PROBE-005** Keep server URL, credentials, and environment data out of the prompt.
 - [x] **S2-RESULT-001** Request `json_schema` structured output with exact fields and no additional properties.
-- [x] **S2-RESULT-002** Do not send optional `format.retryCount`: real OpenCode `1.17.18` accepts and persists it but then rejects the resulting message-list response; do not claim the release honors the hint.
+- [x] **S2-RESULT-002** Send the documented `json_schema` request without speculative compatibility hints or controller retries.
 - [x] **S2-RESULT-003** Independently validate schema version, status, summary, checks, and blocking-reason rules.
 - [x] **S2-RESULT-004** Require an empty checks array because no substantive verification tool ran; do not count the built-in structured-output mechanism as a check.
 - [x] **S2-RESULT-005** Accept only `completed`, `blocked`, and `failed` statuses.
@@ -160,12 +160,12 @@ fixtures use those documented shapes.
 
 ## 13. Prompt Submission and Observation
 
-- [x] **S2-OBS-001** Submit the prompt with `POST /session/<id>/prompt_async` only after session-ID durability.
-- [x] **S2-OBS-002** Require the documented asynchronous acceptance response.
-- [x] **S2-OBS-003** Poll status/messages no more than once per second.
-- [x] **S2-OBS-004** Treat `busy` and `retry` as non-terminal.
-- [x] **S2-OBS-005** Require expected terminal assistant-message evidence in addition to idle or missing status.
-- [x] **S2-OBS-006** Reject unknown status values and inconsistent status/message evidence.
+- [x] **S2-OBS-001** Submit the prompt with documented synchronous `POST /session/<id>/message` only after session-ID durability.
+- [x] **S2-OBS-002** Require the returned terminal assistant response rather than asynchronous acceptance.
+- [x] **S2-OBS-003** Use no normal status/message polling; wait on a bounded queue while the daemon request worker is blocked.
+- [x] **S2-OBS-004** Reserve documented status checks for bounded abort confirmation only.
+- [x] **S2-OBS-005** Require returned terminal assistant-message evidence, exact prompt binding through its parent ID, and configured identity.
+- [x] **S2-OBS-006** Reject conflicting structured aliases, errors, forbidden tools, permission requests, malformed response, and absent output.
 - [x] **S2-OBS-007** Associate the result with the sole prompt in the fresh session.
 - [x] **S2-OBS-008** Enforce `limits.invocation_timeout_seconds` with monotonic time.
 - [x] **S2-OBS-009** Treat ordinary mid-invocation service loss as interruption without assigning Sprint 7 grace semantics.
@@ -240,7 +240,7 @@ fixtures use those documented shapes.
 - [x] **S2-ART-002** Never modify `prompt.md` after session creation.
 - [x] **S2-ART-003** Persist only independently validated, credential-free agent output in `result.json`.
 - [x] **S2-ART-004** Do not fabricate a failed agent result after transport or schema failure.
-- [x] **S2-ART-005** Reconstruct `transcript.json` from the session message HTTP endpoint.
+- [x] **S2-ART-005** Reconstruct `transcript.json` from the synchronous returned assistant message and exact persisted prompt; never call the message-list endpoint.
 - [x] **S2-ART-005A** Use the exact version-one opaque wrapper with `format`, `original_bytes`, and canonical sanitized JSON `content`.
 - [x] **S2-ART-006** Do not invoke `opencode export` or access OpenCode local storage.
 - [x] **S2-ART-007** Preserve useful message/part structure while sanitizing recursively.
@@ -342,7 +342,7 @@ fixtures use those documented shapes.
 - [x] **S2-TEST-006** Cover runner protocol behavior with deterministic fake outcomes.
 - [x] **S2-TEST-007** Cover fresh session, reused ID, ambiguous creation, and durability ordering.
 - [x] **S2-TEST-007A** Cover definitive session-create rejection with terminal failed metadata and null session/start values.
-- [x] **S2-TEST-008** Cover asynchronous submission, polling, terminal evidence, timeout, interruption, and abort.
+- [x] **S2-TEST-008** Cover synchronous submission, terminal evidence, daemon-worker timeout/cancellation, and bounded abort.
 - [x] **S2-TEST-008A** Cover real process delivery of `SIGINT` and `SIGTERM`, orderly abort, durable interruption, and exit statuses `130`/`143`.
 - [x] **S2-TEST-008B** Cover ambiguous prompt submission and status/message transport failures attempting one bounded abort.
 - [x] **S2-TEST-009** Cover every structured-result validation rule.
@@ -493,82 +493,13 @@ is not a fresh audit; **S2-REVIEW-001** through
 - [x] **S2-DEMO-012** Demonstrate deterministic fake timeout, abort, interruption evidence, and preserved session identity.
 - [x] **S2-DEMO-013** Confirm the default demonstration/test path does not require GitHub or plugin behavior.
 
-On 2026-07-13, a clean wheel install reported controller version `0.1.0`. The
-supplied server reported healthy OpenCode `1.17.18`, but its documented default
-`directory` and `worktree` were the controller source repository rather than the
-clean temporary sprint fixture. Running the installed controller against that
-fixture returned `wrong_server_workspace` with status 2; repository snapshots
-were identical, runtime paths remained absent, and the server's session-ID set
-was unchanged. The successful execution-probe items and **S2-DONE-011** remain
-unchecked because the supplied server could not be re-rooted without changing
-its externally managed configuration.
-
-Later on 2026-07-13, an authenticated temporary server was successfully rooted
-at a clean real-submodule fixture on localhost port `59659`. Health, workspace,
-agents, connected providers, `openai/gpt-5.6-sol`, opt-in preflight, and the
-mutation-free wrong-workspace check passed. The controller durably exposed a
-fresh `0001-auditor` session while active, and the session appeared in the
-ordinary OpenCode session client. OpenCode accepted the structured prompt but
-then returned HTTP 400 from `GET /session/<id>/message`: it had injected default
-`format.retryCount: 2` into the stored user message and its own response validator
-rejected that field. The controller failed closed at `blocked/server_unavailable`,
-preserved interruption evidence, produced no result or transcript, and left both
-repositories unchanged except expected runtime records. The temporary server was
-stopped and its health endpoint became unreachable. Successful-result demo items
-and **S2-DONE-011** remain unchecked.
-
-The smallest currently specification-compatible resolution for **AUD-S2-008**
-is a supported server build that accepts its stored `json_schema` prompt format
-when serving the documented message-list response. Omitting `retryCount` still
-causes the observed server-side default and supplying it repeats the rejected
-stored field, so no controller-side request variation is supported as a
-workaround. No genuinely compatible server was available for a successful
-result/transcript demonstration; **S2-DEMO-002** through **S2-DEMO-010** and
-**S2-DONE-011** remain unchecked.
-
-Restart investigation found two externally managed healthy OpenCode `1.17.18`
-servers, but their default workspaces were the controller source repository and
-an unrelated repository, not a clean Sprint 2 fixture. The controller was not
-run against either server.
-
-On 2026-07-13, the complete demonstration was retried with an externally
-launched, authenticated OpenCode `1.17.20` server, the then-current
-`opencode-ai` release. The server was started outside the controller from a
-clean temporary real-submodule fixture using `serve --pure --hostname
-127.0.0.1 --port 59761`; synthetic Basic credentials were inherited only by
-the server and controller processes. The fixture contained project-local
-`builder`, `auditor`, and `ci-fixer` agents and configured all roles for the
-advertised `openai/gpt-5.6-sol` model. The opt-in real preflight passed. The
-server's bootstrap generated ignored `.opencode` dependency artifacts, which
-were allowed to settle and removed from this disposable fixture before the
-controller's clean-worktree preflight; no server behavior was patched or
-substituted.
-
-The installed controller was given only the credential-free localhost origin.
-It created the fresh titled `0001-auditor` session; while it was active, status
-reported role `auditor`, invocation `0001-auditor`, and a non-empty session ID,
-and the ordinary server session collection contained that title. The server
-then rejected `GET /session/<id>/message` with HTTP 400 because its stored
-`json_schema` format contained default `retryCount: 2`, the same incompatibility
-seen on `1.17.18`. The controller recorded ordered events
-`run.started`, `state.entered`, `server.validated`, `agent.started`,
-`agent.interrupted`, and `run.blocked`, preserved the known session identity,
-and exited `blocked/server_unavailable` (status 2). `prompt.md` and terminal
-metadata were present, but no validated `result.json` or sanitized
-`transcript.json` could be captured; this is a failed-closed demonstration, not
-`execution_not_implemented` success. Both Git heads and the managed worktree
-were unchanged; the sprint repository contained only the expected uncommitted
-Sprint 2 runtime records. The server was stopped and all generated fixtures,
-logs, transcripts, and synthetic credentials must remain untracked and be
-removed after recording this summary.
-
-Registry metadata queried on the same date listed releases `1.17.0` through
-`1.17.20` and identified `1.17.20` as current. The two exercised compatible
-builds (`1.17.18` and `1.17.20`) both reproduce the message-list failure, so no
-genuinely compatible available release was demonstrated. **S2-DEMO-002**
-through **S2-DEMO-010** and **S2-DONE-011** remain unchecked pending a
-supported release that can serve its stored structured prompt through the
-documented message endpoint.
+On 2026-07-14, a disposable authenticated OpenCode `1.17.18` server rooted at
+a clean fixture accepted documented synchronous `POST /session/<id>/message`
+with `json_schema` and returned an assistant response containing a parent ID
+and `info.structured`. This establishes the replacement route without changing
+the installed OpenCode build. The full controller demonstration remains
+unchecked pending repeatable clean-worktree execution evidence; no audit gate
+was advanced.
 
 ## 30. Completion Gate
 

@@ -268,15 +268,18 @@ These variables contain no credentials; Basic authentication remains inherited
 through the OpenCode variables documented above. The complete real-server exit
 demonstration additionally runs `sprint-loop run`, observes its fresh session in
 an ordinary OpenCode client, and checks the invocation records and final block.
-Real exercises on 2026-07-13 of OpenCode `1.17.18` and the then-current
-`1.17.20` release both accepted a structured probe but returned HTTP 400 from
-the message-list endpoint. Their persisted `json_schema` format included a
-default `retryCount` rejected by the server's own response validator. Omitting
-the optional hint still triggers that default, and supplying it repeats the
-rejected stored field, so no controller-side schema-compatible workaround is
-available. A supported server build with a corrected message-list response is
-required for the complete real-server demonstration; until then the controller
-fails closed without treating missing result/transcript evidence as success.
+The controller uses documented synchronous `POST /session/<id>/message` for
+the one structured prompt. It does not use the message-list endpoint, including
+for transcript capture. The returned assistant message and parts are retained
+as bounded sanitized evidence; the exact persisted prompt is reconstructed as
+the paired user record only through the returned assistant parent ID. OpenCode
+may expose the result at `info.structured` or `info.structured_output`; aliases
+that conflict, errors, tools, permission requests, identity mismatches, and
+missing output fail closed. The long HTTP call runs in a daemon worker while the
+controller blocks on a bounded queue wait, so idle waiting uses negligible CPU
+but the configured invocation timeout remains a wall-clock deadline. Timeout
+or signal cancellation sends one abort and checks only session status, at most
+once per second; it never retries the non-idempotent prompt.
 Builder handoff, commits, audits, CI, functional controls/recovery, and Neovim
 remain deliberately unimplemented.
 

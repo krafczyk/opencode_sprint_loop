@@ -559,8 +559,9 @@ def validate_transcript_messages(
                     )
             if kind in {"structured_output", "json_schema"}:
                 message_results.append(part.get("value", part.get("output")))
-        if info.get("structured") is not None:
-            message_results.append(info["structured"])
+        for key in ("structured", "structured_output"):
+            if info.get(key) is not None:
+                message_results.append(info[key])
         if message.get("structured_output") is not None:
             message_results.append(message["structured_output"])
         message_error = info.get("error", message.get("error"))
@@ -609,9 +610,18 @@ def validate_transcript_messages(
         assistant_index, assistant, captured_result = assistant_results[0]
         raw_info = assistant.get("info")
         info = raw_info if isinstance(raw_info, dict) else {}
-        parent = assistant.get(
-            "parentID", assistant.get("parent_id", info.get("parentID", info.get("parent_id")))
-        )
+        parent_values = [
+            assistant[key]
+            for key in ("parentID", "parent_id")
+            if key in assistant and assistant[key] is not None
+        ] + [
+            info[key] for key in ("parentID", "parent_id") if key in info and info[key] is not None
+        ]
+        if len(set(parent_values)) > 1:
+            raise ControllerError(
+                "transcript_capture_failed", "OpenCode transcript has conflicting parent IDs"
+            )
+        parent = parent_values[0] if parent_values else None
         role = assistant.get("role", info.get("role"))
         if (
             role != "assistant"

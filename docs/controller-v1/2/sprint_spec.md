@@ -22,7 +22,7 @@ Sprint 2 adds:
 - Strict server URL and authentication handling.
 - OpenCode health, version, workspace, agent, provider, and model validation.
 - A typed runner interface isolated from OpenCode HTTP details.
-- Fresh session creation and a bounded polling lifecycle.
+- Fresh session creation and a synchronous terminal-response lifecycle.
 - Controller-side structured-result validation.
 - Durable invocation metadata, prompt, result, and sanitized transcript records.
 - Active invocation information in state and status.
@@ -66,7 +66,7 @@ Sprint 2 must handle ordinary, non-adversarial failures including:
 - Unhealthy servers, unsupported versions, and wrong default workspaces.
 - Missing configured agents, providers, or models.
 - Malformed, incomplete, oversized, or inconsistent OpenCode responses.
-- Lost connections during session creation, prompt submission, polling, or transcript collection.
+- Lost connections during session creation, synchronous prompt submission, abort confirmation, or transcript collection.
 - Invalid structured output and server-reported structured-output failure.
 - Controller interruption before or during an invocation.
 - Permission, short-write, disk, and atomic-replacement failures while recording invocation evidence.
@@ -92,17 +92,9 @@ These exclusions do not permit controller-authored credential exposure, destruct
 - `SIGKILL`, container loss, or host loss may prevent a final abort or metadata update. The session ID must already be durable before prompt submission so later diagnosis is possible.
 - The controller validates configured model presence, not provider billing, quota, credential expiry, or successful inference before the probe.
 - Transcript sanitization recognizes conventional credential patterns. Protection against secrets encoded specifically to evade those rules is outside the current trusted-user threat model.
-- The installed OpenCode `1.17.18` build exercised on 2026-07-13 accepts a
-  `json_schema` prompt but injects a default `format.retryCount` into the stored
-  user message and then rejects that same field while serving `GET
-  /session/<id>/message`. The controller omits the optional hint, fails closed on
-  the server's HTTP 400 response, and cannot complete the required real-server
-  result/transcript gate until the server response contract is corrected. There
-  is no controller-side request workaround compatible with the documented
-  `json_schema` contract: omitting the optional hint still triggers the server
-  default, while supplying it repeats the rejected stored field. A complete
-  real-server demonstration therefore requires a supported server build whose
-  message-list response accepts its stored prompt format.
+- OpenCode `1.17.18` may reject its stored structured prompt through the
+  message-list endpoint. Sprint 2 deliberately does not use that endpoint:
+  the documented synchronous message response is the terminal evidence source.
 
 ## 4. Scope
 
@@ -113,14 +105,16 @@ Sprint 2 includes:
 1. Server URL parsing, normalization, and safe endpoint construction.
 2. Inherited OpenCode HTTP Basic authentication.
 3. A narrow synchronous `AgentRunner` protocol and OpenCode implementation.
-4. OpenCode REST polling; server-sent events are not required.
+4. One synchronous documented prompt request; status checks are reserved for
+   bounded abort confirmation and server-sent events are not required.
 5. Server and capability validation through documented endpoints.
 6. One non-mutating Auditor execution probe.
 7. Structured-output request and independent result validation.
 8. Fresh session identity, title, and reuse checks.
 9. Invocation timeout, abort, and cooperative interruption behavior.
 10. Durable invocation directories and bounded artifacts.
-11. Sanitized transcript reconstruction from HTTP message records.
+11. Sanitized transcript reconstruction from the synchronous returned assistant
+    message plus the exact persisted submitted prompt.
 12. Sprint 2 state, event, transition, and status extensions.
 13. Post-invocation repository non-mutation validation.
 14. Fake runner, fake OpenCode server, and opt-in real integration coverage.
@@ -151,7 +145,12 @@ Sprint 2 must not implement:
 
 - Continue to support Python 3.11 or newer on Linux in the mkchad environment.
 - Use Python standard-library HTTP and JSON facilities unless implementation demonstrates a concrete requirement for a new runtime dependency.
-- The selected Sprint 2 direction is synchronous HTTP with bounded polling. An async framework and SSE dependency are not required.
+- The selected Sprint 2 direction is synchronous HTTP. The long prompt request
+  runs in a daemon worker while the controller blocks on a bounded queue wait;
+  normal execution has no observation polling or tight loop. Socket/event waits
+  consume negligible CPU, while wall-clock timeout remains the configured
+  monotonic invocation timeout. An async framework and SSE dependency are not
+  required.
 - Any added runtime dependency must be justified, pinned through the repository's reproducible installation approach, and documented before its checklist item is complete.
 - Keep the default suite offline, deterministic, credential-free, and independent of a real OpenCode server or model provider.
 - Use monotonic time for invocation deadlines and wall-clock UTC only for durable timestamps.
@@ -327,10 +326,9 @@ Define an OpenCode-independent protocol with semantic operations equivalent to:
 class AgentRunner(Protocol):
     def validate_server(self, request: ServerValidationRequest) -> ValidatedServer: ...
     def create_session(self, request: InvocationRequest) -> CreatedSession: ...
-    def submit_prompt(self, session: CreatedSession, request: InvocationRequest) -> None: ...
-    def observe(self, session: CreatedSession) -> InvocationObservation: ...
+    def execute_prompt(self, session: CreatedSession, request: InvocationRequest) -> InvocationObservation: ...
+    def observe_status(self, session: CreatedSession) -> str | None: ...
     def abort(self, session: CreatedSession) -> AbortObservation: ...
-    def transcript(self, session: CreatedSession) -> TranscriptCapture: ...
 ```
 
 Equivalent decomposition is allowed, but the controller must be able to:
@@ -338,9 +336,10 @@ Equivalent decomposition is allowed, but the controller must be able to:
 - Validate a server without creating a session.
 - Create a session without submitting a prompt.
 - Persist the returned session ID before prompt submission.
-- Observe progress until a monotonic deadline.
+- Execute one synchronous prompt until a monotonic deadline without retry.
 - Request abort separately.
-- Retrieve transcript evidence after completion or failure.
+- Retain the terminal response itself as transcript evidence; status checks are
+  only permitted after abort.
 
 The protocol must use typed controller concepts and stable normalized errors, not raw `urllib`, OpenCode SDK, or HTTP response objects.
 
@@ -351,7 +350,7 @@ A deterministic fake runner must support scripted:
 - Server validation success and each failure category.
 - Unique and reused session IDs.
 - Immediate and delayed completion.
-- Busy, retry, idle, and missing status-map observations.
+- Blocked worker completion and bounded abort status observations.
 - Valid, blocked, failed, malformed, and oversized structured results.
 - Transport failure at every lifecycle operation.
 - Timeout and abort acknowledgement/non-acknowledgement.
@@ -404,7 +403,7 @@ Product specifications, checklist contents, managed source files, prior findings
 
 ### 9.4 Structured Result
 
-The OpenCode request uses `format.type = "json_schema"` and `additionalProperties: false`. It does not send the optional `format.retryCount` hint because OpenCode `1.17.18` accepts and persists that input but then rejects its own message-list response containing the field. The controller does not submit a corrective prompt, create another session, or otherwise retry an invalid structured result. A server-reported `StructuredOutputError`, including any server-reported retry count, is treated as `invalid_agent_result`.
+The OpenCode request uses `format.type = "json_schema"` and `additionalProperties: false`. The controller does not submit a corrective prompt, create another session, or otherwise retry an invalid structured result. A server-reported `StructuredOutputError` is treated as `invalid_agent_result`.
 
 The result shape is:
 
@@ -442,9 +441,8 @@ Sprint 2 uses the documented operations:
 ```text
 POST /session
 GET  /session
-POST /session/<session-id>/prompt_async
+POST /session/<session-id>/message
 GET  /session/status
-GET  /session/<session-id>/message
 POST /session/<session-id>/abort
 ```
 
@@ -469,30 +467,42 @@ The controller must use this order:
 2. Create the fresh OpenCode session.
 3. Persist an `agent.started` event and state containing the invocation and session IDs.
 4. Atomically update invocation metadata with the session ID.
-5. Submit the prompt asynchronously.
+5. Start the one synchronous prompt request in a daemon worker.
 
 If step 3 fails, the controller must not submit the prompt and makes a best-effort abort of the empty session. If step 4 fails, the state/event pair still identifies the session; the controller must not submit the prompt and attempts abort. No failure in these steps permits creation of another session in the same invocation.
 
-### 10.4 Prompt Submission and Polling
+### 10.4 Synchronous Prompt Submission
 
-- `prompt_async` must return the documented success status before polling begins.
-- Poll at most once per second using `GET /session/status` and bounded message retrieval.
-- Status values `busy` and `retry` are non-terminal.
-- `idle` or absence from the status map is not sufficient by itself to declare success.
-- Completion requires the expected assistant message for the one submitted prompt, no terminal message error, and a valid structured result. Final transcript validation requires the sole user text part to equal the exact submitted prompt and the associated assistant message's documented `info.agent`, `info.providerID`, and `info.modelID` to equal the configured role and selected model identity. Absent or mismatched evidence fails closed.
-- A present `/session/status` entry must be the documented `1.17.x` object with a string `type`; only an absent map entry is normalized as missing status.
-- Unknown statuses or inconsistent message/status evidence fail closed.
+- `POST /session/<id>/message` is non-idempotent and is sent exactly once in a
+  daemon worker. The controller main thread waits on a queue with a bounded
+  timeout, checks cancellation and the monotonic deadline, and never waits for
+  worker shutdown. A late worker result cannot mutate persistence or launch a
+  new invocation.
+- The returned object must be the configured assistant terminal response with
+  a bounded parent ID, matching role/agent/provider/model, no error, and one
+  unconflicted structured-output location. `info.structured` and documented
+  `info.structured_output` are accepted; conflicting aliases, permission
+  requests, forbidden tools, malformed parts, or absent output fail closed.
+- The controller retains the returned assistant message and parts exactly as
+  bounded external evidence. It reconstructs the sole user record from the
+  exact already-persisted prompt and the returned assistant parent ID. It never
+  calls the message-list endpoint for success or transcript capture.
 - The total invocation deadline is `limits.invocation_timeout_seconds`, measured with monotonic time.
 - Ordinary network failure during the invocation does not receive Sprint 7's server-unavailable grace period. It interrupts this invocation and preserves available evidence.
-- An ambiguous `prompt_async` response or a transport failure during status/message observation leaves terminal state uncertain. Once the session ID is known, every such failure follows the bounded abort path in Section 10.5 before the controller clears active state or exits.
+- An ambiguous synchronous request outcome leaves terminal state uncertain.
+  Once the session ID is known it follows the bounded abort path in Section
+  10.5; the prompt is never retried.
 
 ### 10.5 Abort and Interruption
 
 Sprint 2 treats catchable `SIGINT` and `SIGTERM` as cooperative cancellation requests. Signal handlers record a cancellation request; they do not perform HTTP or persistence operations directly. The orchestration path finishes any active atomic persistence operation and then follows this sequence on timeout, cancellation, ambiguous prompt submission, or post-creation transport failure while terminal session state is uncertain:
 
 1. Request `POST /session/<id>/abort` once.
-2. Set one monotonic confirmation deadline and wait for at most 10 seconds for bounded idle or terminal evidence. Every confirmation observation request receives that same deadline; an absent status entry is not confirmation.
-3. Retrieve and sanitize available messages.
+2. Set one monotonic confirmation deadline and use only `GET /session/status`
+   checks, at most once per second, sleeping or blocking between checks. Every
+   check receives that same deadline; an absent status entry is not confirmation.
+3. Retain only a synchronous response that arrived before cancellation; never
+   fetch the message-list endpoint.
 4. Record `agent.interrupted` and clear active invocation state when persistence is possible.
 5. Enter blocked with `invocation_timed_out` or `invocation_interrupted`.
 6. Exit `130` for `SIGINT`, `143` for `SIGTERM`, or the documented non-zero blocked-run code for timeout.
@@ -666,7 +676,8 @@ A successful Sprint 2 invocation requires `result.json`. Failed or interrupted i
 
 ### 13.5 Transcript
 
-`transcript.json` is a controller-owned bounded opaque reconstruction from `GET /session/<id>/message`:
+`transcript.json` is a controller-owned bounded opaque reconstruction from the
+synchronous `POST /session/<id>/message` response:
 
 ```json
 {
@@ -684,7 +695,7 @@ Exact wrapper fields are required. `content` is a UTF-8 string containing a dete
 
 The controller recursively replaces recognized credential values with the exact marker `[REDACTED]` before canonical serialization. If the complete wrapper would exceed the transcript limit, it truncates `content` at a valid UTF-8 code-point boundary to the largest deterministic prefix that permits the final wrapper to remain within the limit, appends `\n[TRUNCATED]`, and sets `truncated` true. Truncated `content` is evidence text and need not itself remain parseable JSON; untruncated `content` must parse as the complete message array. Per-string limits are applied before canonical serialization using the same `[TRUNCATED]` marker, and any such truncation also sets the wrapper flag. Redaction precedes per-string and total truncation.
 
-Before opaque serialization, the controller validates the documented message/part envelope needed to associate the terminal response and detect tool use. For a successful probe it requires the exact submitted prompt and configured Auditor/provider/model identity in the associated terminal message. A permission request or tool part other than `StructuredOutput` fails the probe even though sanitized transcript evidence is retained. The controller does not invoke `opencode export` or read OpenCode local storage because the supplied server may be remote and no sanitized HTTP export is documented.
+Before opaque serialization, the controller validates the documented message/part envelope needed to associate the terminal response and detect tool use. The assistant response is retained unchanged; its parent ID becomes the reconstructed user record ID and binds that record to the exact persisted prompt. For a successful probe it requires configured Auditor/provider/model identity. A permission request or tool part other than `StructuredOutput` fails the probe even though sanitized transcript evidence is retained. The controller does not invoke `opencode export`, the message-list endpoint, or OpenCode local storage.
 
 Transcript capture is required after successful completion. On failure or interruption it is best effort, and metadata records `complete`, `truncated`, or `unavailable`.
 
@@ -911,7 +922,7 @@ The last event may be `server.validated`, `agent.started`, `agent.completed`, `a
 - Status during `agent.started` reports active role, invocation, and session with active status `running` in durable state.
 - Status after completion/interruption clears active fields.
 - Human status renders active identifiers safely.
-- Status makes no network request and remains available during polling.
+- Status makes no network request and remains available while the synchronous worker waits.
 
 ### 19.7 Repository Safety
 
@@ -994,7 +1005,7 @@ Sprint 2 must leave later sprints with:
 - A stable `AgentRunner` boundary and deterministic fake.
 - Safe server URL, authentication, health, workspace, agent, and model validation.
 - Fresh-session creation with session-ID durability before prompt submission.
-- Bounded polling, timeout, abort, result validation, and transcript capture.
+- Synchronous response waiting, timeout, bounded abort-status checks, result validation, and transcript capture.
 - Versioned invocation artifacts and active status projection.
 - A transition mechanism capable of durable same-state observations.
 - No premature Builder handoff, audit, CI, recovery, or plugin behavior.
