@@ -52,6 +52,20 @@ from opencode_sprint_loop.opencode_runner import (
 )
 from opencode_sprint_loop.security import contains_credential, redact_diagnostic
 
+_PROBE_PERMISSIONS = [
+    {"permission": "*", "pattern": "*", "action": "deny"},
+    {"permission": "StructuredOutput", "pattern": "*", "action": "allow"},
+]
+
+
+def _last_matching_permission_action(rules: list[dict[str, str]], permission: str) -> str | None:
+    """Model OpenCode 1.17.18's ordered last-match permission selection."""
+    selected: str | None = None
+    for rule in rules:
+        if rule["pattern"] == "*" and rule["permission"] in {"*", permission}:
+            selected = rule["action"]
+    return selected
+
 
 class _Handler(BaseHTTPRequestHandler):
     """Minimal local documented-API fake for exercising the real HTTP adapter."""
@@ -59,7 +73,9 @@ class _Handler(BaseHTTPRequestHandler):
     root = "/tmp"
     mode = "complete"
     abort_requests = 0
+    last_session: dict[str, object] | None = None
     last_prompt: dict[str, object] | None = None
+    request_paths: list[str] = []
     preflight_started = threading.Event()
 
     def log_message(self, format: str, *args: object) -> None:
@@ -76,6 +92,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         """Serve the bounded endpoints used during preflight and observation."""
+        type(self).request_paths.append(self.path)
         if self.path == "/global/health":
             if self.mode == "slow_preflight":
                 type(self).preflight_started.set()
@@ -176,19 +193,24 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         """Serve fresh-session, prompt, and abort calls."""
+        type(self).request_paths.append(self.path)
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         if self.path == "/session":
             if self.mode == "create_reject":
                 self.send_error(500)
                 return
             request = json.loads(raw.decode())
+            if request.get("permission") != _PROBE_PERMISSIONS:
+                self.send_error(422)
+                return
+            type(self).last_session = request
             self._json(
                 {
                     "id": "\ud800" if self.mode == "surrogate_create" else "ses_local",
                     "title": request["title"],
                     "directory": self.root,
                     "parentID": None,
-                    "permission": [{"permission": "*", "pattern": "*", "action": "deny"}],
+                    "permission": request["permission"],
                 }
             )
         elif self.path.endswith("/abort"):
@@ -355,12 +377,14 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     write_transcript(paths, wrapper)
 
     def test_real_adapter_uses_local_fake_server(self) -> None:
-        """Preflight and a complete fresh lifecycle use only local HTTP endpoints."""
+        """Capture the complete documented direct-adapter session and message requests."""
         with TemporaryDirectory() as temporary:
             _Handler.root = str(Path(temporary).resolve())
             _Handler.mode = "complete"
             _Handler.abort_requests = 0
+            _Handler.last_session = None
             _Handler.last_prompt = None
+            _Handler.request_paths = []
             server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
             thread = threading.Thread(target=server.serve_forever)
             thread.start()
@@ -393,9 +417,56 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     "probe\n",
                     root,
                 )
+                with patch(
+                    "opencode_sprint_loop.opencode_runner._PERMISSIONS",
+                    (dict(_PROBE_PERMISSIONS[0]),),
+                ):
+                    with self.assertRaises(ControllerError) as context:
+                        runner.create_session(request)
+                self.assertEqual(context.exception.code, "session_creation_failed")
+                _Handler.request_paths = []
                 self.assertEqual(runner.existing_session_ids(), set())
                 session = runner.create_session(request)
                 observation = runner.execute_prompt(session, request)
+                schema = {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "schema_version",
+                        "status",
+                        "summary",
+                        "checks",
+                        "blocking_reason",
+                    ],
+                    "properties": {
+                        "schema_version": {"type": "integer", "const": 1},
+                        "status": {"enum": ["completed", "blocked", "failed"]},
+                        "summary": {"type": "string"},
+                        "checks": {"type": "array"},
+                        "blocking_reason": {"type": ["string", "null"]},
+                    },
+                }
+                self.assertEqual(
+                    _Handler.last_session,
+                    {"title": request.title, "permission": _PROBE_PERMISSIONS},
+                )
+                self.assertEqual(
+                    _Handler.last_prompt,
+                    {
+                        "agent": "auditor",
+                        "model": {"providerID": "test", "modelID": "strong"},
+                        "parts": [{"type": "text", "text": "probe\n"}],
+                        "format": {"type": "json_schema", "schema": schema},
+                    },
+                )
+                self.assertEqual(
+                    _Handler.request_paths,
+                    [
+                        "/session",
+                        "/session",
+                        "/session/ses_local/message",
+                    ],
+                )
                 self.assertNotIn("retryCount", _Handler.last_prompt)  # type: ignore[operator]
                 self.assertNotIn("retryCount", _Handler.last_prompt["format"])  # type: ignore[index]
                 self.assertEqual(observation.structured_result["status"], "completed")
@@ -789,6 +860,109 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 server.server_close()
                 _Handler.mode = "complete"
 
+    def test_ordered_permissions_allow_only_structured_output_under_last_match_semantics(
+        self,
+    ) -> None:
+        """The 1.17.18 exception follows deny so only StructuredOutput can match allow."""
+        self.assertEqual(
+            _last_matching_permission_action(
+                [{"permission": "*", "pattern": "*", "action": "deny"}], "StructuredOutput"
+            ),
+            "deny",
+        )
+        self.assertEqual(
+            _PROBE_PERMISSIONS,
+            [
+                {"permission": "*", "pattern": "*", "action": "deny"},
+                {"permission": "StructuredOutput", "pattern": "*", "action": "allow"},
+            ],
+        )
+        self.assertEqual(
+            _last_matching_permission_action(_PROBE_PERMISSIONS, "StructuredOutput"), "allow"
+        )
+        for forbidden in ("shell", "repository", "web", "task", "mcp", "external"):
+            with self.subTest(permission=forbidden):
+                self.assertEqual(
+                    _last_matching_permission_action(_PROBE_PERMISSIONS, forbidden), "deny"
+                )
+
+    def test_direct_and_full_probe_use_the_same_complete_request_contract(self) -> None:
+        """The adapter and controller send identical captured Sprint 2 request bodies/routes."""
+        from opencode_sprint_loop.agent_runner import InvocationRequest
+        from opencode_sprint_loop.cli import _run
+        from opencode_sprint_loop.invocations import probe_title
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        fixture = SprintRepositoryFixture()
+        root = fixture.create()
+        self.addCleanup(fixture.close)
+        _Handler.root = str(root)
+        _Handler.mode = "complete"
+        _Handler.last_session = None
+        _Handler.last_prompt = None
+        _Handler.request_paths = []
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            origin = f"http://127.0.0.1:{server.server_port}"
+            request = InvocationRequest(
+                "0001-auditor",
+                1,
+                "auditor",
+                "test/strong",
+                probe_title("foundation", 1, 1),
+                probe_prompt("foundation", 1, "0001-auditor"),
+                root,
+            )
+            direct = OpenCodeServerRunner(origin)
+            direct.validate_server(
+                ServerValidationRequest(
+                    root,
+                    {"builder": "builder", "auditor": "auditor", "ci_fixer": "ci-fixer"},
+                    {
+                        "builder": "test/medium",
+                        "auditor": "test/strong",
+                        "ci_fixer": "test/medium",
+                    },
+                )
+            )
+            direct.existing_session_ids()
+            session = direct.create_session(request)
+            direct.execute_prompt(session, request)
+            direct_capture = (
+                deepcopy(_Handler.last_session),
+                deepcopy(_Handler.last_prompt),
+                list(_Handler.request_paths),
+            )
+            _Handler.last_session = None
+            _Handler.last_prompt = None
+            _Handler.request_paths = []
+
+            self.assertEqual(_run(str(root), origin), 4)
+            full_capture = (
+                deepcopy(_Handler.last_session),
+                deepcopy(_Handler.last_prompt),
+                list(_Handler.request_paths),
+            )
+            self.assertEqual(full_capture, direct_capture)
+            session_body, message_body, paths = full_capture
+            self.assertEqual(
+                session_body, {"title": request.title, "permission": _PROBE_PERMISSIONS}
+            )
+            self.assertIsInstance(message_body, dict)
+            self.assertEqual(message_body["agent"], "auditor")  # type: ignore[index]
+            self.assertEqual(  # type: ignore[index]
+                message_body["model"], {"providerID": "test", "modelID": "strong"}
+            )
+            self.assertEqual(message_body["parts"], [{"type": "text", "text": request.prompt}])  # type: ignore[index]
+            self.assertEqual(paths[-1], "/session/ses_local/message")
+            self.assertNotIn("retryCount", message_body)  # type: ignore[arg-type]
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
     def test_create_session_rejects_unsafe_or_conflicting_response_identity(self) -> None:
         """Malformed session aliases and unsafe IDs cannot reach durable probe state."""
         from opencode_sprint_loop.agent_runner import InvocationRequest
@@ -803,7 +977,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 "title": "title",
                 "directory": str(root),
                 "parentID": None,
-                "permission": [{"permission": "*", "pattern": "*", "action": "deny"}],
+                "permission": _PROBE_PERMISSIONS,
             }
             cases = (
                 ({**base, "id": "ses\nunsafe"}, "unsafe ID"),
@@ -1274,7 +1448,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
             "ses_test",
             "title",
             Path("/tmp"),
-            ({"permission": "*", "pattern": "*", "action": "deny"},),
+            tuple(_PROBE_PERMISSIONS),
         )
         for response in (
             None,
@@ -2196,7 +2370,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
             "ses_test",
             "title",
             root,
-            ({"permission": "*", "pattern": "*", "action": "deny"},),
+            tuple(_PROBE_PERMISSIONS),
         )
         response = {
             "info": {
@@ -2468,7 +2642,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 "id": "ses_valid",
                 "title": "title",
                 "parentID": None,
-                "permission": [{"permission": "*", "pattern": "*", "action": "deny"}],
+                "permission": _PROBE_PERMISSIONS,
             }
             previous_cwd = Path.cwd()
             os.chdir(root)

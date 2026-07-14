@@ -35,7 +35,12 @@ REQUEST_TIMEOUT_SECONDS = 10
 # malformed rather than an alternate spelling of a supported release.
 _VERSION = re.compile(r"^1\.17\.(?:0|[1-9]\d*)$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
-_PERMISSIONS = ({"permission": "*", "pattern": "*", "action": "deny"},)
+# OpenCode 1.17.18 applies matching rules in order and the final matching rule
+# wins.  Keep the narrow StructuredOutput exception after the wildcard deny.
+_PERMISSIONS = (
+    {"permission": "*", "pattern": "*", "action": "deny"},
+    {"permission": "StructuredOutput", "pattern": "*", "action": "allow"},
+)
 
 
 def _bounded_identifier(value: Any) -> TypeGuard[str]:
@@ -437,7 +442,7 @@ class OpenCodeServerRunner:
         return result
 
     def create_session(self, request: InvocationRequest) -> CreatedSession:
-        """Create and fully validate a fresh wildcard-denied top-level session."""
+        """Create and validate a top-level session with only StructuredOutput allowed."""
         try:
             response = self._object(
                 self._request(
@@ -479,7 +484,7 @@ class OpenCodeServerRunner:
         if permissions != list(_PERMISSIONS) and permissions != tuple(_PERMISSIONS):
             raise ControllerError(
                 "session_creation_failed",
-                "Created session does not enforce wildcard-deny permissions",
+                "Created session does not enforce exact structured-output-only permissions",
             )
         return CreatedSession(identifier, title, directory, _PERMISSIONS)
 

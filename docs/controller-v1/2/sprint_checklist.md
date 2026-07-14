@@ -121,8 +121,8 @@ fixtures use those documented shapes.
 
 - [x] **S2-PROBE-001** Use the configured Auditor as the non-mutating Sprint 2 probe role.
 - [x] **S2-PROBE-002** Build a deterministic title `[<multisprint>/<sprint>] auditor <sequence> execution probe`.
-- [x] **S2-PROBE-003** Create a deterministic prompt prohibiting repository, shell, web, task, and mutation tools while permitting only the required built-in structured-output mechanism.
-- [x] **S2-PROBE-003A** Create the probe session with a wildcard-deny permission ruleset that overrides configured Auditor tool permissions.
+- [x] **S2-PROBE-003** Create a deterministic prompt prohibiting repository, shell, web, task, MCP, and mutation tools while permitting only the required built-in structured-output mechanism.
+- [x] **S2-PROBE-003A** Create the probe session with the exact ordered OpenCode 1.17.18 wildcard-deny then `StructuredOutput`-allow permission ruleset that overrides configured Auditor tool permissions.
 - [x] **S2-PROBE-004** Exclude irrelevant product specifications, source content, findings, and commit-message paths from the probe prompt.
 - [x] **S2-PROBE-005** Keep server URL, credentials, and environment data out of the prompt.
 - [x] **S2-RESULT-001** Request `json_schema` structured output with exact fields and no additional properties.
@@ -140,7 +140,7 @@ fixtures use those documented shapes.
 - [x] **S2-SESSION-001** Allocate invocation sequence `1` and ID `0001-auditor` for the first Sprint 2 run invocation.
 - [x] **S2-SESSION-002** Capture a bounded `GET /session` snapshot, then create one top-level session with `POST /session` and no parent or fork.
 - [x] **S2-SESSION-003** Validate non-empty bounded session ID and matching session directory.
-- [x] **S2-SESSION-003A** Validate exact returned title, absent/null parent ID, and effective wildcard-deny permission rules before prompt submission.
+- [x] **S2-SESSION-003A** Validate exact returned title, absent/null parent ID, and the exact ordered effective deny-plus-`StructuredOutput` permission rules before prompt submission.
 - [x] **S2-SESSION-004** Reject a session ID present in the pre-creation snapshot or already recorded in the run as `non_fresh_session`.
 - [x] **S2-SESSION-005** Do not use title uniqueness as identity evidence.
 - [x] **S2-SESSION-006** Do not retry session creation after an ambiguous transport outcome.
@@ -346,7 +346,7 @@ fixtures use those documented shapes.
 - [x] **S2-TEST-008A** Cover real process delivery of `SIGINT` and `SIGTERM`, orderly abort, durable interruption, and exit statuses `130`/`143`.
 - [x] **S2-TEST-008B** Cover ambiguous prompt submission and status/message transport failures attempting one bounded abort.
 - [x] **S2-TEST-009** Cover every structured-result validation rule.
-- [x] **S2-TEST-009A** Cover enforced wildcard-deny permissions and rejection of non-`StructuredOutput` tool evidence.
+- [x] **S2-TEST-009A** Cover the exact ordered OpenCode 1.17.18 permission request/response, deny-only fake rejection, last-match `StructuredOutput` allowance, representative shell/repository/web/task/MCP/external denials, and rejection of non-`StructuredOutput` tool evidence.
 - [x] **S2-TEST-010** Cover invocation artifact schemas, atomic persistence, and fault injection.
 - [x] **S2-TEST-010A** Inject failure after each terminal write boundary and verify documented prefixes never become success.
 - [x] **S2-TEST-010B** Reject every cross-record identity, status, availability, truncation, and path mismatch.
@@ -356,7 +356,7 @@ fixtures use those documented shapes.
 - [x] **S2-TEST-014** Cover active human/JSON status while a separate process owns the run.
 - [x] **S2-TEST-015** Cover post-invocation repository mutation detection and preservation.
 - [x] **S2-TEST-016** Prove no destructive or mutating Git command is invoked.
-- [x] **S2-TEST-017** Exercise the real HTTP adapter against a local fake OpenCode server.
+- [x] **S2-TEST-017** Exercise the real HTTP adapter against a local fake OpenCode server with exact complete session/message request capture (agent, provider/model route, prompt, schema, permissions, and no `retryCount`) and compare direct-adapter and full-controller captures using the same fixture/route semantics.
 - [x] **S2-TEST-018** Keep real OpenCode integration opt-in and skipped by default.
 - [x] **S2-TEST-019** Run the full default suite without network, OpenCode, model/provider credentials, or global Git identity.
 - [x] **S2-TEST-020** Run formatting, linting, strict type checking, compilation, package build, and clean-wheel installation smoke tests.
@@ -493,26 +493,45 @@ required before completion items are checked.
 ## 29. Exit Demonstration
 
 - [x] **S2-DEMO-001** Install the built package into a clean Python 3.11+ environment.
-- [ ] **S2-DEMO-002** Create a clean sprint fixture with real managed submodule and valid configured agents/models.
-- [ ] **S2-DEMO-003** Start an authenticated supported OpenCode server rooted at the fixture outside the controller.
-- [ ] **S2-DEMO-004** Supply credentials only through inherited environment, never argv or files.
-- [ ] **S2-DEMO-005** Run `sprint-loop run` with a credential-free origin URL.
-- [ ] **S2-DEMO-006** Observe the fresh `0001-auditor` execution-probe session in an ordinary OpenCode client.
-- [ ] **S2-DEMO-007** Query status during execution and show role, invocation ID, and session ID.
-- [ ] **S2-DEMO-008** Inspect sanitized metadata, exact prompt, validated result, and bounded transcript.
-- [ ] **S2-DEMO-009** Verify both repositories changed only by expected uncommitted controller runtime records.
-- [ ] **S2-DEMO-010** Show final `blocked/execution_not_implemented` state and ordered Sprint 2 events.
+- [x] **S2-DEMO-002** Create a clean sprint fixture with real managed submodule and valid configured agents/models.
+- [x] **S2-DEMO-003** Start an authenticated supported OpenCode server rooted at the fixture outside the controller.
+- [x] **S2-DEMO-004** Supply credentials only through inherited environment, never argv or files.
+- [x] **S2-DEMO-005** Run `sprint-loop run` with a credential-free origin URL.
+- [x] **S2-DEMO-006** Observe the fresh `0001-auditor` execution-probe session in an ordinary OpenCode client.
+- [x] **S2-DEMO-007** Query status during execution and show role, invocation ID, and session ID.
+- [x] **S2-DEMO-008** Inspect sanitized metadata, exact prompt, validated result, and bounded transcript.
+- [x] **S2-DEMO-009** Verify both repositories changed only by expected uncommitted controller runtime records.
+- [x] **S2-DEMO-010** Show final `blocked/execution_not_implemented` state and ordered Sprint 2 events.
 - [x] **S2-DEMO-011** Demonstrate a wrong-default-workspace server failure with no runtime mutation or session.
 - [x] **S2-DEMO-012** Demonstrate deterministic fake timeout, abort, interruption evidence, and preserved session identity.
 - [x] **S2-DEMO-013** Confirm the default demonstration/test path does not require GitHub or plugin behavior.
 
-On 2026-07-14, a disposable authenticated OpenCode `1.17.18` server rooted at
-a clean fixture accepted documented synchronous `POST /session/<id>/message`
-with `json_schema` and returned an assistant response containing a parent ID
-and `info.structured`. This establishes the replacement route without changing
-the installed OpenCode build. The full controller demonstration remains
-unchecked pending repeatable clean-worktree execution evidence; no audit gate
-was advanced.
+On 2026-07-14, a freshly built wheel was installed in a disposable virtual
+environment and exercised against externally launched installed OpenCode
+`1.17.18` servers rooted at disposable real-submodule fixtures. The synthetic
+Basic server password and username were inherited only through environment
+variables; the controller received only credential-free loopback origins.
+After server-generated disposable `.opencode` dependency artifacts settled,
+only those fixture artifacts were removed and sprint/managed status including
+ignored files was clean twice while each server remained active.
+
+The successful full run used a configured `openai/gpt-5.6-terra` probe model.
+During execution, status exposed active `auditor`, `0001-auditor`, and a fresh
+session ID. The ordinary `opencode session list` client displayed the matching
+`[foundation/1] auditor 0001 execution probe` title. A sanitized session
+inspection verified null parent and exactly ordered permissions
+`[* deny, StructuredOutput allow]`. Safe artifact inspection recorded only
+hashes/shapes: validated result shape/status, prompt SHA-256, transcript-wrapper
+shape/flags/content SHA-256, and metadata availability/status. It recorded the
+ordered events `run.started`, `state.entered`, `server.validated`,
+`agent.started`, `agent.completed`, `run.blocked`, final
+`blocked/execution_not_implemented`, and expected uncommitted `info/` and
+`invocations/` paths with a clean managed repository. The deterministic local
+HTTP coverage records matching direct-adapter and full-controller captures from
+the same fixture/route/request semantics, including complete session/message
+bodies, exact schema and prompt, provider/model route, permission order, and no
+`retryCount`. No raw provider response, transcript, credential, fixture, log,
+virtual environment, build runtime data, or server remained after the demo.
 
 ## 30. Completion Gate
 
@@ -526,5 +545,5 @@ was advanced.
 - [x] **S2-DONE-008** Plugin repository status is clean and its parent gitlink is unchanged.
 - [x] **S2-DONE-009** No credentials, generated demonstration state, build artifacts, temporary repositories, or real transcripts are tracked.
 - [x] **S2-DONE-010** Documentation describes actual Sprint 2 behavior and does not claim deferred features.
-- [ ] **S2-DONE-011** The opt-in real-server exit demonstration has been performed against a supported server.
+- [x] **S2-DONE-011** The opt-in real-server exit demonstration has been performed against a supported server.
 - [ ] **S2-DONE-012** A fresh audit reports no unresolved P0 or P1 findings under the current threat model.

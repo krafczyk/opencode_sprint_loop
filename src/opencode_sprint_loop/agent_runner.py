@@ -155,7 +155,10 @@ class FakeAgentRunner:
             self.session_ids.pop(0),
             request.title,
             request.sprint_root,
-            ({"permission": "*", "pattern": "*", "action": "deny"},),
+            (
+                {"permission": "*", "pattern": "*", "action": "deny"},
+                {"permission": "StructuredOutput", "pattern": "*", "action": "allow"},
+            ),
         )
         self.created.append(session)
         return session

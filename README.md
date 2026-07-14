@@ -17,7 +17,8 @@ OpenCode execution probe:
 - The `sprint-loop` command surface.
 - Credential-free OpenCode URL, Basic-auth, health/version, workspace, agent,
   provider, and model preflight.
-- One fresh configured-Auditor session with wildcard-deny permissions,
+- One fresh configured-Auditor session with exact ordered wildcard-deny then
+  `StructuredOutput`-allow permissions,
   controller-validated JSON output, and bounded sanitized invocation evidence.
 
 It does **not** yet run a product Builder, accept a staged handoff, make commits
@@ -198,8 +199,14 @@ sanitized bounded `transcript.json`. The event log records `run.started`,
 `run.blocked`; state ends at `blocked` with `execution_not_implemented`. No
 checkpoint commit is made until Sprint 4.
 
-The fresh Auditor probe has a wildcard-deny tool override and a deterministic
-title. Successful terminal transcript evidence must bind the exact submitted
+The fresh Auditor probe uses OpenCode `1.17.18` last-match permission semantics:
+its complete ordered session permission set is first
+`{"permission":"*","pattern":"*","action":"deny"}`, then
+`{"permission":"StructuredOutput","pattern":"*","action":"allow"}`.
+This permits only the built-in structured-output mechanism; shell, repository,
+web, task, MCP, and external tools remain denied. The controller validates this
+exact order in the created-session response, not merely a deny-only subset. The
+probe has a deterministic title. Successful terminal transcript evidence must bind the exact submitted
 prompt and the configured Auditor/provider/model identity; absent or mismatched
 evidence fails closed. A present session-status entry must use the documented
 `1.17.x` object with a string `type`; only an absent entry means missing status.
@@ -285,6 +292,36 @@ or signal cancellation sends one abort and checks only session status, at most
 once per second; it never retries the non-idempotent prompt.
 Builder handoff, commits, audits, CI, functional controls/recovery, and Neovim
 remain deliberately unimplemented.
+
+### Repeatable sanitized real-server demonstration
+
+Run this opt-in procedure only in a disposable fixture. Build a fresh wheel and
+install it into a fresh virtual environment. Create a clean sprint repository
+with one initialized managed submodule, `.opencode/agents/` roles, and a valid
+configured provider/model. Start the installed `opencode serve` **outside** the
+controller at that fixture root with a synthetic `OPENCODE_SERVER_PASSWORD`.
+Do not put credentials in command arguments, fixture files, captured output, or
+notes.
+
+After the server is healthy, run the installed wheel's `sprint-loop run` with
+only the credential-free loopback origin. While it is active, use
+`sprint-loop status --json` and an ordinary OpenCode client (`opencode attach
+<origin>`) to observe the new `0001-auditor` session. Record only safe hashes,
+field shapes, event names, commands, and repository status—not provider output
+or transcript content. Confirm the exact permission order above, the persisted
+prompt/result/transcript wrapper shapes, the ordered events, both repository
+statuses (including ignored files) before and after the run, and final
+`blocked/execution_not_implemented` state. Repeat the clean-status check after
+generated files settle while the server remains active. Remove only disposable
+generated dependency artifacts, stop the external server, and remove the
+fixture, virtual environment, logs, and environment-provided synthetic
+credentials.
+
+The deterministic local HTTP test additionally captures complete direct-adapter
+and full-controller request bodies using the same fixture and route sequence. It
+asserts the title and two permission rules for `POST /session`; the agent,
+provider/model route, exact prompt, complete JSON schema, and no `retryCount`
+for `POST /session/<id>/message`; and that the captured bodies are identical.
 
 ## Sprint 1 Demonstration
 

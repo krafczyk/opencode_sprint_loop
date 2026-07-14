@@ -126,9 +126,9 @@ def probe_prompt(multisprint: str, sprint: int, invocation_id: str) -> str:
     prompt = (
         f"Sprint {multisprint}/{sprint}; invocation {invocation_id}.\n\n"
         "This is an OpenCode execution-layer probe, not a sprint audit. Do not use repository, "
-        "shell, web, task, or external-mutation tools. Do not modify any repository or external "
-        "service. The controller enforces a wildcard-deny permission override; only OpenCode's "
-        "built-in StructuredOutput mechanism is permitted. Return exactly the requested JSON schema "
+        "shell, web, task, MCP, or external-mutation tools. Do not modify any repository or external "
+        "service. The controller enforces ordered wildcard-deny then StructuredOutput-allow "
+        "permissions; only OpenCode's built-in StructuredOutput mechanism is permitted. Return exactly the requested JSON schema "
         "result with an empty checks array.\n"
     )
     validate_prompt(prompt)

@@ -368,7 +368,20 @@ The probe uses:
 - Model: configured `models.auditor`.
 - A fresh top-level session with no parent or fork.
 
-The Auditor is selected because Sprint 2 requires a non-mutating invocation. The prompt explicitly prohibits repository, shell, web, task, and external-mutation tools. The session also receives a supported wildcard-deny permission override equivalent to `[{"permission":"*","pattern":"*","action":"deny"}]`, which takes precedence over the configured Auditor's ordinary permissions. OpenCode's internally injected `StructuredOutput` mechanism remains available because it is required to return the requested JSON-schema result and does not perform repository or external work. The controller still verifies repository state afterward rather than trusting either control alone.
+The Auditor is selected because Sprint 2 requires a non-mutating invocation. The prompt explicitly prohibits repository, shell, web, task, MCP, and external-mutation tools. OpenCode `1.17.18` applies matching session permissions in order with the last match winning. The create request and returned effective permissions must therefore be exactly this ordered two-rule set:
+
+```json
+[
+  {"permission":"*","pattern":"*","action":"deny"},
+  {"permission":"StructuredOutput","pattern":"*","action":"allow"}
+]
+```
+
+The first rule denies every permission; the second narrowly re-allows only the
+built-in `StructuredOutput` mechanism required to return the JSON-schema result.
+No shell, repository, web, task, MCP, or external tool is permitted. The
+controller still verifies repository state afterward rather than trusting either
+control alone.
 
 ### 9.2 Session Title
 
@@ -392,9 +405,9 @@ The persisted and submitted prompt must:
 
 - Identify the sprint and invocation.
 - State that this is an execution-layer probe, not a sprint audit.
-- Instruct the role not to use repository, shell, web, task, or external-mutation tools and not to modify any repository or external service.
+- Instruct the role not to use repository, shell, web, task, MCP, or external-mutation tools and not to modify any repository or external service.
 - Permit only the built-in structured-output mechanism required by the OpenCode JSON-schema response format.
-- Require the controller to enforce the wildcard-deny session permission override rather than relying only on prompt compliance.
+- Require the controller to enforce the exact ordered deny-plus-StructuredOutput-allow session permission set rather than relying only on prompt compliance.
 - Require the exact structured result from Section 9.4.
 - Contain no server credential, environment dump, provider credential, or server URL.
 - Be deterministic for the same sprint identity and invocation sequence apart from explicitly documented identifiers.
@@ -453,8 +466,8 @@ The implementation must not access OpenCode database files or depend on undocume
 - Immediately before creation, the controller obtains a bounded `GET /session` snapshot of existing session IDs in the validated default workspace.
 - Every controller invocation calls `POST /session` exactly once unless no session request was sent.
 - Session creation has no automatic retry after an ambiguous transport failure.
-- The create request supplies the exact title and wildcard-deny permission ruleset and supplies no parent ID.
-- The response must contain a non-empty bounded session ID, the exact requested title, a null/absent parent ID, the effective wildcard-deny permission ruleset, and a directory matching the sprint root.
+- The create request supplies the exact title and the exact ordered deny-plus-StructuredOutput-allow permission ruleset and supplies no parent ID.
+- The response must contain a non-empty bounded session ID, the exact requested title, a null/absent parent ID, the same exact ordered effective permission ruleset, and a directory matching the sprint root. A deny-only set, reordered set, added rule, or alias conflict fails before prompt submission.
 - The session ID must not match the pre-creation session snapshot or any session ID already present in this run's invocation metadata.
 - A duplicate or reused ID fails with `non_fresh_session` before prompt submission.
 - No `parentID`, fork, or previous conversation is used.
@@ -887,6 +900,15 @@ The last event may be `server.validated`, `agent.started`, `agent.completed`, `a
   status and message polling do not occur.
 - Valid terminal message and structured result complete; absent or inconsistent
   terminal evidence fails closed.
+- Local HTTP fake coverage rejects the former deny-only create request and accepts
+  only the exact ordered two-rule request. It captures the complete session body
+  and complete message body, including the agent, provider/model route, exact
+  persisted prompt, complete JSON schema, and absence of `retryCount`.
+- Deterministic permission selection coverage models OpenCode `1.17.18`
+  last-match semantics: `StructuredOutput` is allowed by the final exception and
+  representative shell, repository, web, task, MCP, and external permissions
+  remain denied. Direct-adapter and full-controller captures use the same fixture,
+  route sequence, and request bodies.
 - Timeout uses monotonic time, calls abort once, and records interruption.
 - Cooperative interruption attempts abort and preserves the session ID.
 - Abort non-acknowledgement is retained as failure evidence.
@@ -968,7 +990,7 @@ Sprint 2 is accepted when:
 3. The controller never starts or substitutes an OpenCode server.
 4. One fresh configured Auditor session is created with a recognizable title.
 5. The session ID is durably visible through state/status before prompt submission.
-6. The execution probe runs under enforced wildcard-deny permissions and returns a controller-validated structured result; free-form prose or any non-`StructuredOutput` tool use cannot pass.
+6. The execution probe runs under the exact ordered wildcard-deny then `StructuredOutput`-allow permissions and returns a controller-validated structured result; free-form prose or any non-`StructuredOutput` tool use cannot pass.
 7. Complete bounded metadata, prompt, result, and sanitized transcript records exist for a successful probe.
 8. Status remains local and reports active role, invocation, and session while the probe runs.
 9. Timeout and cooperative interruption request abort, preserve evidence, and fail closed.
