@@ -534,6 +534,14 @@ A catchable signal before durable run creation exits with the corresponding conv
 
 A cancellation received after durable run creation but before a session exists requires no abort. The controller finalizes any already-created planned metadata, transitions directly to `blocked/invocation_interrupted`, and exits with the signal status. Once a successful create response makes the session ID known, the controller persists the ID and performs best-effort abort even if cancellation arrived before `agent.started` could otherwise complete. If cancellation coincides with a session-create request whose outcome is unknown, `session_creation_ambiguous` remains the durable reason because the controller cannot safely assert whether a session exists; the recorded `SIGINT` or `SIGTERM` still determines the conventional process exit status 130 or 143. It neither asserts a session ID, aborts, nor retries that ambiguous create.
 
+Every post-durable, pre-session cooperative boundary applies the same arbitration
+to an expected controller error, including the existing-session snapshot. If the
+error supplies a monotonic completion timestamp, an error strictly before a
+later cancellation retains its original durable reason; an error at or after
+the cancellation, or without a completion timestamp, is interrupted. This uses
+the same strict-before rule as synchronous prompt-worker completion. No
+pre-session cancellation overwrites a more advanced truthful terminal prefix.
+
 ## 11. Run Flow, States, and Events
 
 ### 11.1 Sprint 2 Flow
@@ -681,7 +689,7 @@ Exact fields are required. Unknown fields are rejected in schema version 1. `run
 
 `input_commits` contains exactly the configured repository key with null value in Sprint 2. `result.available` is boolean; `result.status` is null when unavailable and otherwise matches the validated agent status. `transcript.status` is `pending`, `complete`, `truncated`, or `unavailable`; `transcript.truncated` is true exactly for `truncated`. `error` is null or an exact object containing non-empty bounded `code` and `message` strings and no external response body.
 
-Lifecycle status is one of `planned`, `session_created`, `running`, `completed`, `blocked`, `failed`, `timed_out`, or `interrupted`. `planned` has no session/start/completion values. `session_created` and `running` have session and start values but no completion value. All remaining statuses are terminal and require `completed_at`; `completed`, `blocked`, and agent-reported `failed` require a valid result, while infrastructure `failed`, `timed_out`, and `interrupted` may have no result. A terminal infrastructure `failed` record may also have null session and start values when session creation was definitively rejected or remained ambiguous. Metadata updates are atomic replacements and never silently remove a known session ID.
+Lifecycle status is one of `planned`, `session_created`, `running`, `completed`, `blocked`, `failed`, `timed_out`, or `interrupted`. `planned` has no session/start/completion values. `session_created` and `running` have session and start values but no completion value. All remaining statuses are terminal and require `completed_at`; `completed`, `blocked`, and agent-reported `failed` require a valid result, while infrastructure `failed`, `timed_out`, and `interrupted` may have no result. A terminal infrastructure `failed` record may also have null session and start values when session creation was definitively rejected or remained ambiguous. A terminal `interrupted` record may have null session and start values only when a catchable cancellation was recorded before a session ID became known. Metadata updates are atomic replacements and never silently remove a known session ID.
 
 ### 13.3 Prompt
 

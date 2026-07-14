@@ -558,6 +558,23 @@ the existing checked **S2-INV-015**, **S2-TEST-010A**, **S2-TEST-010B**, and
 **S2-DOC-013** items; review and completion gates remain unchecked pending a
 fresh audit.
 
+Builder repair verification (2026-07-14) addressed **AUD-S2-024**. A recorded
+`SIGINT` or `SIGTERM` now arbitrates expected controller failures at every
+post-durable pre-session cooperative boundary, including the existing-session
+snapshot. Unless a `POST /session` outcome remains ambiguous, planned metadata
+is terminalized as `interrupted`, state is blocked with
+`invocation_interrupted`, and the process exits conventionally. Ambiguous
+creation retains `session_creation_ambiguous` without a session ID, abort, or
+retry while the signal still determines exit status. Timestamped errors use the
+same strict-before-cancellation precedence as the prompt worker; ordinary
+no-signal failures retain their reason and status. Focused signal/snapshot and
+timing coverage was added. Focused tests and the complete offline suite (**209
+passing, 1 opt-in real-server test skipped**) passed, followed by Ruff
+formatting/lint, strict mypy, compilation, build, clean-wheel installation, and
+diff checks. No live-server demonstration was rerun because the normal
+execution path is unchanged. Review and completion gates remain unchecked
+pending a fresh audit.
+
 ## 28. Scope Review
 
 - [x] **S2-SCOPEREVIEW-001** Confirm no product Builder prompt or mutating-agent result schema was implemented.

@@ -3799,6 +3799,91 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 state = json.loads((root / "info/foundation/1/state.json").read_text())
                 self.assertEqual(state["reason"]["code"], "session_creation_ambiguous")
 
+    def test_signal_during_pre_session_request_failure_interrupts_planned_invocation(self) -> None:
+        """Each recorded signal wins a snapshot failure after durable run creation."""
+        from opencode_sprint_loop import cli
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        for signal_number in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=signal_number):
+                fixture = SprintRepositoryFixture()
+                root = fixture.create()
+                self.addCleanup(fixture.close)
+                cancellation = cli._Cancellation()
+                fake = FakeAgentRunner(ValidatedServer("http://127.0.0.1:4096", "1.17.18"))
+
+                def fail_snapshot() -> set[str]:
+                    cancellation.record(signal_number, None)
+                    raise ControllerError("server_unavailable", "Synthetic snapshot failure")
+
+                with patch.object(fake, "existing_session_ids", side_effect=fail_snapshot):
+                    with self.assertRaises(cli._CancellationRequested) as context:
+                        cli._run(
+                            str(root),
+                            "http://127.0.0.1:4096",
+                            runner=fake,
+                            cancellation=cancellation,
+                        )
+                self.assertEqual(context.exception.exit_status, 128 + signal_number)
+                self.assertEqual(fake.created, [])
+                self.assertEqual(fake.submitted, [])
+                self.assertEqual(fake.aborted, [])
+                metadata = json.loads(
+                    (root / "invocations/foundation/1/0001-auditor/metadata.json").read_text()
+                )
+                self.assertEqual(metadata["status"], "interrupted")
+                self.assertIsNone(metadata["session_id"])
+                self.assertEqual(metadata["error"]["code"], "invocation_interrupted")
+                state = json.loads((root / "info/foundation/1/state.json").read_text())
+                self.assertEqual(state["reason"]["code"], "invocation_interrupted")
+                with redirect_stdout(StringIO()):
+                    self.assertEqual(cli._status(str(root), True), 0)
+
+    def test_pre_session_error_timestamp_precedence_and_no_signal_reason(self) -> None:
+        """Pre-session errors use the worker's strict timestamp precedence without signals."""
+        from opencode_sprint_loop import cli
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        cancellation = cli._Cancellation()
+        cancellation.signal_number = signal.SIGINT
+        cancellation.requested_at = 20.0
+        self.assertFalse(
+            cli._cancellation_wins_pre_session_error(
+                ControllerError("server_unavailable", "before", completed_at=19.0), cancellation
+            )
+        )
+        self.assertTrue(
+            cli._cancellation_wins_pre_session_error(
+                ControllerError("server_unavailable", "at boundary", completed_at=20.0),
+                cancellation,
+            )
+        )
+        self.assertTrue(
+            cli._cancellation_wins_pre_session_error(
+                ControllerError("server_unavailable", "unknown completion"), cancellation
+            )
+        )
+
+        fixture = SprintRepositoryFixture()
+        root = fixture.create()
+        self.addCleanup(fixture.close)
+        fake = FakeAgentRunner(
+            ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+            session_snapshot_error=ControllerError(
+                "server_unavailable", "Synthetic snapshot failure"
+            ),
+        )
+        with self.assertRaises(ControllerError) as context:
+            cli._run(str(root), "http://127.0.0.1:4096", runner=fake)
+        self.assertEqual(context.exception.code, "server_unavailable")
+        metadata = json.loads(
+            (root / "invocations/foundation/1/0001-auditor/metadata.json").read_text()
+        )
+        self.assertEqual(metadata["status"], "failed")
+        self.assertEqual(metadata["error"]["code"], "server_unavailable")
+        state = json.loads((root / "info/foundation/1/state.json").read_text())
+        self.assertEqual(state["reason"]["code"], "server_unavailable")
+
     def test_atomic_artifact_faults_leave_absent_prior_or_next_complete_json(self) -> None:
         """Short-write, permission, install, replacement, and sync faults never truncate JSON."""
         with TemporaryDirectory() as temporary:

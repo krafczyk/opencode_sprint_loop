@@ -531,6 +531,91 @@ def _arbitrate_synchronous_completion(
         raise _CancellationRequested(cancellation.signal_number)
 
 
+def _cancellation_wins_pre_session_error(
+    error: ControllerError, cancellation: _Cancellation
+) -> bool:
+    """Return whether a recorded signal wins a durable pre-session error.
+
+    A request error with a known monotonic completion before the signal retains
+    its truthful reason.  Errors without that evidence fail closed to the
+    recorded signal; equality likewise favors cancellation, matching prompt
+    worker arbitration.
+    """
+    cancelled_at = cancellation.timestamp()
+    if cancelled_at is None:
+        return False
+    return error.completed_at is None or error.completed_at >= cancelled_at
+
+
+def _finalize_pre_session_cancellation(
+    *,
+    error: ControllerError,
+    cancellation: _Cancellation,
+    state: dict[str, Any] | None,
+    paths: RuntimePaths,
+    config: SprintConfig,
+    persistence_lock: Path,
+    invocation_paths: InvocationPaths | None,
+    metadata: dict[str, Any] | None,
+    session_creation_in_flight: bool,
+    terminal_metadata_pending: bool,
+) -> _CancellationRequested | None:
+    """Checkpoint a recorded pre-session cancellation without inventing a session.
+
+    This covers every post-durable cooperative boundary before a validated
+    session exists, including the existing-session snapshot.  A create request
+    with an ambiguous outcome remains the durable reason, while the signal
+    still controls the process exit convention.
+    """
+    if (
+        state is None
+        or terminal_metadata_pending
+        or not _cancellation_wins_pre_session_error(error, cancellation)
+    ):
+        return None
+    assert cancellation.signal_number is not None
+    ambiguous_create = session_creation_in_flight and error.code == "session_creation_ambiguous"
+    terminal_error = (
+        error
+        if ambiguous_create
+        else ControllerError(
+            "invocation_interrupted", "OpenCode invocation was interrupted by a signal"
+        )
+    )
+    if invocation_paths is not None and metadata is not None and metadata["status"] == "planned":
+        try:
+            _terminal_metadata(
+                metadata,
+                status="failed" if ambiguous_create else "interrupted",
+                error=terminal_error,
+            )
+            write_metadata(invocation_paths, metadata)
+        except ControllerError:
+            # Preserve the original evidence when the planned record cannot be
+            # safely finalized.  The signal still determines process exit.
+            pass
+    try:
+        current, _ = validate_persistence(paths, config)
+        if current is not None and current["state"] == "validating":
+            transition(
+                current,
+                paths.events,
+                paths.state,
+                persistence_lock,
+                "blocked",
+                reason={
+                    "code": terminal_error.code,
+                    "message": terminal_error.message,
+                    "details": {},
+                },
+            )
+    except ControllerError:
+        # Never replace a more advanced or inconsistent durable prefix merely
+        # to record cancellation.
+        pass
+    return _CancellationRequested(cancellation.signal_number)
+
+
 def _run(
     root_value: str,
     server_url: str,
@@ -871,17 +956,22 @@ def _run(
             # terminal metadata or interruption events that deny it exists.
             if _installed_immutable_artifact(error):
                 terminal_metadata_pending = True
-            signal_exit: _CancellationRequested | None = None
-            if (
-                session_creation_in_flight
-                and error.code == "session_creation_ambiguous"
-                and cancellation.timestamp() is not None
-            ):
-                assert cancellation.signal_number is not None
-                # The POST outcome remains the durable workflow reason; the
-                # concurrently recorded signal controls only the process exit
-                # convention. No session identity is invented or aborted.
-                signal_exit = _CancellationRequested(cancellation.signal_number)
+            signal_exit = None
+            if session is None:
+                signal_exit = _finalize_pre_session_cancellation(
+                    error=error,
+                    cancellation=cancellation,
+                    state=state,
+                    paths=paths,
+                    config=config,
+                    persistence_lock=persistence_lock,
+                    invocation_paths=invocation_paths,
+                    metadata=metadata,
+                    session_creation_in_flight=session_creation_in_flight,
+                    terminal_metadata_pending=terminal_metadata_pending,
+                )
+            if signal_exit is not None:
+                raise signal_exit
             # A completed valid result has already emitted agent.completed;
             # never overwrite its metadata or append agent.interrupted.
             if terminal_metadata_pending:
@@ -944,8 +1034,6 @@ def _run(
                         )
                 except ControllerError:
                     pass
-            if signal_exit is not None:
-                raise signal_exit
             raise
         except BaseException:
             _persist_best_effort_failure(paths, config, persistence_lock)

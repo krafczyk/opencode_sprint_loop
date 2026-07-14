@@ -585,7 +585,11 @@ def validate_metadata(metadata: dict[str, Any]) -> None:
                 valid_result and has_session or not result["available"]
             )
         else:
-            valid_lifecycle = has_session and has_completed and not result["available"]
+            valid_lifecycle = (
+                has_completed
+                and not result["available"]
+                and (has_session or status == "interrupted")
+            )
         valid_lifecycle = valid_lifecycle and transcript["status"] != "pending"
         if not result["available"]:
             valid_lifecycle = valid_lifecycle and error_value is not None
