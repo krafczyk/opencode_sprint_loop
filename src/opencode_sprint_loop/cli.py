@@ -29,6 +29,7 @@ from .git import (
     verify_probe_snapshot,
 )
 from .invocations import (
+    ArtifactWriteError,
     InvocationPaths,
     allocate_paths,
     new_metadata,
@@ -373,6 +374,15 @@ def _abort_empty_session(runner: AgentRunner, session: CreatedSession) -> None:
         # The attempted abort is all the controller can safely do for a session
         # whose invocation state was not made durable.
         pass
+
+
+def _installed_immutable_artifact(error: ControllerError) -> bool:
+    """Return whether a failed result/transcript write left durable evidence behind."""
+    return (
+        isinstance(error, ArtifactWriteError)
+        and error.installed
+        and error.artifact in {"result.json", "transcript.json"}
+    )
 
 
 def _interrupt_active_invocation(
@@ -855,6 +865,23 @@ def _run(
                     pass
             raise cancellation_error
         except ControllerError as error:
+            # A post-install result or transcript failure is still a failure of
+            # the durable boundary, but its immutable artifact is real. Keep
+            # the result/transcript-before-metadata prefix rather than writing
+            # terminal metadata or interruption events that deny it exists.
+            if _installed_immutable_artifact(error):
+                terminal_metadata_pending = True
+            signal_exit: _CancellationRequested | None = None
+            if (
+                session_creation_in_flight
+                and error.code == "session_creation_ambiguous"
+                and cancellation.timestamp() is not None
+            ):
+                assert cancellation.signal_number is not None
+                # The POST outcome remains the durable workflow reason; the
+                # concurrently recorded signal controls only the process exit
+                # convention. No session identity is invented or aborted.
+                signal_exit = _CancellationRequested(cancellation.signal_number)
             # A completed valid result has already emitted agent.completed;
             # never overwrite its metadata or append agent.interrupted.
             if terminal_metadata_pending:
@@ -917,6 +944,8 @@ def _run(
                         )
                 except ControllerError:
                     pass
+            if signal_exit is not None:
+                raise signal_exit
             raise
         except BaseException:
             _persist_best_effort_failure(paths, config, persistence_lock)

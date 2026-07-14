@@ -504,6 +504,25 @@ data were removed. This verification does not itself constitute the required
 fresh independent audit; **S2-REVIEW-001** through **S2-REVIEW-009** and
 **S2-DONE-012** remain unchecked.
 
+Builder repair verification (2026-07-14) addressed **AUD-S2-020** and
+**AUD-S2-021**. Immutable result and semantic-failure transcript writers now
+report whether a post-link cleanup or directory-sync failure occurred after
+installation. Orchestration preserves that artifact-before-metadata prefix and
+does not append metadata or terminal events denying installed evidence. Focused
+fault injection covers post-link, temporary-unlink, and directory-sync failures
+for both artifacts, with status and invocation cross-validation of each prefix.
+When a recorded `SIGINT` or `SIGTERM` coincides with an ambiguous `POST
+/session`, the durable terminal reason remains `session_creation_ambiguous`
+without a session ID, abort, or retry, while the process receives conventional
+exit status 130 or 143. Focused fault/signal tests and the complete offline,
+format, lint, type, compile, build, clean-install, and diff verification passed
+(**206 passing, 1 opt-in real-server test skipped**). A repeat against installed
+OpenCode `1.17.18` reached the active fresh session but the server returned an
+invalid structured result, so it does not add successful normal-path evidence;
+the disposable fixture, server, logs, wheel build, and virtual environment were
+removed. This repair does not change the still-unchecked review or completion
+gates.
+
 ## 28. Scope Review
 
 - [x] **S2-SCOPEREVIEW-001** Confirm no product Builder prompt or mutating-agent result schema was implemented.

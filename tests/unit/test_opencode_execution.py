@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
 import os
@@ -2339,6 +2339,120 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     self.assertEqual(event_types[-1], "agent.completed")
                     self.assertNotIn("run.blocked", event_types)
 
+    def test_post_install_artifact_faults_preserve_truthful_write_ahead_prefixes(self) -> None:
+        """Post-link cleanup/sync failures never make metadata deny installed evidence."""
+        import opencode_sprint_loop.cli as cli
+        import opencode_sprint_loop.invocations as invocations
+
+        from opencode_sprint_loop.config import load_config
+        from opencode_sprint_loop.paths import runtime_paths
+        from opencode_sprint_loop.status import validate_persistence
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        for artifact, semantic_failure, fault in (
+            ("result.json", False, "post_link"),
+            ("result.json", False, "temp_unlink"),
+            ("result.json", False, "directory_sync"),
+            ("transcript.json", True, "post_link"),
+            ("transcript.json", True, "temp_unlink"),
+            ("transcript.json", True, "directory_sync"),
+        ):
+            with self.subTest(artifact=artifact, fault=fault):
+                fixture = SprintRepositoryFixture()
+                root = fixture.create()
+                self.addCleanup(fixture.close)
+                fake = FakeAgentRunner(
+                    ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+                    observations=[
+                        InvocationObservation(
+                            "idle",
+                            self._terminal_messages(completed),
+                            completed,
+                            False,
+                            semantic_failure,
+                            True,
+                        )
+                    ],
+                )
+                real_link = invocations.os.link
+                real_unlink = invocations.os.unlink
+                real_fsync = invocations.os.fsync
+                target_linked = False
+                cleanup_failed = False
+
+                def link_after_install(*args: object, **kwargs: object) -> None:
+                    nonlocal target_linked
+                    real_link(*args, **kwargs)  # type: ignore[arg-type]
+                    if args[1] == artifact:
+                        target_linked = True
+                        if fault == "post_link":
+                            raise OSError("synthetic post-link failure")
+
+                def unlink_after_install(name: object, *args: object, **kwargs: object) -> None:
+                    nonlocal cleanup_failed
+                    real_unlink(name, *args, **kwargs)  # type: ignore[arg-type]
+                    if (
+                        fault == "temp_unlink"
+                        and isinstance(name, str)
+                        and name.startswith(f".{artifact}-")
+                        and not cleanup_failed
+                    ):
+                        cleanup_failed = True
+                        raise OSError("synthetic post-install temporary cleanup failure")
+
+                def sync_after_install(descriptor: int) -> None:
+                    if (
+                        fault == "directory_sync"
+                        and target_linked
+                        and stat.S_ISDIR(os.fstat(descriptor).st_mode)
+                    ):
+                        raise OSError("synthetic post-install directory sync failure")
+                    real_fsync(descriptor)
+
+                with (
+                    patch(
+                        "opencode_sprint_loop.invocations.os.link", side_effect=link_after_install
+                    ),
+                    patch(
+                        "opencode_sprint_loop.invocations.os.unlink",
+                        side_effect=unlink_after_install,
+                    ),
+                    patch(
+                        "opencode_sprint_loop.invocations.os.fsync", side_effect=sync_after_install
+                    ),
+                ):
+                    with self.assertRaises(ControllerError) as context:
+                        cli._run(str(root), "http://127.0.0.1:4096", runner=fake)
+                self.assertEqual(context.exception.code, "invocation_record_failed")
+                directory = root / "invocations/foundation/1/0001-auditor"
+                self.assertTrue((directory / artifact).is_file())
+                metadata = json.loads((directory / "metadata.json").read_text())
+                self.assertEqual(metadata["status"], "running")
+                self.assertEqual(metadata["result"], {"available": False, "status": None})
+                self.assertEqual(metadata["transcript"], {"status": "pending", "truncated": False})
+                events = [
+                    json.loads(line)
+                    for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()
+                ]
+                self.assertEqual(events[-1]["type"], "agent.started")
+                self.assertNotIn("agent.interrupted", [event["type"] for event in events])
+                config = load_config(root)
+                state, _ = validate_persistence(
+                    runtime_paths(root, config.multisprint, config.sprint), config
+                )
+                self.assertEqual(state["state"], "validating")
+                output = StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(cli._status(str(root), True), 0)
+                self.assertEqual(json.loads(output.getvalue())["state"], "validating")
+
     def test_timeout_aborts_once_before_terminal_interruption_persistence(self) -> None:
         """A monotonic timeout runs the one-abort cleanup path exactly once."""
         from tests.integration.test_foundation import SprintRepositoryFixture
@@ -3358,6 +3472,43 @@ class OpenCodeExecutionTests(unittest.TestCase):
         )
         self.assertEqual(metadata["session_id"], "ses_fake_0001")
         self.assertEqual(metadata["status"], "interrupted")
+
+    def test_signal_during_ambiguous_session_creation_preserves_reason_and_exit(self) -> None:
+        """Ambiguous create reason wins durable state while each signal keeps its exit code."""
+        from opencode_sprint_loop import cli
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        for signal_number in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=signal_number):
+                fixture = SprintRepositoryFixture()
+                root = fixture.create()
+                self.addCleanup(fixture.close)
+                cancellation = cli._Cancellation()
+                fake = FakeAgentRunner(ValidatedServer("http://127.0.0.1:4096", "1.17.18"))
+
+                def ambiguous_create(_request: object) -> CreatedSession:
+                    cancellation.record(signal_number, None)
+                    raise ControllerError("session_creation_ambiguous", "Synthetic unknown outcome")
+
+                with patch.object(fake, "create_session", side_effect=ambiguous_create):
+                    with self.assertRaises(cli._CancellationRequested) as context:
+                        cli._run(
+                            str(root),
+                            "http://127.0.0.1:4096",
+                            runner=fake,
+                            cancellation=cancellation,
+                        )
+                self.assertEqual(context.exception.exit_status, 128 + signal_number)
+                self.assertEqual(fake.submitted, [])
+                self.assertEqual(fake.aborted, [])
+                metadata = json.loads(
+                    (root / "invocations/foundation/1/0001-auditor/metadata.json").read_text()
+                )
+                self.assertEqual(metadata["status"], "failed")
+                self.assertIsNone(metadata["session_id"])
+                self.assertEqual(metadata["error"]["code"], "session_creation_ambiguous")
+                state = json.loads((root / "info/foundation/1/state.json").read_text())
+                self.assertEqual(state["reason"]["code"], "session_creation_ambiguous")
 
     def test_atomic_artifact_faults_leave_absent_prior_or_next_complete_json(self) -> None:
         """Short-write, permission, install, replacement, and sync faults never truncate JSON."""

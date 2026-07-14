@@ -30,6 +30,24 @@ MAX_STRING_BYTES = 1024 * 1024
 _TERMINAL = {"completed", "blocked", "failed", "timed_out", "interrupted"}
 
 
+class ArtifactWriteError(ControllerError):
+    """Report an artifact-write failure together with its installation outcome.
+
+    Immutable artifact creation may succeed before cleanup or directory durability
+    reporting fails.  Callers must preserve that installed write-ahead prefix
+    rather than claiming the artifact is unavailable.
+    """
+
+    __slots__ = ("artifact", "installed")
+
+    def __init__(self, artifact: str, *, installed: bool) -> None:
+        super().__init__(
+            "invocation_record_failed", f"Could not persist invocation artifact: {artifact}"
+        )
+        self.artifact = artifact
+        self.installed = installed
+
+
 def reconcile_message_aliases(message: dict[str, Any], *, code: str, label: str) -> dict[str, Any]:
     """Normalize equivalent message fields while rejecting conflicting evidence.
 
@@ -253,9 +271,17 @@ def validate_result(value: Any) -> dict[str, Any]:
 
 
 def _atomic_write(path: Path, payload: bytes, *, replace: bool) -> None:
-    """Atomically install one complete owner-only artifact through an anchored directory."""
+    """Atomically install one complete owner-only artifact through an anchored directory.
+
+    ``ArtifactWriteError.installed`` distinguishes failures before installation
+    from post-install cleanup or durability-reporting failures.  The latter are
+    fail-closed, but the caller can retain a truthful write-ahead prefix.
+    """
     directory: int | None = None
     temporary_name = f".{path.name}-{uuid.uuid4().hex}.tmp"
+    temporary_identity: tuple[int, int] | None = None
+    installed = False
+    failure: BaseException | None = None
     try:
         directory = open_directory(path.parent, create=True)
         try:
@@ -282,6 +308,8 @@ def _atomic_write(path: Path, payload: bytes, *, replace: bool) -> None:
             if os.write(descriptor, payload) != len(payload):
                 raise OSError("short invocation artifact write")
             os.fsync(descriptor)
+            details = os.fstat(descriptor)
+            temporary_identity = (details.st_dev, details.st_ino)
         finally:
             os.close(descriptor)
         if replace:
@@ -299,6 +327,7 @@ def _atomic_write(path: Path, payload: bytes, *, replace: bool) -> None:
                 src_dir_fd=directory,
                 dst_dir_fd=directory,
             )
+            installed = True
         else:
             os.link(
                 temporary_name,
@@ -307,19 +336,47 @@ def _atomic_write(path: Path, payload: bytes, *, replace: bool) -> None:
                 dst_dir_fd=directory,
                 follow_symlinks=False,
             )
+            installed = True
             os.unlink(temporary_name, dir_fd=directory)
         os.fsync(directory)
-    except OSError as error:
-        raise ControllerError(
-            "invocation_record_failed", f"Could not persist invocation artifact: {path.name}"
-        ) from error
+    except BaseException as error:
+        failure = error
+        # A syscall may report a failure after a fault-injected or interrupted
+        # link/replace. Compare the destination to the still-known temporary
+        # inode before cleanup removes that evidence; an unrelated existing
+        # artifact cannot be mistaken for this controller write.
+        if not installed and isinstance(error, OSError) and temporary_identity is not None:
+            try:
+                current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+                installed = (
+                    stat.S_ISREG(current.st_mode)
+                    and (
+                        current.st_dev,
+                        current.st_ino,
+                    )
+                    == temporary_identity
+                )
+            except OSError:
+                pass
     finally:
         if directory is not None:
             try:
                 os.unlink(temporary_name, dir_fd=directory)
             except FileNotFoundError:
                 pass
-            os.close(directory)
+            except OSError as error:
+                if failure is None:
+                    failure = error
+            try:
+                os.close(directory)
+            except OSError as error:
+                if failure is None:
+                    failure = error
+    if failure is None:
+        return
+    if isinstance(failure, OSError):
+        raise ArtifactWriteError(path.name, installed=installed) from failure
+    raise failure
 
 
 @dataclass(frozen=True, slots=True)
