@@ -2485,6 +2485,263 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     self.assertEqual(inconsistent.exception.code, "inconsistent_invocation_record")
                     self.assertTrue(foreign.exists())
 
+    def test_readers_reject_unsafe_immutable_temporary_hardlink_prefixes_without_mutation(
+        self,
+    ) -> None:
+        """Only the exact active immutable temporary hard-link prefix is readable."""
+        import opencode_sprint_loop.cli as cli
+        import opencode_sprint_loop.invocations as invocations
+
+        from opencode_sprint_loop.config import load_config
+        from tests.integration.test_foundation import SprintRepositoryFixture
+
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+
+        def prefix_fixture() -> tuple[Path, object, dict[str, object], list[dict[str, object]]]:
+            fixture = SprintRepositoryFixture()
+            root = fixture.create()
+            self.addCleanup(fixture.close)
+            fake = FakeAgentRunner(
+                ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+                observations=[
+                    InvocationObservation(
+                        "idle", self._terminal_messages(completed), completed, False, False, True
+                    )
+                ],
+            )
+            real_unlink = invocations.os.unlink
+
+            def fail_temporary_cleanup(name: object, *args: object, **kwargs: object) -> None:
+                if isinstance(name, str) and name.startswith(".result.json-"):
+                    raise OSError("synthetic pre-side-effect temporary cleanup failure")
+                real_unlink(name, *args, **kwargs)  # type: ignore[arg-type]
+
+            with patch(
+                "opencode_sprint_loop.invocations.os.unlink", side_effect=fail_temporary_cleanup
+            ):
+                with self.assertRaises(ControllerError) as context:
+                    cli._run(str(root), "http://127.0.0.1:4096", runner=fake)
+            self.assertEqual(context.exception.code, "invocation_record_failed")
+            config = load_config(root)
+            directory = root / "invocations/foundation/1/0001-auditor"
+            state = json.loads((root / "info/foundation/1/state.json").read_text())
+            events = [
+                json.loads(line)
+                for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()
+            ]
+            return directory, config, state, events
+
+        def snapshot(paths: list[Path]) -> dict[Path, tuple[os.stat_result, bytes | None]]:
+            captured: dict[Path, tuple[os.stat_result, bytes | None]] = {}
+            for path in paths:
+                details = os.lstat(path)
+                captured[path] = (
+                    details,
+                    path.read_bytes() if stat.S_ISREG(details.st_mode) else None,
+                )
+            return captured
+
+        def assert_preserved(before: dict[Path, tuple[os.stat_result, bytes | None]]) -> None:
+            for path, (details, contents) in before.items():
+                self.assertTrue(path.exists(), path)
+                current = os.lstat(path)
+                self.assertEqual(
+                    (current.st_dev, current.st_ino, current.st_mode, current.st_nlink),
+                    (details.st_dev, details.st_ino, details.st_mode, details.st_nlink),
+                    path,
+                )
+                if contents is not None:
+                    self.assertEqual(path.read_bytes(), contents, path)
+
+        def temporary(directory: Path) -> Path:
+            names = [path for path in directory.iterdir() if path.name.startswith(".result.json-")]
+            self.assertEqual(len(names), 1)
+            return names[0]
+
+        def rewrite_metadata(directory: Path, mutate: object) -> list[Path]:
+            metadata_path = directory / "metadata.json"
+            metadata = json.loads(metadata_path.read_text())
+            mutate(metadata)  # type: ignore[operator]
+            metadata_path.write_text(json.dumps(metadata, sort_keys=True, indent=2) + "\n")
+            return [metadata_path]
+
+        def different_inode(
+            root: Path,
+            directory: Path,
+            _state: dict[str, object],
+            _events: list[dict[str, object]],
+        ) -> list[Path]:
+            target = directory / "result.json"
+            temp = temporary(directory)
+            temp.unlink()
+            temp.write_bytes(target.read_bytes())
+            temp.chmod(0o600)
+            target_companion = root / "target-companion"
+            temporary_companion = root / "temporary-companion"
+            os.link(target, target_companion)
+            os.link(temp, temporary_companion)
+            return [target, temp, target_companion, temporary_companion]
+
+        def wrong_mode(
+            _root: Path,
+            directory: Path,
+            _state: dict[str, object],
+            _events: list[dict[str, object]],
+        ) -> list[Path]:
+            temp = temporary(directory)
+            temp.chmod(0o640)
+            return [directory / "result.json", temp]
+
+        def wrong_link_count(
+            root: Path,
+            directory: Path,
+            _state: dict[str, object],
+            _events: list[dict[str, object]],
+        ) -> list[Path]:
+            target = directory / "result.json"
+            companion = root / "extra-hardlink"
+            os.link(target, companion)
+            return [target, temporary(directory), companion]
+
+        def foreign_name(
+            _root: Path,
+            directory: Path,
+            _state: dict[str, object],
+            _events: list[dict[str, object]],
+        ) -> list[Path]:
+            temp = temporary(directory)
+            foreign = directory / ".foreign-temporary-artifact"
+            temp.rename(foreign)
+            return [directory / "result.json", foreign]
+
+        def foreign_path(
+            root: Path,
+            directory: Path,
+            _state: dict[str, object],
+            _events: list[dict[str, object]],
+        ) -> list[Path]:
+            temp = temporary(directory)
+            foreign = root / temp.name
+            temp.rename(foreign)
+            return [directory / "result.json", foreign]
+
+        def non_running_metadata(
+            _root: Path,
+            directory: Path,
+            _state: dict[str, object],
+            _events: list[dict[str, object]],
+        ) -> list[Path]:
+            return rewrite_metadata(
+                directory, lambda metadata: metadata.update(status="session_created")
+            )
+
+        def terminal_metadata(
+            _root: Path,
+            directory: Path,
+            _state: dict[str, object],
+            _events: list[dict[str, object]],
+        ) -> list[Path]:
+            def make_terminal(metadata: dict[str, object]) -> None:
+                metadata.update(
+                    status="completed",
+                    completed_at=metadata["started_at"],
+                    result={"available": True, "status": "completed"},
+                    transcript={"status": "unavailable", "truncated": False},
+                )
+
+            return rewrite_metadata(directory, make_terminal)
+
+        def inactive_state(
+            _root: Path,
+            _directory: Path,
+            state: dict[str, object],
+            _events: list[dict[str, object]],
+        ) -> list[Path]:
+            state["active_invocation"] = None
+            return []
+
+        def mismatched_active(
+            _root: Path,
+            _directory: Path,
+            state: dict[str, object],
+            _events: list[dict[str, object]],
+        ) -> list[Path]:
+            active = state["active_invocation"]
+            assert isinstance(active, dict)
+            active["session_id"] = "ses_other"
+            return []
+
+        def terminal_event(
+            _root: Path,
+            _directory: Path,
+            _state: dict[str, object],
+            events: list[dict[str, object]],
+        ) -> list[Path]:
+            event = deepcopy(events[-1])
+            event["type"] = "agent.completed"
+            payload = event["payload"]
+            assert isinstance(payload, dict)
+            payload["result_status"] = "completed"
+            events.append(event)
+            return []
+
+        def extra_event(
+            _root: Path,
+            _directory: Path,
+            _state: dict[str, object],
+            events: list[dict[str, object]],
+        ) -> list[Path]:
+            events.append(deepcopy(events[-1]))
+            return []
+
+        cases = (
+            ("exact name, different inode", "inconsistent_invocation_record", different_inode),
+            ("wrong mode", "inconsistent_invocation_record", wrong_mode),
+            ("link count is three", "inconsistent_invocation_record", wrong_link_count),
+            ("foreign temporary name", "inconsistent_invocation_record", foreign_name),
+            ("foreign temporary path", "inconsistent_invocation_record", foreign_path),
+            ("non-running metadata", "inconsistent_invocation_record", non_running_metadata),
+            ("terminal metadata", "inconsistent_invocation_record", terminal_metadata),
+            ("inactive state", "inconsistent_invocation_record", inactive_state),
+            ("mismatched active state", "inconsistent_invocation_record", mismatched_active),
+            ("missing start event", "inconsistent_invocation_record", "missing_event"),
+            ("terminal event", "inconsistent_invocation_record", terminal_event),
+            ("extra start event", "inconsistent_invocation_record", extra_event),
+            ("out-of-order events", "corrupt_event_log", "out_of_order"),
+        )
+        for name, expected, mutate in cases:
+            with self.subTest(name=name):
+                directory, config, state, events = prefix_fixture()
+                evidence = [
+                    directory / "metadata.json",
+                    directory / "prompt.md",
+                    directory / "result.json",
+                    directory.parents[3] / "info/foundation/1/state.json",
+                    directory.parents[3] / "info/foundation/1/events.jsonl",
+                ]
+                if callable(mutate):
+                    preserved = mutate(directory.parents[3], directory, state, events)
+                    evidence.extend(preserved)
+                elif mutate == "missing_event":
+                    events.pop()
+                else:
+                    events[2], events[3] = events[3], events[2]
+                evidence.extend(directory.iterdir())
+                before = snapshot(evidence)
+                with self.assertRaises(ControllerError) as context:
+                    if mutate == "out_of_order":
+                        validate_event_history(events)
+                    else:
+                        validate_invocation_records(directory.parents[3], config, state, events)
+                self.assertEqual(context.exception.code, expected)
+                assert_preserved(before)
+
     def test_timeout_aborts_once_before_terminal_interruption_persistence(self) -> None:
         """A monotonic timeout runs the one-abort cleanup path exactly once."""
         from tests.integration.test_foundation import SprintRepositoryFixture

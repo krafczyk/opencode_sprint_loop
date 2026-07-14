@@ -341,15 +341,10 @@ asserts the title and two permission rules for `POST /session`; the agent,
 provider/model route, exact prompt, complete JSON schema, and no `retryCount`
 for `POST /session/<id>/message`; and that the captured bodies are identical.
 
-## Sprint 1 Demonstration
+## Historical Sprint 1 Demonstration
 
-Build and install a wheel in a clean environment, then run the demonstration against a real temporary Git repository and initialized submodule:
-
-```bash
-python3 -m build --no-isolation
-python3 -m venv /tmp/sprint-loop-demo-venv
-/tmp/sprint-loop-demo-venv/bin/python -m pip install --no-deps dist/opencode_sprint_loop-0.1.0-py3-none-any.whl
-/tmp/sprint-loop-demo-venv/bin/python scripts/demo_sprint1.py --executable /tmp/sprint-loop-demo-venv/bin/sprint-loop
-```
-
-Pass `--keep /tmp/sprint-loop-demo` to retain the generated repository for manual inspection. The script shows help, version, human and JSON no-run status, a real controller paused in `validating` with cross-process status, explicit OS-lock rejection, the real submodule, placeholder execution, `state.json`, ordered events, and human and JSON post-run status without a live OpenCode server or GitHub credentials.
+`scripts/demo_sprint1.py` is retained as a historical Sprint 1 foundation
+demonstration. It deliberately uses an opaque demo URL and transition mocking, so
+it is not runnable against the current Sprint 2 package: `run` now requires a
+healthy, already-running OpenCode server rooted at the sprint repository. Use the
+Sprint 2 demonstration and offline test commands above instead.

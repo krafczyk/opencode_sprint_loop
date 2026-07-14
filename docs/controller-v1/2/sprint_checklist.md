@@ -541,6 +541,23 @@ The latest model failure is stochastic; the existing installed-build success and
 deterministic route tests remain the applicable normal-path evidence. Review
 and completion gates remain unchecked.
 
+Builder repair verification (2026-07-14) addressed **AUD-S2-022** and
+**AUD-S2-023**. README now marks `scripts/demo_sprint1.py` as a historical
+Sprint 1 demonstration that is not runnable against Sprint 2's required healthy
+server preflight. A table-driven reader matrix constructs the valid immutable
+temporary hard-link prefix, then rejects different inodes, wrong modes, link
+counts, foreign names and paths, non-running or terminal metadata/events,
+inactive or mismatched active state, and missing, extra, or out-of-order events.
+Each case confirms the expected fail-closed classification and byte/inode/mode
+preservation of the evidence it reads. Focused immutable-prefix coverage and
+the complete offline suite (**207 passing, 1 opt-in real-server test skipped**)
+passed, followed by Ruff, formatting, strict mypy, compilation, build,
+clean-wheel installation, and diff checks. No live-server demonstration was
+rerun because these repairs do not change runtime behavior. This substantiates
+the existing checked **S2-INV-015**, **S2-TEST-010A**, **S2-TEST-010B**, and
+**S2-DOC-013** items; review and completion gates remain unchecked pending a
+fresh audit.
+
 ## 28. Scope Review
 
 - [x] **S2-SCOPEREVIEW-001** Confirm no product Builder prompt or mutating-agent result schema was implemented.
