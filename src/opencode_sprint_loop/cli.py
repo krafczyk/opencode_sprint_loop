@@ -691,7 +691,6 @@ def _run(
             write_transcript(invocation_paths, wrapper)
             transcript_status = "truncated" if wrapper["truncated"] else "complete"
             transcript_truncated = bool(wrapper["truncated"])
-            transcript_error = None
             metadata.update(
                 {
                     "status": result["status"],
@@ -701,11 +700,7 @@ def _run(
                         "status": transcript_status,
                         "truncated": transcript_truncated,
                     },
-                    "error": (
-                        None
-                        if transcript_error is None
-                        else {"code": transcript_error.code, "message": transcript_error.message}
-                    ),
+                    "error": None,
                 }
             )
             # A raised write leaves immutable result/transcript artifacts as
@@ -729,8 +724,6 @@ def _run(
             )
             terminal_metadata_pending = False
             agent_completed = True
-            if transcript_error is not None:
-                raise transcript_error
             if result["status"] != "completed":
                 raise ControllerError(
                     "invocation_failed", "Execution probe reported it could not complete"

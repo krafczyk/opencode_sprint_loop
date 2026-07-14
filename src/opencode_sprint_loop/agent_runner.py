@@ -50,7 +50,7 @@ class CreatedSession:
 
 @dataclass(frozen=True, slots=True)
 class InvocationObservation:
-    """One bounded polling observation and its normalized message evidence."""
+    """One synchronous terminal response and its normalized message evidence."""
 
     status: str | None
     messages: list[dict[str, Any]]
@@ -66,13 +66,6 @@ class AbortObservation:
     """Result of a single best-effort session abort request."""
 
     acknowledged: bool
-
-
-@dataclass(frozen=True, slots=True)
-class TranscriptCapture:
-    """Raw validated message records retained for controller sanitization."""
-
-    messages: list[dict[str, Any]]
 
 
 class AgentRunner(Protocol):
@@ -117,7 +110,6 @@ class FakeAgentRunner:
         create_error: Exception | None = None,
         submit_error: Exception | None = None,
         abort_error: Exception | None = None,
-        transcript_error: Exception | None = None,
     ) -> None:
         """Configure deterministic values or failures for every runner operation."""
         self.validated = validated
@@ -130,7 +122,6 @@ class FakeAgentRunner:
         self.create_error = create_error
         self.submit_error = submit_error
         self.abort_error = abort_error
-        self.transcript_error = transcript_error
         self.created: list[CreatedSession] = []
         self.submitted: list[str] = []
         self.aborted: list[str] = []
@@ -214,22 +205,6 @@ class FakeAgentRunner:
                 raise observation
             return observation.status
         return "idle"
-
-    # Retained only for older fake-focused callers; controller execution uses
-    # execute_prompt and never performs normal observation polling.
-    def submit_prompt(
-        self, session: CreatedSession, request: InvocationRequest, *, deadline: float | None = None
-    ) -> InvocationObservation:
-        """Compatibility wrapper for one scripted synchronous response."""
-        return self.execute_prompt(session, request, deadline=deadline)
-
-    def observe(
-        self, session: CreatedSession, *, deadline: float | None = None
-    ) -> InvocationObservation:
-        """Compatibility status wrapper without HTTP message retrieval."""
-        return InvocationObservation(
-            self.observe_status(session, deadline=deadline), [], None, False, False
-        )
 
     def abort(self, session: CreatedSession) -> AbortObservation:
         """Record a scripted abort acknowledgement."""

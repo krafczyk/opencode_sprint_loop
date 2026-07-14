@@ -205,9 +205,9 @@ evidence fails closed. A present session-status entry must use the documented
 `1.17.x` object with a string `type`; only an absent entry means missing status.
 On timeout, uncertain terminal evidence, or cooperative `SIGINT`/`SIGTERM`, the
 controller sends exactly one best-effort abort, uses one monotonic ten-second
-confirmation deadline for every follow-up observation, and records both the
-strict JSON-boolean abort acknowledgement and whether idle or terminal
-confirmation was obtained before capturing any available sanitized transcript. `SIGINT` and
+confirmation deadline for every status-only follow-up observation, and records
+both the strict JSON-boolean abort acknowledgement and whether `idle`
+confirmation was obtained. It never retrieves messages after abort. `SIGINT` and
 `SIGTERM` return statuses 130 and 143 respectively. Ambiguous session creation
 is not retried and an orphan session may remain. Interrupted work is not resumed
 or repaired in Sprint 2. When cancellation confirmation is unavailable, the
@@ -273,9 +273,12 @@ the one structured prompt. It does not use the message-list endpoint, including
 for transcript capture. The returned assistant message and parts are retained
 as bounded sanitized evidence; the exact persisted prompt is reconstructed as
 the paired user record only through the returned assistant parent ID. OpenCode
-may expose the result at `info.structured` or `info.structured_output`; aliases
-that conflict, errors, tools, permission requests, identity mismatches, and
-missing output fail closed. The long HTTP call runs in a daemon worker while the
+may expose the result at top level or in `info` under `structured` or
+`structured_output`; aliases for structured output, role, message ID, error,
+route identity, and supported parent spellings must agree. Contradictions,
+errors, tools, permission requests, identity mismatches, and missing output fail
+closed. The long HTTP call receives the complete remaining monotonic invocation
+budget and runs in a daemon worker while the
 controller blocks on a bounded queue wait, so idle waiting uses negligible CPU
 but the configured invocation timeout remains a wall-clock deadline. Timeout
 or signal cancellation sends one abort and checks only session status, at most

@@ -282,7 +282,7 @@ def validate_event_history(events: list[dict[str, Any]]) -> None:
                             payload["abort_acknowledged"] is not None
                             and not isinstance(payload["abort_acknowledged"], bool)
                         )
-                        or payload["abort_confirmation"] not in {None, "idle", "terminal"}
+                        or payload["abort_confirmation"] not in {None, "idle"}
                     ):
                         raise ControllerError(
                             "corrupt_event_log", "Agent interruption event payload is invalid"

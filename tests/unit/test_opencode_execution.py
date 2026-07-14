@@ -1138,44 +1138,6 @@ class OpenCodeExecutionTests(unittest.TestCase):
         state = json.loads((root / "info/foundation/1/state.json").read_text())
         self.assertEqual(state["reason"]["code"], "unexpected_agent_repository_change")
 
-    def test_transcript_failure_prevents_result_acceptance(self) -> None:
-        """Required terminal transcript failure interrupts before accepting a result."""
-        from tests.integration.test_foundation import SprintRepositoryFixture
-        from opencode_sprint_loop.cli import _run
-
-        fixture = SprintRepositoryFixture()
-        root = fixture.create()
-        self.addCleanup(fixture.close)
-        completed = {
-            "schema_version": 1,
-            "status": "completed",
-            "summary": "ok",
-            "checks": [],
-            "blocking_reason": None,
-        }
-        fake = FakeAgentRunner(
-            ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
-            observations=[
-                InvocationObservation(
-                    "idle", self._terminal_messages(completed), completed, False, False, True
-                )
-            ],
-            transcript_error=ControllerError(
-                "transcript_capture_failed", "Synthetic transcript failure"
-            ),
-        )
-        self.assertEqual(_run(str(root), "http://127.0.0.1:4096", runner=fake), 4)
-        directory = root / "invocations/foundation/1/0001-auditor"
-        metadata = json.loads((directory / "metadata.json").read_text())
-        events = [
-            json.loads(line)
-            for line in (root / "info/foundation/1/events.jsonl").read_text().splitlines()
-        ]
-        self.assertEqual(metadata["status"], "completed")
-        self.assertEqual(metadata["transcript"]["status"], "complete")
-        self.assertTrue((directory / "result.json").exists())
-        self.assertIn("agent.completed", [event["type"] for event in events])
-
     def test_terminal_result_without_associated_assistant_evidence_is_interrupted(self) -> None:
         """Idle structured output without sole-prompt assistant evidence cannot pass."""
         from tests.integration.test_foundation import SprintRepositoryFixture
@@ -1336,7 +1298,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
             ):
                 self.assertIs(runner.abort(session).acknowledged, response)
 
-    def test_abort_confirmation_records_idle_terminal_or_unconfirmed(self) -> None:
+    def test_abort_confirmation_records_idle_or_unconfirmed(self) -> None:
         """Post-abort evidence is explicitly classified without treating absence as idle."""
         from opencode_sprint_loop.cli import _run
         from tests.integration.test_foundation import SprintRepositoryFixture
@@ -1431,8 +1393,8 @@ class OpenCodeExecutionTests(unittest.TestCase):
         ]
         self.assertEqual(events[-2]["payload"]["abort_confirmation"], "idle")
 
-    def test_malformed_fake_transcript_blocks_with_sanitized_evidence(self) -> None:
-        """Safe malformed evidence is retained even though it cannot complete the probe."""
+    def test_malformed_returned_evidence_blocks_with_sanitized_evidence(self) -> None:
+        """Safe malformed synchronous evidence is retained even though it cannot complete the probe."""
         from opencode_sprint_loop.cli import _run
         from tests.integration.test_foundation import SprintRepositoryFixture
 
@@ -1510,8 +1472,8 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 self.assertEqual(events[-1]["type"], "run.blocked")
                 self.assertEqual(state["reason"]["code"], "invalid_agent_result")
 
-    def test_delayed_transcript_tool_evidence_prevents_probe_success(self) -> None:
-        """A forbidden tool appearing only in final transcript capture fails closed."""
+    def test_returned_transcript_tool_evidence_prevents_probe_success(self) -> None:
+        """A forbidden tool in returned terminal evidence fails closed."""
         from opencode_sprint_loop.cli import _run
         from tests.integration.test_foundation import SprintRepositoryFixture
 
@@ -1720,7 +1682,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
         self.assertEqual(len(fake.created), 1)
         self.assertEqual(fake.submitted, ["ses_fake_0001"])
 
-    def test_prompt_and_observation_transport_failures_abort_once(self) -> None:
+    def test_prompt_and_status_confirmation_transport_failures_abort_once(self) -> None:
         """Uncertain post-create transport outcomes preserve identity through bounded abort."""
         from tests.integration.test_foundation import SprintRepositoryFixture
         from opencode_sprint_loop.cli import _run
@@ -2221,6 +2183,180 @@ class OpenCodeExecutionTests(unittest.TestCase):
         self.assertLessEqual(timeouts[0], 0.06)
         self.assertLess(elapsed, 0.2)
 
+    def test_synchronous_message_post_uses_full_remaining_invocation_budget(self) -> None:
+        """The one long non-idempotent POST is not capped by the short request timeout."""
+        from opencode_sprint_loop.agent_runner import CreatedSession, InvocationRequest
+
+        runner = OpenCodeServerRunner("http://127.0.0.1:4096")
+        root = Path("/tmp").resolve()
+        request = InvocationRequest(
+            "0001-auditor", 1, "auditor", "test/strong", "title", "probe\n", root
+        )
+        session = CreatedSession(
+            "ses_test",
+            "title",
+            root,
+            ({"permission": "*", "pattern": "*", "action": "deny"},),
+        )
+        response = {
+            "info": {
+                "id": "msg_assistant",
+                "role": "assistant",
+                "parentID": "msg_user",
+                "agent": "auditor",
+                "providerID": "test",
+                "modelID": "strong",
+                "structured": {
+                    "schema_version": 1,
+                    "status": "completed",
+                    "summary": "ok",
+                    "checks": [],
+                    "blocking_reason": None,
+                },
+            },
+            "parts": [],
+        }
+        timeouts: list[float] = []
+
+        def capture_timeout(_request: object, *, timeout: float) -> _HTTPResponse:
+            timeouts.append(timeout)
+            return _HTTPResponse(
+                "http://127.0.0.1:4096/session/ses_test/message", json.dumps(response).encode()
+            )
+
+        with (
+            patch("opencode_sprint_loop.opencode_runner.time.monotonic", return_value=100.0),
+            patch.object(runner._opener, "open", side_effect=capture_timeout),
+        ):
+            runner.execute_prompt(session, request, deadline=125.0)
+        self.assertEqual(timeouts, [25.0])
+
+    def test_adapter_rejects_conflicting_terminal_message_aliases(self) -> None:
+        """Top-level and info aliases cannot contradict one another in a terminal POST response."""
+        from opencode_sprint_loop.agent_runner import InvocationRequest
+
+        runner = OpenCodeServerRunner("http://127.0.0.1:4096")
+        request = InvocationRequest(
+            "0001-auditor", 1, "auditor", "test/strong", "title", "probe\n", Path("/tmp")
+        )
+        result = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        base = {
+            "id": "msg_assistant",
+            "role": "assistant",
+            "parentID": "msg_user",
+            "agent": "auditor",
+            "providerID": "test",
+            "modelID": "strong",
+            "structured_output": result,
+            "error": None,
+            "info": {
+                "id": "msg_assistant",
+                "role": "assistant",
+                "parent_id": "msg_user",
+                "agent": "auditor",
+                "provider_id": "test",
+                "model_id": "strong",
+                "structured": result,
+                "error": None,
+            },
+            "parts": [{"type": "structured_output", "value": result, "output": result}],
+        }
+        self.assertEqual(
+            runner._synchronous_response(deepcopy(base), request).structured_result, result
+        )
+        cases = (
+            ("role", lambda message: message["info"].__setitem__("role", "user")),
+            ("ID", lambda message: message["info"].__setitem__("id", "other")),
+            ("error", lambda message: message["info"].__setitem__("error", "failed")),
+            (
+                "structured output",
+                lambda message: message["info"].__setitem__("structured", {"other": True}),
+            ),
+            ("parent", lambda message: message["info"].__setitem__("parent_id", "other-parent")),
+            ("route", lambda message: message["info"].__setitem__("agent", "builder")),
+            (
+                "part output",
+                lambda message: message["parts"][0].__setitem__("output", {"other": True}),
+            ),
+        )
+        for label, mutate in cases:
+            with self.subTest(alias=label):
+                message = deepcopy(base)
+                mutate(message)
+                with self.assertRaises(ControllerError) as context:
+                    runner._synchronous_response(message, request)
+                self.assertEqual(context.exception.code, "malformed_server_response")
+
+    def test_transcript_validation_rejects_conflicting_message_aliases(self) -> None:
+        """Persisted transcript validation applies the same fail-closed alias reconciliation."""
+        result = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        base = self._terminal_messages(result)
+        assistant = base[1]
+        assistant["info"].update(  # type: ignore[index]
+            {
+                "id": "answer-1",
+                "role": "assistant",
+                "parent_id": "prompt-1",
+                "error": None,
+                "structured_output": result,
+            }
+        )
+        self.assertEqual(
+            validate_transcript_messages(
+                deepcopy(base),
+                expected_result=result,
+                expected_prompt=probe_prompt("foundation", 1, "0001-auditor"),
+                expected_role="auditor",
+                expected_model="test/strong",
+            ),
+            base,
+        )
+        cases = (
+            ("role", lambda message: message[1]["info"].__setitem__("role", "user")),
+            ("ID", lambda message: message[1]["info"].__setitem__("id", "other")),
+            ("error", lambda message: message[1]["info"].__setitem__("error", "failed")),
+            (
+                "structured output",
+                lambda message: message[1]["info"].__setitem__(
+                    "structured_output", {"other": True}
+                ),
+            ),
+            (
+                "parent",
+                lambda message: message[1]["info"].__setitem__("parent_id", "other-parent"),
+            ),
+            ("route", lambda message: message[1]["info"].__setitem__("agent", "builder")),
+            (
+                "part output",
+                lambda message: message[1]["parts"][0].update({"output": {"other": True}}),
+            ),
+        )
+        for label, mutate in cases:
+            with self.subTest(alias=label):
+                messages = deepcopy(base)
+                mutate(messages)
+                with self.assertRaises(ControllerError) as context:
+                    validate_transcript_messages(
+                        messages,
+                        expected_result=result,
+                        expected_prompt=probe_prompt("foundation", 1, "0001-auditor"),
+                        expected_role="auditor",
+                        expected_model="test/strong",
+                    )
+                self.assertEqual(context.exception.code, "transcript_capture_failed")
+
     def test_authentication_header_is_in_memory_and_origin_bound(self) -> None:
         """Inherited Basic authentication reaches only the validated request origin."""
         with patch.dict(
@@ -2581,8 +2717,9 @@ class OpenCodeExecutionTests(unittest.TestCase):
             self.assertEqual(context.exception.code, code)
 
         observations = [
-            InvocationObservation(status, [], None, False, False)
-            for status in ("busy", "retry", "idle", None, "unknown")
+            InvocationObservation("idle", [], None, False, False),
+            InvocationObservation("busy", [], None, False, False),
+            InvocationObservation("idle", [], None, False, False),
         ]
         fake = FakeAgentRunner(
             ValidatedServer("http://127.0.0.1:1", "1.17.18"),
@@ -2597,12 +2734,9 @@ class OpenCodeExecutionTests(unittest.TestCase):
         self.assertEqual(session.session_id, "ses_unique")
         fake.execute_prompt(session, request)
         self.assertEqual(
-            [fake.observe(session).status for _ in range(5)],
+            [fake.observe_status(session) for _ in range(2)],
             [
-                "retry",
-                "idle",
-                None,
-                "unknown",
+                "busy",
                 "idle",
             ],
         )
@@ -2645,7 +2779,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     elif argument == "create_error":
                         scripted.create_session(request)
                     elif argument == "submit_error":
-                        scripted.submit_prompt(session, request)
+                        scripted.execute_prompt(session, request)
                     elif argument == "abort_error":
                         scripted.abort(session)
                 self.assertEqual(context.exception.code, code)

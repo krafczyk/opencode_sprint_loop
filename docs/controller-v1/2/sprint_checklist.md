@@ -110,7 +110,7 @@ fixtures use those documented shapes.
 - [x] **S2-FAKE-001** Implement a deterministic fake satisfying the `AgentRunner` protocol.
 - [x] **S2-FAKE-002** Script every server validation success and failure category.
 - [x] **S2-FAKE-003** Script unique, duplicate, and ambiguous session creation outcomes.
-- [x] **S2-FAKE-004** Script busy, retry, idle, missing, unknown, and inconsistent observation states.
+- [x] **S2-FAKE-004** Script blocked synchronous completion and bounded status-only abort observations.
 - [x] **S2-FAKE-005** Script valid, blocked, failed, malformed, free-form, and oversized results.
 - [x] **S2-FAKE-006** Script timeout, interruption, abort acknowledgement, and abort non-acknowledgement.
 - [x] **S2-FAKE-007** Script complete, malformed, credential-bearing, and oversized transcripts.
@@ -178,7 +178,7 @@ fixtures use those documented shapes.
 - [x] **S2-ABORT-002** Treat catchable `SIGINT` and `SIGTERM` as cooperative cancellation requests and attempt abort while a session is active.
 - [x] **S2-ABORT-003** Bound abort confirmation to 10 seconds.
 - [x] **S2-ABORT-004** Treat abort acknowledgement as acknowledgement rather than proof of full cancellation.
-- [x] **S2-ABORT-005** Retrieve and sanitize available transcript evidence after abort when possible.
+- [x] **S2-ABORT-005** Preserve only already-returned synchronous transcript evidence; do not retrieve messages after abort.
 - [x] **S2-ABORT-006** Persist `agent.interrupted` and clear active invocation when persistence remains coherent.
 - [x] **S2-ABORT-007** Enter blocked with `invocation_timed_out` or `invocation_interrupted`.
 - [x] **S2-ABORT-008** Record inability to confirm abort without losing the session ID.
@@ -314,7 +314,7 @@ fixtures use those documented shapes.
 - [x] **S2-STATUS-005** Keep server URL, credentials, prompt, result summary, transcript, and raw errors out of status.
 - [x] **S2-STATUS-006** Keep status read-only and independent of OpenCode availability.
 - [x] **S2-STATUS-007** Make no HTTP request from human or JSON status.
-- [x] **S2-STATUS-008** Keep status readable during session polling apart from short persistence writes.
+- [x] **S2-STATUS-008** Keep status readable during synchronous worker waiting apart from short persistence writes.
 - [x] **S2-STATUS-009** Project same-state Sprint 2 events as the latest event correctly.
 - [x] **S2-STATUS-010** Continue reading valid Sprint 1 placeholder histories unchanged.
 
@@ -430,7 +430,7 @@ configured Auditor/provider/model identity; malformed present status entries
 are rejected rather than normalized. Abort responses strictly accept and retain
 only their documented JSON-boolean acknowledgement, all post-abort observations
 share one monotonic confirmation deadline, and interruption events record
-`idle`, `terminal`, or absent confirmation. Focused offline execution and
+`idle` or absent confirmation. Focused offline execution and
 foundation tests passed. These repairs revalidate the affected checked
 implementation and test items, but are not a fresh audit; **S2-REVIEW-001**
 through **S2-REVIEW-009** and **S2-DONE-012** remain unchecked.
@@ -465,6 +465,19 @@ tests and the complete offline suite passed (196 passing, one opt-in real-server
 test skipped), along with Ruff, mypy, compilation, build, and diff checks. This
 is not a fresh audit; **S2-REVIEW-001** through
 **S2-REVIEW-009** and **S2-DONE-012** remain unchecked.
+
+Builder repair verification (2026-07-14) addressed **AUD-S2-014** through
+**AUD-S2-016**. The one synchronous `POST /session/:id/message` now receives
+the complete remaining monotonic invocation budget, while preflight, abort, and
+status requests retain short bounded transport timeouts. Adapter and persisted
+transcript validation reconcile top-level and `info` aliases for role, message
+ID, error, structured output, route identity, and supported parent spellings;
+contradictory duplicates fail closed while identical aliases retain the complete
+assistant evidence. Sprint terminology and fake/protocol coverage now describe
+one synchronous response, no normal polling or post-abort message retrieval,
+and status-only abort confirmation (`idle` or null). Focused and full
+verification plus the fresh audit and real-server exit-demo gates remain
+required before completion items are checked.
 
 ## 28. Scope Review
 

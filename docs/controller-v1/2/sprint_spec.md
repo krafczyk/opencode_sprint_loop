@@ -66,7 +66,7 @@ Sprint 2 must handle ordinary, non-adversarial failures including:
 - Unhealthy servers, unsupported versions, and wrong default workspaces.
 - Missing configured agents, providers, or models.
 - Malformed, incomplete, oversized, or inconsistent OpenCode responses.
-- Lost connections during session creation, synchronous prompt submission, abort confirmation, or transcript collection.
+- Lost connections during session creation, synchronous prompt submission, or status-only abort confirmation.
 - Invalid structured output and server-reported structured-output failure.
 - Controller interruption before or during an invocation.
 - Permission, short-write, disk, and atomic-replacement failures while recording invocation evidence.
@@ -479,9 +479,10 @@ If step 3 fails, the controller must not submit the prompt and makes a best-effo
   worker shutdown. A late worker result cannot mutate persistence or launch a
   new invocation.
 - The returned object must be the configured assistant terminal response with
-  a bounded parent ID, matching role/agent/provider/model, no error, and one
-  unconflicted structured-output location. `info.structured` and documented
-  `info.structured_output` are accepted; conflicting aliases, permission
+  bounded message and parent IDs, matching role/agent/provider/model, no error,
+  and one unconflicted structured-output value. Top-level and `info` aliases
+  for role, message ID, error, structured output, route identity, and supported
+  parent spellings reconcile exactly; contradictory duplicates, permission
   requests, forbidden tools, malformed parts, or absent output fail closed.
 - The controller retains the returned assistant message and parts exactly as
   bounded external evidence. It reconstructs the sole user record from the
@@ -500,7 +501,8 @@ Sprint 2 treats catchable `SIGINT` and `SIGTERM` as cooperative cancellation req
 1. Request `POST /session/<id>/abort` once.
 2. Set one monotonic confirmation deadline and use only `GET /session/status`
    checks, at most once per second, sleeping or blocking between checks. Every
-   check receives that same deadline; an absent status entry is not confirmation.
+   check receives that same deadline; only `idle` confirms cancellation and an
+   absent status entry is not confirmation.
 3. Retain only a synchronous response that arrived before cancellation; never
    fetch the message-list endpoint.
 4. Record `agent.interrupted` and clear active invocation state when persistence is possible.
@@ -558,7 +560,7 @@ The exact Sprint 2 payloads are:
 {"previous_state":"validating","invocation_id":"0001-auditor","role":"auditor","session_id":"ses_example","interruption":{"code":"invocation_timed_out","message":"OpenCode invocation exceeded its configured timeout.","details":{}},"abort_acknowledged":true,"abort_confirmation":"idle"}
 ```
 
-These correspond in order to `server.validated`, `agent.started`, `agent.completed`, and `agent.interrupted`. Exact fields are required. `abort_acknowledged` is boolean or null. `abort_confirmation` is `idle`, `terminal`, or null and records whether bounded post-abort confirmation was actually obtained. The safe interruption object uses the existing reason shape but is named `interruption` because same-state events leave `state.reason` null. Identifier bounds from Section 14 apply. `result_status` is `completed`, `blocked`, or `failed`.
+These correspond in order to `server.validated`, `agent.started`, `agent.completed`, and `agent.interrupted`. Exact fields are required. `abort_acknowledged` is boolean or null. `abort_confirmation` is `idle` or null and records whether bounded status-only post-abort confirmation was actually obtained. The safe interruption object uses the existing reason shape but is named `interruption` because same-state events leave `state.reason` null. Identifier bounds from Section 14 apply. `result_status` is `completed`, `blocked`, or `failed`.
 
 ### 11.3 Terminal Classification
 
@@ -881,10 +883,10 @@ The last event may be `server.validated`, `agent.started`, `agent.completed`, `a
 - Session ID is durable in event/state before prompt submission.
 - A failure persisting the ID prevents submission and attempts abort.
 - Ambiguous create failure is not retried.
-- Busy and retry statuses remain pending.
-- Idle or missing status without terminal message evidence does not pass.
-- Valid terminal message and structured result complete.
-- Unknown status and inconsistent message evidence fail closed.
+- The one synchronous response supplies terminal message evidence; normal
+  status and message polling do not occur.
+- Valid terminal message and structured result complete; absent or inconsistent
+  terminal evidence fails closed.
 - Timeout uses monotonic time, calls abort once, and records interruption.
 - Cooperative interruption attempts abort and preserves the session ID.
 - Abort non-acknowledgement is retained as failure evidence.

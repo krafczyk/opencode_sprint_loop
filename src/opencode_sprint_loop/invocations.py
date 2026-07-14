@@ -30,6 +30,78 @@ MAX_STRING_BYTES = 1024 * 1024
 _TERMINAL = {"completed", "blocked", "failed", "timed_out", "interrupted"}
 
 
+def reconcile_message_aliases(message: dict[str, Any], *, code: str, label: str) -> dict[str, Any]:
+    """Normalize equivalent message fields while rejecting conflicting evidence.
+
+    OpenCode has returned message identity and result fields both at the message
+    top level and below ``info``.  A response may use either documented spelling,
+    but two present spellings must mean exactly the same thing.  This helper is
+    shared by the live adapter and durable transcript validation so acceptance
+    cannot depend on which representation is examined first.
+    """
+    raw_info = message.get("info")
+    if raw_info is not None and not isinstance(raw_info, dict):
+        raise ControllerError(code, f"{label} is malformed")
+    info: dict[str, Any] = raw_info if isinstance(raw_info, dict) else {}
+
+    def value(name: str, locations: tuple[tuple[dict[str, Any], str], ...]) -> Any:
+        candidates = [source[key] for source, key in locations if key in source]
+        if candidates and any(candidate != candidates[0] for candidate in candidates[1:]):
+            raise ControllerError(code, f"{label} has conflicting {name} aliases")
+        return candidates[0] if candidates else None
+
+    return {
+        "role": value("role", ((message, "role"), (info, "role"))),
+        "id": value("message ID", ((message, "id"), (info, "id"))),
+        "error": value("error", ((message, "error"), (info, "error"))),
+        "structured": value(
+            "structured output",
+            (
+                (message, "structured"),
+                (message, "structured_output"),
+                (info, "structured"),
+                (info, "structured_output"),
+            ),
+        ),
+        "parent": value(
+            "parent ID",
+            (
+                (message, "parentID"),
+                (message, "parent_id"),
+                (info, "parentID"),
+                (info, "parent_id"),
+            ),
+        ),
+        "agent": value("agent", ((message, "agent"), (info, "agent"))),
+        "provider_id": value(
+            "provider ID",
+            (
+                (message, "providerID"),
+                (message, "provider_id"),
+                (info, "providerID"),
+                (info, "provider_id"),
+            ),
+        ),
+        "model_id": value(
+            "model ID",
+            (
+                (message, "modelID"),
+                (message, "model_id"),
+                (info, "modelID"),
+                (info, "model_id"),
+            ),
+        ),
+    }
+
+
+def reconcile_part_output(part: dict[str, Any], *, code: str, label: str) -> Any:
+    """Return one structured part payload, rejecting value/output disagreement."""
+    candidates = [part[key] for key in ("value", "output") if key in part]
+    if candidates and any(candidate != candidates[0] for candidate in candidates[1:]):
+        raise ControllerError(code, f"{label} has conflicting structured output aliases")
+    return candidates[0] if candidates else None
+
+
 def _bounded_string(value: Any, field: str, limit: int = 1024) -> str:
     """Validate one bounded, control-character-free invocation identifier."""
     if not isinstance(value, str) or not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
@@ -509,12 +581,11 @@ def validate_transcript_messages(
     user_messages: list[tuple[int, str, dict[str, Any]]] = []
     assistant_results: list[tuple[int, dict[str, Any], Any]] = []
     for index, message in enumerate(messages):
-        raw_info = message.get("info")
-        if raw_info is not None and not isinstance(raw_info, dict):
-            raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
-        info: dict[str, Any] = raw_info if isinstance(raw_info, dict) else {}
-        role = message.get("role", info.get("role"))
-        identifier = message.get("id", info.get("id"))
+        aliases = reconcile_message_aliases(
+            message, code="transcript_capture_failed", label="OpenCode transcript message"
+        )
+        role = aliases["role"]
+        identifier = aliases["id"]
         parts = message.get("parts")
         if (
             role not in {"user", "assistant"}
@@ -558,20 +629,21 @@ def validate_transcript_messages(
                         "Execution probe transcript contains a forbidden tool",
                     )
             if kind in {"structured_output", "json_schema"}:
-                message_results.append(part.get("value", part.get("output")))
-        for key in ("structured", "structured_output"):
-            if info.get(key) is not None:
-                message_results.append(info[key])
-        if message.get("structured_output") is not None:
-            message_results.append(message["structured_output"])
-        message_error = info.get("error", message.get("error"))
+                message_results.append(
+                    reconcile_part_output(
+                        part, code="transcript_capture_failed", label="OpenCode transcript part"
+                    )
+                )
+        if aliases["structured"] is not None:
+            message_results.append(aliases["structured"])
+        message_error = aliases["error"]
         if message_error == "StructuredOutputError" or (
             isinstance(message_error, dict) and message_error.get("name") == "StructuredOutputError"
         ):
             raise ControllerError(
                 "invalid_agent_result", "OpenCode transcript reports structured output failure"
             )
-        if len(message_results) > 1:
+        if message_results and any(value != message_results[0] for value in message_results[1:]):
             raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
         if message_results and role != "assistant":
             raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
@@ -608,29 +680,19 @@ def validate_transcript_messages(
                 "OpenCode transcript does not contain the submitted prompt",
             )
         assistant_index, assistant, captured_result = assistant_results[0]
-        raw_info = assistant.get("info")
-        info = raw_info if isinstance(raw_info, dict) else {}
-        parent_values = [
-            assistant[key]
-            for key in ("parentID", "parent_id")
-            if key in assistant and assistant[key] is not None
-        ] + [
-            info[key] for key in ("parentID", "parent_id") if key in info and info[key] is not None
-        ]
-        if len(set(parent_values)) > 1:
-            raise ControllerError(
-                "transcript_capture_failed", "OpenCode transcript has conflicting parent IDs"
-            )
-        parent = parent_values[0] if parent_values else None
-        role = assistant.get("role", info.get("role"))
+        aliases = reconcile_message_aliases(
+            assistant, code="transcript_capture_failed", label="OpenCode transcript message"
+        )
+        parent = aliases["parent"]
+        role = aliases["role"]
         if (
             role != "assistant"
             or assistant_index <= user_index
             or parent != user_id
-            or info.get("error", assistant.get("error")) is not None
-            or info.get("agent") != expected_role
-            or info.get("providerID") != provider_id
-            or info.get("modelID") != model_id
+            or aliases["error"] is not None
+            or aliases["agent"] != expected_role
+            or aliases["provider_id"] != provider_id
+            or aliases["model_id"] != model_id
             or captured_result != expected_result
         ):
             raise ControllerError(

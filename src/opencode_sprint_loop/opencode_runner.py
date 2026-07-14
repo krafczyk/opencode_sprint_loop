@@ -25,6 +25,7 @@ from .agent_runner import (
     ValidatedServer,
 )
 from .errors import ControllerError
+from .invocations import reconcile_message_aliases, reconcile_part_output
 from .security import external_utf8_bytes
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -195,6 +196,7 @@ class OpenCodeServerRunner:
         *,
         http_error_code: str = "server_unavailable",
         deadline: float | None = None,
+        use_full_deadline_timeout: bool = False,
     ) -> Any:
         """Send one bounded JSON request and normalize transport failures safely."""
         payload = (
@@ -216,7 +218,11 @@ class OpenCodeServerRunner:
                 raise ControllerError(
                     "invocation_timed_out", "OpenCode invocation exceeded its configured timeout"
                 )
-            timeout = min(timeout, remaining)
+            # Only the non-idempotent synchronous message POST is allowed to
+            # occupy the complete configured invocation budget.  Preflight,
+            # status, abort, and every other operation retain their short
+            # bounded transport timeout even when an invocation deadline exists.
+            timeout = remaining if use_full_deadline_timeout else min(timeout, remaining)
         try:
             with self._opener.open(request, timeout=timeout) as response:
                 if response.geturl() != self._url(path):
@@ -524,6 +530,7 @@ class OpenCodeServerRunner:
                 },
                 http_error_code="prompt_submission_failed",
                 deadline=deadline,
+                use_full_deadline_timeout=True,
             )
         except ControllerError as error:
             if error.code == "server_unavailable":
@@ -541,43 +548,27 @@ class OpenCodeServerRunner:
         self, message: dict[str, Any], request: InvocationRequest
     ) -> InvocationObservation:
         """Validate terminal response and reconstruct its one directly bound user prompt."""
-        raw_info = message.get("info")
-        if not isinstance(raw_info, dict):
-            raise ControllerError(
-                "malformed_server_response", "OpenCode assistant response lacks info"
-            )
-        info = raw_info
-        role = message.get("role", info.get("role"))
-        parent = self._consistent_alias(
-            message, "parentID", "parent_id", code="malformed_server_response"
+        aliases = reconcile_message_aliases(
+            message, code="malformed_server_response", label="OpenCode assistant response"
         )
-        info_parent = self._consistent_alias(
-            info, "parentID", "parent_id", code="malformed_server_response"
-        )
-        if parent is not None and info_parent is not None and parent != info_parent:
-            raise ControllerError(
-                "malformed_server_response",
-                "OpenCode assistant response has conflicting parent IDs",
-            )
-        parent = parent if parent is not None else info_parent
+        role = aliases["role"]
+        parent = aliases["parent"]
         provider_id, _, model_id = request.model.partition("/")
         if (
             role != "assistant"
+            or not _bounded_identifier(aliases["id"])
             or not _bounded_identifier(parent)
-            or info.get("agent") != request.role
-            or info.get("providerID") != provider_id
-            or info.get("modelID") != model_id
+            or aliases["agent"] != request.role
+            or aliases["provider_id"] != provider_id
+            or aliases["model_id"] != model_id
             or not isinstance(message.get("parts"), list)
         ):
             raise ControllerError(
                 "malformed_server_response", "OpenCode assistant response identity is invalid"
             )
         values: list[Any] = []
-        for key in ("structured", "structured_output"):
-            if key in info and info[key] is not None:
-                values.append(info[key])
-        if message.get("structured_output") is not None:
-            values.append(message["structured_output"])
+        if aliases["structured"] is not None:
+            values.append(aliases["structured"])
         structured_error = False
         unexpected_tool = False
         for part in message["parts"]:
@@ -587,7 +578,13 @@ class OpenCodeServerRunner:
                 )
             kind = part["type"]
             if kind in {"structured_output", "json_schema"}:
-                values.append(part.get("value", part.get("output")))
+                values.append(
+                    reconcile_part_output(
+                        part,
+                        code="malformed_server_response",
+                        label="OpenCode assistant response part",
+                    )
+                )
             if kind == "permission":
                 unexpected_tool = True
             if kind == "tool":
@@ -596,12 +593,12 @@ class OpenCodeServerRunner:
                     structured_error = True
                 elif tool != "StructuredOutput":
                     unexpected_tool = True
-        error = info.get("error", message.get("error"))
+        error = aliases["error"]
         if error == "StructuredOutputError" or (
             isinstance(error, dict) and error.get("name") == "StructuredOutputError"
         ):
             structured_error = True
-        if len(values) > 1:
+        if values and any(value != values[0] for value in values[1:]):
             raise ControllerError(
                 "malformed_server_response",
                 "OpenCode message has conflicting structured output aliases",
