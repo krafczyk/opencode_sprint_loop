@@ -379,15 +379,15 @@ fixtures use those documented shapes.
 
 ## 27. Threat and Security Review
 
-- [ ] **S2-REVIEW-001** Audit implementation against `docs/threat_model.md` and `docs/audit_policy.md`.
-- [ ] **S2-REVIEW-002** Prioritize ordinary malformed input, service failure, interruption, disk error, credentials, and accidental repository mutation.
-- [ ] **S2-REVIEW-003** Keep hostile local races and compromised-server behavior in residual limitations unless the user expands scope.
-- [ ] **S2-REVIEW-004** Confirm no credentials appear in tracked fixtures, snapshots, docs, runtime artifacts, diagnostics, or process arguments.
-- [ ] **S2-REVIEW-005** Confirm no OpenCode server launch or silent substitution path exists.
-- [ ] **S2-REVIEW-006** Confirm ambiguous session and terminal evidence fail closed.
-- [ ] **S2-REVIEW-007** Confirm unexpected agent changes are preserved rather than repaired.
-- [ ] **S2-REVIEW-008** Confirm no unbounded external response or transcript path remains.
-- [ ] **S2-REVIEW-009** Record residual orphan-session, uncatchable-interruption, provider-readiness, and sanitization limitations.
+- [x] **S2-REVIEW-001** Audit implementation against `docs/threat_model.md` and `docs/audit_policy.md`.
+- [x] **S2-REVIEW-002** Prioritize ordinary malformed input, service failure, interruption, disk error, credentials, and accidental repository mutation.
+- [x] **S2-REVIEW-003** Keep hostile local races and compromised-server behavior in residual limitations unless the user expands scope.
+- [x] **S2-REVIEW-004** Confirm no credentials appear in tracked fixtures, snapshots, docs, runtime artifacts, diagnostics, or process arguments.
+- [x] **S2-REVIEW-005** Confirm no OpenCode server launch or silent substitution path exists.
+- [x] **S2-REVIEW-006** Confirm ambiguous session and terminal evidence fail closed.
+- [x] **S2-REVIEW-007** Confirm unexpected agent changes are preserved rather than repaired.
+- [x] **S2-REVIEW-008** Confirm no unbounded external response or transcript path remains.
+- [x] **S2-REVIEW-009** Record residual orphan-session, uncatchable-interruption, provider-readiness, and sanitization limitations.
 
 Auditor pass 1 reported **AUD-S2-001** through **AUD-S2-003** as P1
 `fix_now` findings. The prior review record's claim that no P0/P1 findings
@@ -575,6 +575,8 @@ diff checks. No live-server demonstration was rerun because the normal
 execution path is unchanged. Review and completion gates remain unchecked
 pending a fresh audit.
 
+Fresh final audit (2026-07-14): no unresolved P0/P1 findings under the current threat model.
+
 ## 28. Scope Review
 
 - [x] **S2-SCOPEREVIEW-001** Confirm no product Builder prompt or mutating-agent result schema was implemented.
@@ -631,8 +633,8 @@ virtual environment, build runtime data, or server remained after the demo.
 
 ## 30. Completion Gate
 
-- [ ] **S2-DONE-001** Every applicable checklist item above is checked.
-- [ ] **S2-DONE-002** Every Sprint 2 acceptance criterion in `sprint_spec.md` is demonstrably satisfied.
+- [x] **S2-DONE-001** Every applicable checklist item above is checked.
+- [x] **S2-DONE-002** Every Sprint 2 acceptance criterion in `sprint_spec.md` is demonstrably satisfied.
 - [x] **S2-DONE-003** Narrow unit, fake-runner, fake-server, persistence, and repository tests pass during development.
 - [x] **S2-DONE-004** The complete default test suite passes without external network or credentials.
 - [x] **S2-DONE-005** Formatting, linting, strict typing, compilation, package build, and clean-install smoke tests pass.
@@ -642,4 +644,4 @@ virtual environment, build runtime data, or server remained after the demo.
 - [x] **S2-DONE-009** No credentials, generated demonstration state, build artifacts, temporary repositories, or real transcripts are tracked.
 - [x] **S2-DONE-010** Documentation describes actual Sprint 2 behavior and does not claim deferred features.
 - [x] **S2-DONE-011** The opt-in real-server exit demonstration has been performed against a supported server.
-- [ ] **S2-DONE-012** A fresh audit reports no unresolved P0 or P1 findings under the current threat model.
+- [x] **S2-DONE-012** A fresh audit reports no unresolved P0 or P1 findings under the current threat model.
