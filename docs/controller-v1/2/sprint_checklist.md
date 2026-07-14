@@ -523,6 +523,24 @@ the disposable fixture, server, logs, wheel build, and virtual environment were
 removed. This repair does not change the still-unchecked review or completion
 gates.
 
+Builder repair verification (2026-07-14) reopened and corrected **AUD-S2-020**.
+If both controller temporary-name unlink attempts fail before their side effect
+after immutable `os.link` installation, persistence now recognizes only the
+exact bounded controller temporary hard-link pair: the named result or
+semantic-failure transcript and temporary entry must be owner-only regular
+files with identical device/inode and link count two while the sole
+`agent.started` prefix remains active. It rejects foreign names, paths, modes,
+or hard links without deleting evidence. Status remains `validating` and
+reports actionable nonterminal `invocation_record_prefix`; no metadata,
+terminal event, blocked reason, or success is synthesized. Focused fault
+coverage verifies both unlink attempts, target/temporary identity, exact naming,
+event/metadata ordering, and status/persistence coherence. Full offline,
+format, lint, type, compile, build, clean-install, and diff verification is
+recorded with this repair (**206 passing, 1 opt-in real-server test skipped**).
+The latest model failure is stochastic; the existing installed-build success and
+deterministic route tests remain the applicable normal-path evidence. Review
+and completion gates remain unchecked.
+
 ## 28. Scope Review
 
 - [x] **S2-SCOPEREVIEW-001** Confirm no product Builder prompt or mutating-agent result schema was implemented.

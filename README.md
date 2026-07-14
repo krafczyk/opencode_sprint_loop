@@ -241,6 +241,11 @@ nonterminal interruption evidence and are never promoted to probe success. If
 an immutable result or transcript installs before its temporary cleanup or
 directory-sync report fails, the controller preserves that prefix and does not
 append metadata or events claiming the installed artifact is unavailable.
+The only temporary-name prefix readers accept is the exact controller-generated
+same-directory hard-link pair for that result or transcript; it remains
+nonterminal evidence. Status reports it as `invocation_record_prefix` and tells
+the operator to inspect it. Readers never remove the temporary name or promote
+the prefix to success.
 
 Use `status --json` for integrations. It emits one JSON object and writes diagnostics only to standard error. Its stable top-level fields are `schema_version`, `controller_version`, `sprint_root`, `run_exists`, `process_running`, `run_id`, `sprint`, `state`, `reason`, `active`, `commits`, `audit`, `ci`, `counters`, `checklist`, `last_event`, and `updated_at`. The complete V1 Sprint 1 JSON schema is defined in [the status contract](docs/controller-v1/1/sprint_spec.md#12-status-json-contract).
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import uuid
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ MAX_METADATA_BYTES = 1024 * 1024
 MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
 MAX_STRING_BYTES = 1024 * 1024
 _TERMINAL = {"completed", "blocked", "failed", "timed_out", "interrupted"}
+_TEMPORARY_IMMUTABLE_ARTIFACT = re.compile(r"\.(result\.json|transcript\.json)-[0-9a-f]{32}\.tmp\Z")
 
 
 class ArtifactWriteError(ControllerError):
@@ -928,12 +930,35 @@ def _record_error(message: str, error: BaseException | None = None) -> Controlle
     return ControllerError("inconsistent_invocation_record", message)
 
 
-def _read_artifact(path: Path, limit: int) -> bytes:
+def _read_artifact(
+    path: Path,
+    limit: int,
+    *,
+    temporary_hardlink_identity: tuple[int, int] | None = None,
+) -> bytes:
     """Read one bounded single-link regular invocation artifact."""
     descriptor: int | None = None
     directory: int | None = None
     try:
-        descriptor, directory = open_regular(path, os.O_RDONLY)
+        if temporary_hardlink_identity is None:
+            descriptor, directory = open_regular(path, os.O_RDONLY)
+        else:
+            directory = open_directory(path.parent)
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=directory,
+            )
+            details = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(details.st_mode)
+                or stat.S_IMODE(details.st_mode) != 0o600
+                or details.st_nlink != 2
+                or (details.st_dev, details.st_ino) != temporary_hardlink_identity
+            ):
+                raise ControllerError(
+                    "persistence_failed", "Invocation temporary hard-link artifact is unsafe"
+                )
         size = os.fstat(descriptor).st_size
         if size > limit:
             raise _record_error(f"Invocation artifact exceeds its bound: {path.name}")
@@ -962,9 +987,14 @@ def _read_artifact(path: Path, limit: int) -> bytes:
             os.close(directory)
 
 
-def _load_artifact_object(path: Path, limit: int) -> dict[str, Any]:
+def _load_artifact_object(
+    path: Path,
+    limit: int,
+    *,
+    temporary_hardlink_identity: tuple[int, int] | None = None,
+) -> dict[str, Any]:
     """Strictly decode one bounded invocation JSON object."""
-    raw = _read_artifact(path, limit)
+    raw = _read_artifact(path, limit, temporary_hardlink_identity=temporary_hardlink_identity)
 
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -985,6 +1015,65 @@ def _load_artifact_object(path: Path, limit: int) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise _record_error(f"Invocation artifact is not an object: {path.name}")
     return value
+
+
+def _temporary_hardlink_prefix(
+    paths: InvocationPaths,
+    artifact_names: set[str],
+    metadata: dict[str, Any],
+    state: dict[str, Any],
+    started: list[dict[str, Any]],
+    terminals: list[dict[str, Any]],
+) -> tuple[str, tuple[int, int]] | None:
+    """Recognize only the immutable post-link temporary-name prefix.
+
+    ``link`` followed by a failed pre-side-effect ``unlink`` can leave the
+    controller's target and its same-directory temporary name as two links to
+    one owner-only inode. This is truthful nonterminal evidence, not an
+    arbitrary hard-link allowance. Reader validation never removes it.
+    """
+    permanent = {"metadata.json", "prompt.md", "result.json", "transcript.json"}
+    temporary_names = artifact_names - permanent
+    if not temporary_names:
+        return None
+    if len(temporary_names) != 1:
+        raise _record_error("Invocation artifact paths do not match the probe contract")
+    temporary_name = temporary_names.pop()
+    match = _TEMPORARY_IMMUTABLE_ARTIFACT.fullmatch(temporary_name)
+    if match is None:
+        raise _record_error("Invocation artifact paths do not match the probe contract")
+    artifact = match.group(1)
+    if (
+        artifact not in artifact_names
+        or metadata["status"] != "running"
+        or len(started) != 1
+        or terminals
+        or state["state"] != "validating"
+        or state["active_invocation"] is None
+    ):
+        raise _record_error("Invocation temporary hard-link prefix is inconsistent")
+    directory: int | None = None
+    try:
+        directory = open_directory(paths.directory)
+        target = os.stat(artifact, dir_fd=directory, follow_symlinks=False)
+        temporary = os.stat(temporary_name, dir_fd=directory, follow_symlinks=False)
+    except (OSError, ControllerError) as error:
+        raise _record_error("Invocation temporary hard-link prefix is unsafe", error) from error
+    finally:
+        if directory is not None:
+            os.close(directory)
+    identity = (target.st_dev, target.st_ino)
+    if (
+        not stat.S_ISREG(target.st_mode)
+        or not stat.S_ISREG(temporary.st_mode)
+        or stat.S_IMODE(target.st_mode) != 0o600
+        or stat.S_IMODE(temporary.st_mode) != 0o600
+        or target.st_nlink != 2
+        or temporary.st_nlink != 2
+        or identity != (temporary.st_dev, temporary.st_ino)
+    ):
+        raise _record_error("Invocation temporary hard-link prefix is unsafe")
+    return artifact, identity
 
 
 def _validate_transcript_wrapper(
@@ -1062,7 +1151,7 @@ def validate_invocation_records(
     config: Any,
     state: dict[str, Any],
     events: list[dict[str, Any]],
-) -> None:
+) -> str | None:
     """Cross-validate Sprint 2 invocation metadata, artifacts, state, and events."""
     base = root / "invocations" / config.multisprint / str(config.sprint)
     expected_name = "0001-auditor"
@@ -1075,7 +1164,7 @@ def validate_invocation_records(
     except FileNotFoundError:
         if started or terminals:
             raise _record_error("Invocation event history has no invocation record")
-        return
+        return None
     except (OSError, ControllerError) as error:
         raise _record_error("Invocation record directory is unsafe", error) from error
     try:
@@ -1099,12 +1188,7 @@ def validate_invocation_records(
             os.close(invocation_descriptor)
     except (OSError, ControllerError) as error:
         raise _record_error("Invocation artifact directory is unsafe", error) from error
-    if not {"metadata.json", "prompt.md"} <= artifact_names or not artifact_names <= {
-        "metadata.json",
-        "prompt.md",
-        "result.json",
-        "transcript.json",
-    }:
+    if not {"metadata.json", "prompt.md"} <= artifact_names:
         raise _record_error("Invocation artifact paths do not match the probe contract")
     metadata = _load_artifact_object(paths.metadata, MAX_METADATA_BYTES)
     try:
@@ -1158,18 +1242,33 @@ def validate_invocation_records(
         for field in ("invocation_id", "sequence", "role", "model", "session_id", "started_at")
     ):
         raise _record_error("Active state does not match invocation metadata")
+    temporary_hardlink = _temporary_hardlink_prefix(
+        paths, artifact_names, metadata, state, started, terminals
+    )
     result_exists = os.path.lexists(paths.result)
     transcript_exists = os.path.lexists(paths.transcript)
     result: dict[str, Any] | None = None
     if result_exists:
-        result = _load_artifact_object(paths.result, MAX_RESULT_BYTES)
+        result = _load_artifact_object(
+            paths.result,
+            MAX_RESULT_BYTES,
+            temporary_hardlink_identity=None
+            if temporary_hardlink is None or temporary_hardlink[0] != "result.json"
+            else temporary_hardlink[1],
+        )
         try:
             validate_result(result)
         except ControllerError as error:
             raise _record_error("Invocation result artifact is invalid", error) from error
     wrapper: dict[str, Any] | None = None
     if transcript_exists:
-        wrapper = _load_artifact_object(paths.transcript, MAX_TRANSCRIPT_BYTES)
+        wrapper = _load_artifact_object(
+            paths.transcript,
+            MAX_TRANSCRIPT_BYTES,
+            temporary_hardlink_identity=None
+            if temporary_hardlink is None or temporary_hardlink[0] != "transcript.json"
+            else temporary_hardlink[1],
+        )
         if metadata["session_id"] is None:
             raise _record_error("Transcript exists without a known session")
         _validate_transcript_wrapper(
@@ -1201,3 +1300,4 @@ def validate_invocation_records(
             or metadata["transcript"]["status"] not in {"complete", "truncated"}
         ):
             raise _record_error("Execution placeholder lacks a complete invocation record")
+    return None if temporary_hardlink is None else temporary_hardlink[0]

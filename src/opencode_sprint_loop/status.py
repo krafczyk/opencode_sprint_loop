@@ -69,7 +69,24 @@ def project_status(
     state, events = validate_persistence(paths, config)
     if state is None or events is None:
         return _no_run(root)
+    prefix_artifact = validate_invocation_records(paths.info_dir.parents[2], config, state, events)
     event = events[-1]
+    reason = (
+        None
+        if state["reason"] is None
+        else {
+            "code": state["reason"]["code"],
+            "message": state["reason"]["message"],
+        }
+    )
+    if reason is None and prefix_artifact is not None:
+        reason = {
+            "code": "invocation_record_prefix",
+            "message": (
+                f"Immutable {prefix_artifact} is installed with its controller temporary hard "
+                "link after cleanup failed; inspect the preserved nonterminal evidence."
+            ),
+        }
     return {
         "schema_version": 1,
         "controller_version": __version__,
@@ -79,12 +96,7 @@ def project_status(
         "run_id": state["run_id"],
         "sprint": {"multisprint": state["multisprint"], "index": state["sprint"]},
         "state": state["state"],
-        "reason": None
-        if state["reason"] is None
-        else {
-            "code": state["reason"]["code"],
-            "message": state["reason"]["message"],
-        },
+        "reason": reason,
         "active": {
             "role": None
             if state["active_invocation"] is None

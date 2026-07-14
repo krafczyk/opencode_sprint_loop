@@ -6,6 +6,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
 import os
+import re
 import signal
 import socket
 import ssl
@@ -2385,7 +2386,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 real_unlink = invocations.os.unlink
                 real_fsync = invocations.os.fsync
                 target_linked = False
-                cleanup_failed = False
+                cleanup_attempts = 0
 
                 def link_after_install(*args: object, **kwargs: object) -> None:
                     nonlocal target_linked
@@ -2396,16 +2397,15 @@ class OpenCodeExecutionTests(unittest.TestCase):
                             raise OSError("synthetic post-link failure")
 
                 def unlink_after_install(name: object, *args: object, **kwargs: object) -> None:
-                    nonlocal cleanup_failed
-                    real_unlink(name, *args, **kwargs)  # type: ignore[arg-type]
+                    nonlocal cleanup_attempts
                     if (
                         fault == "temp_unlink"
                         and isinstance(name, str)
                         and name.startswith(f".{artifact}-")
-                        and not cleanup_failed
                     ):
-                        cleanup_failed = True
-                        raise OSError("synthetic post-install temporary cleanup failure")
+                        cleanup_attempts += 1
+                        raise OSError("synthetic pre-side-effect temporary cleanup failure")
+                    real_unlink(name, *args, **kwargs)  # type: ignore[arg-type]
 
                 def sync_after_install(descriptor: int) -> None:
                     if (
@@ -2433,6 +2433,26 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 self.assertEqual(context.exception.code, "invocation_record_failed")
                 directory = root / "invocations/foundation/1/0001-auditor"
                 self.assertTrue((directory / artifact).is_file())
+                if fault == "temp_unlink":
+                    temporary_names = [
+                        path.name
+                        for path in directory.iterdir()
+                        if path.name.startswith(f".{artifact}-")
+                    ]
+                    self.assertEqual(cleanup_attempts, 2)
+                    self.assertEqual(len(temporary_names), 1)
+                    self.assertRegex(
+                        temporary_names[0], rf"^\.{re.escape(artifact)}-[0-9a-f]{{32}}\.tmp$"
+                    )
+                    target = os.stat(directory / artifact, follow_symlinks=False)
+                    temporary = os.stat(directory / temporary_names[0], follow_symlinks=False)
+                    self.assertEqual(
+                        (target.st_dev, target.st_ino), (temporary.st_dev, temporary.st_ino)
+                    )
+                    self.assertEqual(stat.S_IMODE(target.st_mode), 0o600)
+                    self.assertEqual(stat.S_IMODE(temporary.st_mode), 0o600)
+                    self.assertEqual(target.st_nlink, 2)
+                    self.assertEqual(temporary.st_nlink, 2)
                 metadata = json.loads((directory / "metadata.json").read_text())
                 self.assertEqual(metadata["status"], "running")
                 self.assertEqual(metadata["result"], {"available": False, "status": None})
@@ -2451,7 +2471,19 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 output = StringIO()
                 with redirect_stdout(output):
                     self.assertEqual(cli._status(str(root), True), 0)
-                self.assertEqual(json.loads(output.getvalue())["state"], "validating")
+                status = json.loads(output.getvalue())
+                self.assertEqual(status["state"], "validating")
+                if fault == "temp_unlink":
+                    self.assertEqual(status["reason"]["code"], "invocation_record_prefix")
+                    self.assertIn(artifact, status["reason"]["message"])
+                    foreign = directory / ".foreign-temporary-artifact"
+                    os.link(directory / artifact, foreign)
+                    with self.assertRaises(ControllerError) as inconsistent:
+                        validate_persistence(
+                            runtime_paths(root, config.multisprint, config.sprint), config
+                        )
+                    self.assertEqual(inconsistent.exception.code, "inconsistent_invocation_record")
+                    self.assertTrue(foreign.exists())
 
     def test_timeout_aborts_once_before_terminal_interruption_persistence(self) -> None:
         """A monotonic timeout runs the one-abort cleanup path exactly once."""
