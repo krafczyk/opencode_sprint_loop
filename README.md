@@ -207,8 +207,14 @@ This permits only the built-in structured-output mechanism; shell, repository,
 web, task, MCP, and external tools remain denied. The controller validates this
 exact order in the created-session response, not merely a deny-only subset. The
 probe has a deterministic title. Successful terminal transcript evidence must bind the exact submitted
-prompt and the configured Auditor/provider/model identity; absent or mismatched
-evidence fails closed. A present session-status entry must use the documented
+prompt, created session ID, and configured Auditor/provider/model identity;
+absent or mismatched evidence fails closed. The documented assistant `sessionID`
+(or supported top-level/`info` `session_id` alias) must reconcile to the created
+session. Every retained part must carry exact documented `sessionID` and
+`messageID` associations; the reconstructed prompt record retains the exact
+parent linkage. Every `tool` part requires a bounded documented `tool` string;
+a compatible `name` may only agree, never substitute, and only exact
+`StructuredOutput` is permitted. A present session-status entry must use the documented
 `1.17.x` object with a string `type`; only an absent entry means missing status.
 On timeout, uncertain terminal evidence, or cooperative `SIGINT`/`SIGTERM`, the
 controller sends exactly one best-effort abort, uses one monotonic ten-second
@@ -281,14 +287,18 @@ for transcript capture. The returned assistant message and parts are retained
 as bounded sanitized evidence; the exact persisted prompt is reconstructed as
 the paired user record only through the returned assistant parent ID. OpenCode
 may expose the result at top level or in `info` under `structured` or
-`structured_output`; aliases for structured output, role, message ID, error,
-route identity, and supported parent spellings must agree. Contradictions,
-errors, tools, permission requests, identity mismatches, and missing output fail
+`structured_output`; aliases for structured output, role, message ID, session
+ID, error, route identity, and supported parent spellings must agree.
+Contradictions, missing/wrong part session/message associations, malformed or
+non-exact tool identities, errors, permission requests, identity mismatches, and missing output fail
 closed. The long HTTP call receives the complete remaining monotonic invocation
 budget and runs in a daemon worker while the
 controller blocks on a bounded queue wait, so idle waiting uses negligible CPU
-but the configured invocation timeout remains a wall-clock deadline. Timeout
-or signal cancellation sends one abort and checks only session status, at most
+but the configured invocation timeout remains a wall-clock deadline. The daemon
+worker timestamps completion with monotonic time; after dequeue, evidence is
+accepted only if it completed strictly before the deadline and any cancellation
+timestamp. A response completed before a later cancellation is retained, while
+late results are ignored. Timeout or signal cancellation sends one abort and checks only session status, at most
 once per second; it never retries the non-idempotent prompt.
 Builder handoff, commits, audits, CI, functional controls/recovery, and Neovim
 remain deliberately unimplemented.

@@ -72,6 +72,15 @@ def reconcile_message_aliases(message: dict[str, Any], *, code: str, label: str)
                 (info, "parent_id"),
             ),
         ),
+        "session_id": value(
+            "session ID",
+            (
+                (message, "sessionID"),
+                (message, "session_id"),
+                (info, "sessionID"),
+                (info, "session_id"),
+            ),
+        ),
         "agent": value("agent", ((message, "agent"), (info, "agent"))),
         "provider_id": value(
             "provider ID",
@@ -100,6 +109,38 @@ def reconcile_part_output(part: dict[str, Any], *, code: str, label: str) -> Any
     if candidates and any(candidate != candidates[0] for candidate in candidates[1:]):
         raise ControllerError(code, f"{label} has conflicting structured output aliases")
     return candidates[0] if candidates else None
+
+
+def _bounded_external_identifier(value: Any, *, code: str, label: str) -> str:
+    """Require one documented external ID/tool string before retaining evidence."""
+    if not isinstance(value, str) or not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ControllerError(code, f"{label} is invalid")
+    if len(external_utf8_bytes(value, code=code, label=label)) > 1024:
+        raise ControllerError(code, f"{label} is invalid")
+    return value
+
+
+def validate_part_association(
+    part: dict[str, Any],
+    *,
+    session_id: str,
+    message_id: str,
+    code: str,
+    label: str,
+) -> None:
+    """Require every retained documented part to bind its containing message/session."""
+    if part.get("sessionID") != session_id or part.get("messageID") != message_id:
+        raise ControllerError(code, f"{label} has invalid session/message association")
+
+
+def reconcile_part_tool(part: dict[str, Any], *, code: str, label: str) -> str:
+    """Require the documented ``tool`` identity; ``name`` is consistency-only."""
+    tool = _bounded_external_identifier(part.get("tool"), code=code, label=f"{label} tool")
+    if "name" in part:
+        name = _bounded_external_identifier(part["name"], code=code, label=f"{label} name")
+        if name != tool:
+            raise ControllerError(code, f"{label} has conflicting tool aliases")
+    return tool
 
 
 def _bounded_string(value: Any, field: str, limit: int = 1024) -> str:
@@ -574,10 +615,20 @@ def validate_transcript_messages(
     expected_prompt: str | None = None,
     expected_role: str | None = None,
     expected_model: str | None = None,
+    expected_session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Validate probe transcript evidence against its submitted prompt and route identity."""
     if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages):
         raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
+    if expected_result is not None and (
+        not isinstance(expected_prompt, str)
+        or not isinstance(expected_role, str)
+        or not isinstance(expected_model, str)
+        or not isinstance(expected_session_id, str)
+    ):
+        raise ControllerError(
+            "transcript_capture_failed", "Probe transcript expectations are invalid"
+        )
     user_messages: list[tuple[int, str, dict[str, Any]]] = []
     assistant_results: list[tuple[int, dict[str, Any], Any]] = []
     for index, message in enumerate(messages):
@@ -602,6 +653,12 @@ def validate_transcript_messages(
             or not isinstance(parts, list)
         ):
             raise ControllerError("transcript_capture_failed", "OpenCode transcript is malformed")
+        if expected_result is not None:
+            assert expected_session_id is not None
+            if aliases["session_id"] != expected_session_id:
+                raise ControllerError(
+                    "transcript_capture_failed", "OpenCode transcript session is inconsistent"
+                )
         if role == "user":
             user_messages.append((index, identifier, message))
         message_results: list[Any] = []
@@ -611,13 +668,24 @@ def validate_transcript_messages(
                     "transcript_capture_failed", "OpenCode transcript is malformed"
                 )
             kind = part["type"]
+            if expected_result is not None:
+                assert expected_session_id is not None
+                validate_part_association(
+                    part,
+                    session_id=expected_session_id,
+                    message_id=identifier,
+                    code="transcript_capture_failed",
+                    label="OpenCode transcript part",
+                )
             if kind == "permission":
                 raise ControllerError(
                     "unexpected_probe_tool",
                     "Execution probe transcript contains a permission request",
                 )
             if kind == "tool":
-                tool = part.get("tool", part.get("name"))
+                tool = reconcile_part_tool(
+                    part, code="transcript_capture_failed", label="OpenCode transcript part"
+                )
                 if tool == "StructuredOutputError":
                     raise ControllerError(
                         "invalid_agent_result",
@@ -650,14 +718,10 @@ def validate_transcript_messages(
         if message_results:
             assistant_results.append((index, message, message_results[0]))
     if expected_result is not None:
-        if (
-            not isinstance(expected_prompt, str)
-            or not isinstance(expected_role, str)
-            or not isinstance(expected_model, str)
-        ):
-            raise ControllerError(
-                "transcript_capture_failed", "Probe transcript expectations are invalid"
-            )
+        assert expected_prompt is not None
+        assert expected_role is not None
+        assert expected_model is not None
+        assert expected_session_id is not None
         provider_id, separator, model_id = expected_model.partition("/")
         if not separator or not provider_id or not model_id:
             raise ControllerError(
@@ -689,6 +753,7 @@ def validate_transcript_messages(
             role != "assistant"
             or assistant_index <= user_index
             or parent != user_id
+            or aliases["session_id"] != expected_session_id
             or aliases["error"] is not None
             or aliases["agent"] != expected_role
             or aliases["provider_id"] != provider_id
@@ -918,6 +983,7 @@ def _validate_transcript_wrapper(
                     expected_prompt=expected_prompt,
                     expected_role=expected_role,
                     expected_model=expected_model,
+                    expected_session_id=session_id,
                 )
         except ControllerError as error:
             raise _record_error("Invocation transcript evidence is inconsistent", error) from error

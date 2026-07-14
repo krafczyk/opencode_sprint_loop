@@ -78,15 +78,26 @@ class _Cancellation:
 
     def __init__(self) -> None:
         self.signal_number: int | None = None
+        self.requested_at: float | None = None
 
     def record(self, signal_number: int, _frame: object) -> None:
         """Record the first request; handlers never perform I/O or persistence."""
         if self.signal_number is None:
             self.signal_number = signal_number
+            self.requested_at = time.monotonic()
+
+    def timestamp(self) -> float | None:
+        """Return the first cancellation boundary, recording legacy injected requests."""
+        if self.signal_number is not None and self.requested_at is None:
+            # Some deterministic callers set ``signal_number`` directly.  Give
+            # that request the same monotonic boundary as a real signal.
+            self.requested_at = time.monotonic()
+        return self.requested_at
 
     def check(self) -> None:
         """Raise in orchestration after any current atomic action finishes."""
-        if self.signal_number is not None:
+        if self.timestamp() is not None:
+            assert self.signal_number is not None
             raise _CancellationRequested(self.signal_number)
 
 
@@ -451,27 +462,37 @@ def _wait_for_synchronous_response(
     still the configured monotonic invocation deadline.  The worker never
     receives persistence objects and a late result is intentionally ignored.
     """
-    completed: queue.Queue[tuple[Any | None, BaseException | None]] = queue.Queue(maxsize=1)
+    completed: queue.Queue[tuple[float, Any | None, BaseException | None]] = queue.Queue(maxsize=1)
 
     def invoke() -> None:
         try:
-            completed.put((runner.execute_prompt(session, request, deadline=deadline), None))
+            observation = runner.execute_prompt(session, request, deadline=deadline)
+            completed.put((time.monotonic(), observation, None))
         except BaseException as error:  # pragma: no cover - normalized by caller
-            completed.put((None, error))
+            completed.put((time.monotonic(), None, error))
 
     worker = threading.Thread(target=invoke, name="opencode-sync-prompt", daemon=True)
     worker.start()
     while True:
-        cancellation.check()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise ControllerError(
-                "invocation_timed_out", "OpenCode invocation exceeded its configured timeout"
-            )
-        try:
-            observation, error = completed.get(timeout=min(0.25, remaining))
-        except queue.Empty:
-            continue
+            # A completion may have crossed the deadline before this controller
+            # wake-up.  Drain it once so its worker timestamp, rather than queue
+            # scheduling, decides whether it is acceptable.
+            try:
+                completion_at, observation, error = completed.get_nowait()
+            except queue.Empty:
+                cancellation.check()
+                raise ControllerError(
+                    "invocation_timed_out", "OpenCode invocation exceeded its configured timeout"
+                )
+        else:
+            try:
+                completion_at, observation, error = completed.get(timeout=min(0.25, remaining))
+            except queue.Empty:
+                cancellation.check()
+                continue
+        _arbitrate_synchronous_completion(completion_at, deadline, cancellation)
         if error is not None:
             if isinstance(error, ControllerError):
                 raise error
@@ -479,6 +500,25 @@ def _wait_for_synchronous_response(
                 "prompt_submission_failed", "OpenCode synchronous prompt failed"
             ) from error
         return observation
+
+
+def _arbitrate_synchronous_completion(
+    completion_at: float, deadline: float, cancellation: _Cancellation
+) -> None:
+    """Apply the post-dequeue monotonic safe boundary for one worker result."""
+    # A response has a safe boundary only when its worker completed strictly
+    # before both the invocation deadline and a recorded cancellation request.
+    # Taking the cancellation snapshot after dequeue preserves a completion
+    # that genuinely preceded a later signal, while a late worker result can
+    # never reach persistence.
+    cancelled_at = cancellation.timestamp()
+    if completion_at >= deadline:
+        raise ControllerError(
+            "invocation_timed_out", "OpenCode invocation exceeded its configured timeout"
+        )
+    if cancelled_at is not None and completion_at >= cancelled_at:
+        assert cancellation.signal_number is not None
+        raise _CancellationRequested(cancellation.signal_number)
 
 
 def _run(
@@ -672,6 +712,7 @@ def _run(
                     expected_prompt=prompt,
                     expected_role=request.role,
                     expected_model=request.model,
+                    expected_session_id=session.session_id,
                 )
                 result = validate_result(observation.structured_result)
             except ControllerError as transcript_semantic_error:

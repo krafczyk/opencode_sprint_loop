@@ -456,14 +456,34 @@ def fake_server_runner(server_url: str, *, multisprint: str = "foundation") -> F
         {
             "id": "prompt-1",
             "role": "user",
-            "parts": [{"type": "text", "text": probe_prompt(multisprint, 1, "0001-auditor")}],
+            "sessionID": "ses_fake_0001",
+            "parts": [
+                {
+                    "type": "text",
+                    "text": probe_prompt(multisprint, 1, "0001-auditor"),
+                    "sessionID": "ses_fake_0001",
+                    "messageID": "prompt-1",
+                }
+            ],
         },
         {
             "id": "answer-1",
             "role": "assistant",
             "parentID": "prompt-1",
-            "info": {"agent": "auditor", "providerID": "test", "modelID": "strong"},
-            "parts": [{"type": "structured_output", "value": result}],
+            "info": {
+                "agent": "auditor",
+                "providerID": "test",
+                "modelID": "strong",
+                "sessionID": "ses_fake_0001",
+            },
+            "parts": [
+                {
+                    "type": "structured_output",
+                    "value": result,
+                    "sessionID": "ses_fake_0001",
+                    "messageID": "answer-1",
+                }
+            ],
         },
     ]
     return FakeAgentRunner(

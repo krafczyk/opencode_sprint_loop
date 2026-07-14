@@ -23,6 +23,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
 from opencode_sprint_loop.agent_runner import (
+    CreatedSession,
     FakeAgentRunner,
     InvocationObservation,
     ServerValidationRequest,
@@ -151,6 +152,7 @@ class _Handler(BaseHTTPRequestHandler):
                             "info": {
                                 "id": "msg_assistant",
                                 "role": "assistant",
+                                "sessionID": "ses_local",
                                 "parentID": "msg_user",
                                 "agent": (
                                     self.last_prompt["agent"]
@@ -180,7 +182,14 @@ class _Handler(BaseHTTPRequestHandler):
                             },
                             "parts": [
                                 *(
-                                    [{"type": "tool", "tool": "shell"}]
+                                    [
+                                        {
+                                            "type": "tool",
+                                            "tool": "shell",
+                                            "sessionID": "ses_local",
+                                            "messageID": "msg_assistant",
+                                        }
+                                    ]
                                     if self.mode == "unexpected_tool"
                                     else []
                                 )
@@ -233,6 +242,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "info": {
                         "id": "msg_assistant",
                         "role": "assistant",
+                        "sessionID": "ses_local",
                         "parentID": "msg_user",
                         "agent": self.last_prompt["agent"],
                         "providerID": self.last_prompt["model"]["providerID"],
@@ -250,7 +260,14 @@ class _Handler(BaseHTTPRequestHandler):
                     },
                     "parts": [
                         *(
-                            [{"type": "tool", "tool": "shell"}]
+                            [
+                                {
+                                    "type": "tool",
+                                    "tool": "shell",
+                                    "sessionID": "ses_local",
+                                    "messageID": "msg_assistant",
+                                }
+                            ]
                             if self.mode == "unexpected_tool"
                             else []
                         )
@@ -486,6 +503,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     expected_prompt=request.prompt,
                     expected_role=request.role,
                     expected_model=request.model,
+                    expected_session_id=session.session_id,
                 )
                 for mode in ("malformed_status_scalar", "malformed_status_missing_type"):
                     _Handler.mode = mode
@@ -1165,14 +1183,34 @@ class OpenCodeExecutionTests(unittest.TestCase):
             {
                 "id": "prompt-1",
                 "role": "user",
-                "parts": [{"type": "text", "text": prompt}],
+                "sessionID": "ses_fake_0001",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": prompt,
+                        "sessionID": "ses_fake_0001",
+                        "messageID": "prompt-1",
+                    }
+                ],
             },
             {
                 "id": "answer-1",
                 "role": "assistant",
                 "parentID": "prompt-1",
-                "info": {"agent": "auditor", "providerID": "test", "modelID": "strong"},
-                "parts": [{"type": "structured_output", "value": {} if result is None else result}],
+                "info": {
+                    "agent": "auditor",
+                    "providerID": "test",
+                    "modelID": "strong",
+                    "sessionID": "ses_fake_0001",
+                },
+                "parts": [
+                    {
+                        "type": "structured_output",
+                        "value": {} if result is None else result,
+                        "sessionID": "ses_fake_0001",
+                        "messageID": "answer-1",
+                    }
+                ],
             },
         ]
 
@@ -1411,6 +1449,71 @@ class OpenCodeExecutionTests(unittest.TestCase):
         canceller.join(timeout=2)
         self.assertEqual(fake.aborted, ["ses_fake_0001"])
         self.assertEqual(len(fake.observation_deadlines), 1)
+
+    def test_synchronous_worker_timing_arbitrates_deadline_and_signal_order(self) -> None:
+        """Delayed workers cannot outrun a deadline/cancellation after dequeue."""
+        from opencode_sprint_loop import cli
+        from opencode_sprint_loop.agent_runner import InvocationRequest
+
+        session = CreatedSession("ses_fake_0001", "title", Path("/tmp"), tuple(_PROBE_PERMISSIONS))
+        request = InvocationRequest(
+            "0001-auditor", 1, "auditor", "test/strong", "title", "probe\n", Path("/tmp")
+        )
+        response = InvocationObservation("idle", [], None, False, False)
+
+        # The arithmetic boundary is deterministic: a completion strictly
+        # before a later cancellation is retained, while equality fails closed.
+        later = cli._Cancellation()
+        later.signal_number = signal.SIGINT
+        later.requested_at = 20.0
+        cli._arbitrate_synchronous_completion(19.0, 30.0, later)
+        for completion, deadline, requested_at, expected in (
+            (20.0, 30.0, 20.0, cli._CancellationRequested),
+            (30.0, 30.0, None, ControllerError),
+        ):
+            with self.subTest(completion=completion, deadline=deadline):
+                cancellation = cli._Cancellation()
+                if requested_at is not None:
+                    cancellation.signal_number = signal.SIGTERM
+                    cancellation.requested_at = requested_at
+                with self.assertRaises(expected):
+                    cli._arbitrate_synchronous_completion(completion, deadline, cancellation)
+
+        def wait_with(release_after: float, cancellation: cli._Cancellation) -> None:
+            fake = FakeAgentRunner(ValidatedServer("http://127.0.0.1:1", "1.17.18"))
+            entered = threading.Event()
+            release = threading.Event()
+
+            def delayed(*_arguments: object, **_keywords: object) -> InvocationObservation:
+                entered.set()
+                self.assertTrue(release.wait(timeout=2))
+                return response
+
+            releaser = threading.Thread(
+                target=lambda: (entered.wait(timeout=2), time.sleep(release_after), release.set())
+            )
+            releaser.start()
+            try:
+                with patch.object(fake, "execute_prompt", side_effect=delayed):
+                    cli._wait_for_synchronous_response(
+                        fake, session, request, time.monotonic() + 0.02, cancellation
+                    )
+            finally:
+                release.set()
+                releaser.join(timeout=2)
+
+        # The worker completes only after the deadline and is rejected despite
+        # producing a response; it cannot write persistence through this path.
+        with self.assertRaises(ControllerError) as context:
+            wait_with(0.05, cli._Cancellation())
+        self.assertEqual(context.exception.code, "invocation_timed_out")
+
+        # A signal recorded before releasing the delayed worker wins even if
+        # the response is already queued when the controller wakes.
+        cancellation = cli._Cancellation()
+        cancellation.record(signal.SIGINT, None)
+        with self.assertRaises(cli._CancellationRequested):
+            wait_with(0, cancellation)
 
     def test_abort_non_acknowledgement_is_persisted(self) -> None:
         """A false abort acknowledgement remains explicit interruption evidence."""
@@ -1662,7 +1765,14 @@ class OpenCodeExecutionTests(unittest.TestCase):
             "blocking_reason": None,
         }
         transcript = self._terminal_messages()
-        transcript[1]["parts"].append({"type": "tool", "tool": "shell"})  # type: ignore[union-attr]
+        transcript[1]["parts"].append(  # type: ignore[union-attr]
+            {
+                "type": "tool",
+                "tool": "shell",
+                "sessionID": "ses_fake_0001",
+                "messageID": "answer-1",
+            }
+        )
         fake = FakeAgentRunner(
             ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
             observations=[
@@ -1795,11 +1905,31 @@ class OpenCodeExecutionTests(unittest.TestCase):
             "blocking_reason": None,
         }
         for label, part, structured_error, expected_code in (
-            ("permission", {"type": "permission"}, False, "unexpected_probe_tool"),
-            ("tool", {"type": "tool", "tool": "shell"}, False, "unexpected_probe_tool"),
+            (
+                "permission",
+                {"type": "permission", "sessionID": "ses_fake_0001", "messageID": "answer-1"},
+                False,
+                "unexpected_probe_tool",
+            ),
+            (
+                "tool",
+                {
+                    "type": "tool",
+                    "tool": "shell",
+                    "sessionID": "ses_fake_0001",
+                    "messageID": "answer-1",
+                },
+                False,
+                "unexpected_probe_tool",
+            ),
             (
                 "structured",
-                {"type": "tool", "tool": "StructuredOutputError"},
+                {
+                    "type": "tool",
+                    "tool": "StructuredOutputError",
+                    "sessionID": "ses_fake_0001",
+                    "messageID": "answer-1",
+                },
                 True,
                 "invalid_agent_result",
             ),
@@ -2376,6 +2506,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
             "info": {
                 "id": "msg_assistant",
                 "role": "assistant",
+                "sessionID": "ses_test",
                 "parentID": "msg_user",
                 "agent": "auditor",
                 "providerID": "test",
@@ -2423,6 +2554,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
         base = {
             "id": "msg_assistant",
             "role": "assistant",
+            "sessionID": "ses_test",
             "parentID": "msg_user",
             "agent": "auditor",
             "providerID": "test",
@@ -2432,6 +2564,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
             "info": {
                 "id": "msg_assistant",
                 "role": "assistant",
+                "session_id": "ses_test",
                 "parent_id": "msg_user",
                 "agent": "auditor",
                 "provider_id": "test",
@@ -2439,10 +2572,19 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 "structured": result,
                 "error": None,
             },
-            "parts": [{"type": "structured_output", "value": result, "output": result}],
+            "parts": [
+                {
+                    "type": "structured_output",
+                    "value": result,
+                    "output": result,
+                    "sessionID": "ses_test",
+                    "messageID": "msg_assistant",
+                }
+            ],
         }
+        session = CreatedSession("ses_test", "title", Path("/tmp"), tuple(_PROBE_PERMISSIONS))
         self.assertEqual(
-            runner._synchronous_response(deepcopy(base), request).structured_result, result
+            runner._synchronous_response(deepcopy(base), request, session).structured_result, result
         )
         cases = (
             ("role", lambda message: message["info"].__setitem__("role", "user")),
@@ -2464,8 +2606,231 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 message = deepcopy(base)
                 mutate(message)
                 with self.assertRaises(ControllerError) as context:
-                    runner._synchronous_response(message, request)
+                    runner._synchronous_response(message, request, session)
                 self.assertEqual(context.exception.code, "malformed_server_response")
+
+    def test_terminal_session_and_part_associations_fail_closed_live_and_persisted(self) -> None:
+        """Assistant and every retained part bind exactly to the created session/message."""
+        from opencode_sprint_loop.agent_runner import InvocationRequest
+
+        runner = OpenCodeServerRunner("http://127.0.0.1:4096")
+        request = InvocationRequest(
+            "0001-auditor", 1, "auditor", "test/strong", "title", "probe\n", Path("/tmp")
+        )
+        session = CreatedSession("ses_test", "title", Path("/tmp"), tuple(_PROBE_PERMISSIONS))
+        result = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        messages = [
+            {
+                "id": "msg_user",
+                "role": "user",
+                "sessionID": "ses_test",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "probe\n",
+                        "sessionID": "ses_test",
+                        "messageID": "msg_user",
+                    }
+                ],
+            },
+            {
+                "id": "msg_assistant",
+                "role": "assistant",
+                "sessionID": "ses_test",
+                "parentID": "msg_user",
+                "info": {
+                    "session_id": "ses_test",
+                    "agent": "auditor",
+                    "providerID": "test",
+                    "modelID": "strong",
+                    "structured": result,
+                },
+                "parts": [
+                    {
+                        "type": "structured_output",
+                        "value": result,
+                        "sessionID": "ses_test",
+                        "messageID": "msg_assistant",
+                    }
+                ],
+            },
+        ]
+        self.assertEqual(
+            runner._synchronous_response(deepcopy(messages[1]), request, session).structured_result,
+            result,
+        )
+        validate_transcript_messages(
+            deepcopy(messages),
+            expected_result=result,
+            expected_prompt="probe\n",
+            expected_role="auditor",
+            expected_model="test/strong",
+            expected_session_id="ses_test",
+        )
+        mutations = (
+            (
+                "missing assistant session",
+                lambda value: (value[1].pop("sessionID"), value[1]["info"].pop("session_id")),
+            ),
+            (
+                "conflicting assistant session",
+                lambda value: value[1]["info"].__setitem__("session_id", "other"),
+            ),
+            ("wrong assistant session", lambda value: value[1].__setitem__("sessionID", "other")),
+            ("missing part session", lambda value: value[1]["parts"][0].pop("sessionID")),
+            (
+                "wrong part session",
+                lambda value: value[1]["parts"][0].__setitem__("sessionID", "other"),
+            ),
+            ("missing part message", lambda value: value[1]["parts"][0].pop("messageID")),
+            (
+                "wrong part message",
+                lambda value: value[1]["parts"][0].__setitem__("messageID", "other"),
+            ),
+            ("wrong reconstructed parent", lambda value: value[1].__setitem__("parentID", "other")),
+        )
+        for label, mutate in mutations:
+            with self.subTest(case=label):
+                mutated = deepcopy(messages)
+                mutate(mutated)
+                with self.assertRaises(ControllerError):
+                    validate_transcript_messages(
+                        mutated,
+                        expected_result=result,
+                        expected_prompt="probe\n",
+                        expected_role="auditor",
+                        expected_model="test/strong",
+                        expected_session_id="ses_test",
+                    )
+                if label != "wrong reconstructed parent":
+                    with self.assertRaises(ControllerError):
+                        runner._synchronous_response(mutated[1], request, session)
+
+    def test_tool_evidence_requires_documented_exact_identity(self) -> None:
+        """``name`` is only a consistency alias; every tool still needs exact ``tool``."""
+        from opencode_sprint_loop.agent_runner import InvocationRequest
+
+        runner = OpenCodeServerRunner("http://127.0.0.1:4096")
+        request = InvocationRequest(
+            "0001-auditor", 1, "auditor", "test/strong", "title", "probe\n", Path("/tmp")
+        )
+        session = CreatedSession("ses_test", "title", Path("/tmp"), tuple(_PROBE_PERMISSIONS))
+        result = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        base = {
+            "id": "msg_assistant",
+            "role": "assistant",
+            "sessionID": "ses_test",
+            "parentID": "msg_user",
+            "info": {
+                "agent": "auditor",
+                "providerID": "test",
+                "modelID": "strong",
+                "structured": result,
+            },
+            "parts": [
+                {
+                    "type": "tool",
+                    "tool": "StructuredOutput",
+                    "name": "StructuredOutput",
+                    "sessionID": "ses_test",
+                    "messageID": "msg_assistant",
+                }
+            ],
+        }
+        self.assertFalse(
+            runner._synchronous_response(deepcopy(base), request, session).unexpected_tool
+        )
+        validate_transcript_messages(
+            [
+                {
+                    "id": "msg_user",
+                    "role": "user",
+                    "sessionID": "ses_test",
+                    "parts": [
+                        {
+                            "type": "text",
+                            "text": "probe\n",
+                            "sessionID": "ses_test",
+                            "messageID": "msg_user",
+                        }
+                    ],
+                },
+                deepcopy(base),
+            ],
+            expected_result=result,
+            expected_prompt="probe\n",
+            expected_role="auditor",
+            expected_model="test/strong",
+            expected_session_id="ses_test",
+        )
+        cases = (
+            ("missing tool", lambda part: part.pop("tool"), ControllerError),
+            (
+                "malformed tool",
+                lambda part: part.__setitem__("tool", ["StructuredOutput"]),
+                ControllerError,
+            ),
+            ("conflicting name", lambda part: part.__setitem__("name", "shell"), ControllerError),
+            (
+                "name is not substitute",
+                lambda part: (part.pop("tool"), part.__setitem__("name", "StructuredOutput")),
+                ControllerError,
+            ),
+            ("shell", lambda part: (part.__setitem__("tool", "shell"), part.pop("name")), None),
+            (
+                "shell-like",
+                lambda part: (part.__setitem__("tool", "StructuredOutput "), part.pop("name")),
+                None,
+            ),
+        )
+        for label, mutate, expected_error in cases:
+            with self.subTest(case=label):
+                message = deepcopy(base)
+                mutate(message["parts"][0])
+                if expected_error is not None:
+                    with self.assertRaises(expected_error):
+                        runner._synchronous_response(message, request, session)
+                else:
+                    self.assertTrue(
+                        runner._synchronous_response(message, request, session).unexpected_tool
+                    )
+                transcript = [
+                    {
+                        "id": "msg_user",
+                        "role": "user",
+                        "sessionID": "ses_test",
+                        "parts": [
+                            {
+                                "type": "text",
+                                "text": "probe\n",
+                                "sessionID": "ses_test",
+                                "messageID": "msg_user",
+                            }
+                        ],
+                    },
+                    message,
+                ]
+                with self.assertRaises(ControllerError):
+                    validate_transcript_messages(
+                        transcript,
+                        expected_result=result,
+                        expected_prompt="probe\n",
+                        expected_role="auditor",
+                        expected_model="test/strong",
+                        expected_session_id="ses_test",
+                    )
 
     def test_transcript_validation_rejects_conflicting_message_aliases(self) -> None:
         """Persisted transcript validation applies the same fail-closed alias reconciliation."""
@@ -2494,6 +2859,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 expected_prompt=probe_prompt("foundation", 1, "0001-auditor"),
                 expected_role="auditor",
                 expected_model="test/strong",
+                expected_session_id="ses_fake_0001",
             ),
             base,
         )
@@ -2528,6 +2894,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                         expected_prompt=probe_prompt("foundation", 1, "0001-auditor"),
                         expected_role="auditor",
                         expected_model="test/strong",
+                        expected_session_id="ses_fake_0001",
                     )
                 self.assertEqual(context.exception.code, "transcript_capture_failed")
 

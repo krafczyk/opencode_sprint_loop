@@ -479,6 +479,31 @@ and status-only abort confirmation (`idle` or null). Focused and full
 verification plus the fresh audit and real-server exit-demo gates remain
 required before completion items are checked.
 
+Builder repair verification (2026-07-14) addressed **AUD-S2-017** through
+**AUD-S2-019**. The daemon prompt worker records monotonic completion for both
+responses and exceptions; after dequeue, the controller accepts evidence only
+when completion is strictly before the monotonic deadline and cancellation
+boundary. A completion before a later cancellation remains valid, while late
+results are ignored without persistence or worker joining. The queue wait
+remains bounded and blocking, with no normal polling or busy-spin. Live and
+persisted transcript validation now reconciles documented top-level/`info`
+`sessionID`/`session_id` aliases, requires exact created-session identity, and
+requires every retained part's documented `sessionID`/`messageID` association.
+Tool evidence now requires bounded documented `tool`, treats `name` only as a
+non-substituting consistency alias, and permits only exact `StructuredOutput`.
+Focused delayed-worker race, adapter, and persisted-transcript coverage passed,
+followed by the complete offline suite (**204 passing, 1 opt-in real-server test
+skipped**), Ruff, formatting, strict mypy, compilation, build, clean-wheel
+installation, and diff checks. A fresh installed-wheel demonstration against an
+external authenticated OpenCode `1.17.18` server and disposable clean real
+submodule fixture observed active status, exact live session/part and prompt
+parent associations, validated result/transcript/metadata shapes, ordered
+events, clean managed state, and final `blocked/execution_not_implemented`.
+Temporary server, fixture, credentials, logs, build, and virtual-environment
+data were removed. This verification does not itself constitute the required
+fresh independent audit; **S2-REVIEW-001** through **S2-REVIEW-009** and
+**S2-DONE-012** remain unchecked.
+
 ## 28. Scope Review
 
 - [x] **S2-SCOPEREVIEW-001** Confirm no product Builder prompt or mutating-agent result schema was implemented.

@@ -25,7 +25,12 @@ from .agent_runner import (
     ValidatedServer,
 )
 from .errors import ControllerError
-from .invocations import reconcile_message_aliases, reconcile_part_output
+from .invocations import (
+    reconcile_message_aliases,
+    reconcile_part_output,
+    reconcile_part_tool,
+    validate_part_association,
+)
 from .security import external_utf8_bytes
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -547,10 +552,10 @@ class OpenCodeServerRunner:
             raise ControllerError(
                 "prompt_submission_failed", "OpenCode did not return an assistant probe response"
             )
-        return self._synchronous_response(response, request)
+        return self._synchronous_response(response, request, session)
 
     def _synchronous_response(
-        self, message: dict[str, Any], request: InvocationRequest
+        self, message: dict[str, Any], request: InvocationRequest, session: CreatedSession
     ) -> InvocationObservation:
         """Validate terminal response and reconstruct its one directly bound user prompt."""
         aliases = reconcile_message_aliases(
@@ -563,6 +568,7 @@ class OpenCodeServerRunner:
             role != "assistant"
             or not _bounded_identifier(aliases["id"])
             or not _bounded_identifier(parent)
+            or aliases["session_id"] != session.session_id
             or aliases["agent"] != request.role
             or aliases["provider_id"] != provider_id
             or aliases["model_id"] != model_id
@@ -582,6 +588,13 @@ class OpenCodeServerRunner:
                     "malformed_server_response", "OpenCode message part is invalid"
                 )
             kind = part["type"]
+            validate_part_association(
+                part,
+                session_id=session.session_id,
+                message_id=aliases["id"],
+                code="malformed_server_response",
+                label="OpenCode assistant response part",
+            )
             if kind in {"structured_output", "json_schema"}:
                 values.append(
                     reconcile_part_output(
@@ -593,7 +606,9 @@ class OpenCodeServerRunner:
             if kind == "permission":
                 unexpected_tool = True
             if kind == "tool":
-                tool = part.get("tool", part.get("name"))
+                tool = reconcile_part_tool(
+                    part, code="malformed_server_response", label="OpenCode assistant response part"
+                )
                 if tool == "StructuredOutputError":
                     structured_error = True
                 elif tool != "StructuredOutput":
@@ -611,7 +626,19 @@ class OpenCodeServerRunner:
         return InvocationObservation(
             "idle",
             [
-                {"id": parent, "role": "user", "parts": [{"type": "text", "text": request.prompt}]},
+                {
+                    "id": parent,
+                    "role": "user",
+                    "sessionID": session.session_id,
+                    "parts": [
+                        {
+                            "type": "text",
+                            "text": request.prompt,
+                            "sessionID": session.session_id,
+                            "messageID": parent,
+                        }
+                    ],
+                },
                 message,
             ],
             values[0] if values else None,

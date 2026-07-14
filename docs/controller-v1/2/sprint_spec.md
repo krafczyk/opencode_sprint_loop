@@ -492,16 +492,20 @@ If step 3 fails, the controller must not submit the prompt and makes a best-effo
   worker shutdown. A late worker result cannot mutate persistence or launch a
   new invocation.
 - The returned object must be the configured assistant terminal response with
-  bounded message and parent IDs, matching role/agent/provider/model, no error,
-  and one unconflicted structured-output value. Top-level and `info` aliases
-  for role, message ID, error, structured output, route identity, and supported
-  parent spellings reconcile exactly; contradictory duplicates, permission
+  bounded message, parent, and documented session IDs, with its session ID
+  exactly equal to the created session, matching role/agent/provider/model, no
+  error, and one unconflicted structured-output value. Top-level and `info`
+  aliases for role, message ID, session ID (`sessionID` and supported
+  `session_id`), error, structured output, route identity, and supported parent
+  spellings reconcile exactly. Every retained part must carry documented
+  `sessionID` and `messageID` fields exactly binding it to its containing
+  message. Contradictory duplicates, missing/wrong associations, permission
   requests, forbidden tools, malformed parts, or absent output fail closed.
 - The controller retains the returned assistant message and parts exactly as
   bounded external evidence. It reconstructs the sole user record from the
   exact already-persisted prompt and the returned assistant parent ID. It never
   calls the message-list endpoint for success or transcript capture.
-- The total invocation deadline is `limits.invocation_timeout_seconds`, measured with monotonic time.
+- The total invocation deadline is `limits.invocation_timeout_seconds`, measured with monotonic time. The daemon worker timestamps normal response and exception completion with monotonic time. After dequeue, the controller re-arbitrates that timestamp against the deadline and cancellation timestamp: completion must be strictly before both boundaries. A response completed before a later cancellation remains acceptable; a response at or after either boundary is ignored and cannot reach persistence.
 - Ordinary network failure during the invocation does not receive Sprint 7's server-unavailable grace period. It interrupts this invocation and preserves available evidence.
 - An ambiguous synchronous request outcome leaves terminal state uncertain.
   Once the session ID is known it follows the bounded abort path in Section
@@ -710,7 +714,7 @@ Exact wrapper fields are required. `content` is a UTF-8 string containing a dete
 
 The controller recursively replaces recognized credential values with the exact marker `[REDACTED]` before canonical serialization. If the complete wrapper would exceed the transcript limit, it truncates `content` at a valid UTF-8 code-point boundary to the largest deterministic prefix that permits the final wrapper to remain within the limit, appends `\n[TRUNCATED]`, and sets `truncated` true. Truncated `content` is evidence text and need not itself remain parseable JSON; untruncated `content` must parse as the complete message array. Per-string limits are applied before canonical serialization using the same `[TRUNCATED]` marker, and any such truncation also sets the wrapper flag. Redaction precedes per-string and total truncation.
 
-Before opaque serialization, the controller validates the documented message/part envelope needed to associate the terminal response and detect tool use. The assistant response is retained unchanged; its parent ID becomes the reconstructed user record ID and binds that record to the exact persisted prompt. For a successful probe it requires configured Auditor/provider/model identity. A permission request or tool part other than `StructuredOutput` fails the probe even though sanitized transcript evidence is retained. The controller does not invoke `opencode export`, the message-list endpoint, or OpenCode local storage.
+Before opaque serialization, the controller validates the documented message/part envelope needed to associate the terminal response and detect tool use. The assistant response is retained unchanged; its parent ID becomes the reconstructed user record ID and binds that record to the exact persisted prompt. The reconstructed user record and text part carry that exact parent/message ID and the created session ID. For a successful probe the assistant's documented session ID must equal the created session and it requires configured Auditor/provider/model identity. Every retained part must carry matching documented `sessionID`/`messageID` association fields. Every `type: "tool"` part must carry a bounded documented `tool` string; a supported `name` alias is consistency-only and cannot replace missing `tool`. Only exact `StructuredOutput` is permitted (`StructuredOutputError` remains invalid output); missing, malformed, conflicting, or shell-like tool identities fail closed. The controller does not invoke `opencode export`, the message-list endpoint, or OpenCode local storage.
 
 Transcript capture is required after successful completion. On failure or interruption it is best effort, and metadata records `complete`, `truncated`, or `unavailable`.
 
@@ -909,7 +913,9 @@ The last event may be `server.validated`, `agent.started`, `agent.completed`, `a
   representative shell, repository, web, task, MCP, and external permissions
   remain denied. Direct-adapter and full-controller captures use the same fixture,
   route sequence, and request bodies.
-- Timeout uses monotonic time, calls abort once, and records interruption.
+- Timeout uses monotonic time, calls abort once, and records interruption. The
+  daemon worker timestamp and post-dequeue cancellation/deadline arbitration
+  prevent queue wake-up order from promoting late evidence.
 - Cooperative interruption attempts abort and preserves the session ID.
 - Abort non-acknowledgement is retained as failure evidence.
 
@@ -929,7 +935,13 @@ The last event may be `server.validated`, `agent.started`, `agent.completed`, `a
 - Terminal writes follow result, transcript, metadata, agent event, then run-block ordering; injected failures preserve only documented prefixes and never imply success.
 - Prompt bytes equal submitted sanitized prompt bytes.
 - `result.json` is written only for valid agent output.
-- Transcript messages are reconstructed, recursively sanitized, and bounded.
+- Transcript messages are reconstructed, recursively sanitized, and bounded;
+  assistant session aliases, exact created-session identity, exact reconstructed
+  parent linkage, and every retained part's `sessionID`/`messageID` association
+  are validated on both live and persisted evidence.
+- Every tool part requires a bounded documented `tool` string; a compatible
+  `name` alias may agree but never substitutes for it, and only exact
+  `StructuredOutput` is accepted.
 - Credential-bearing transcript fixtures redact synthetic values.
 - Oversized transcript fields and total transcript are deterministically truncated and marked.
 - Symlink, non-regular, hard-linked, replaced, unwritable, short-write, pre-replace, and post-replace failure cases fail closed without corrupting prior complete artifacts.
@@ -990,7 +1002,7 @@ Sprint 2 is accepted when:
 3. The controller never starts or substitutes an OpenCode server.
 4. One fresh configured Auditor session is created with a recognizable title.
 5. The session ID is durably visible through state/status before prompt submission.
-6. The execution probe runs under the exact ordered wildcard-deny then `StructuredOutput`-allow permissions and returns a controller-validated structured result; free-form prose or any non-`StructuredOutput` tool use cannot pass.
+6. The execution probe runs under the exact ordered wildcard-deny then `StructuredOutput`-allow permissions and returns a controller-validated structured result; free-form prose, terminal evidence not bound to the created session/prompt, or any non-exact-`StructuredOutput` tool use cannot pass.
 7. Complete bounded metadata, prompt, result, and sanitized transcript records exist for a successful probe.
 8. Status remains local and reports active role, invocation, and session while the probe runs.
 9. Timeout and cooperative interruption request abort, preserve evidence, and fail closed.
