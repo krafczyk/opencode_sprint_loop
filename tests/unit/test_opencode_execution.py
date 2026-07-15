@@ -910,6 +910,15 @@ class OpenCodeExecutionTests(unittest.TestCase):
                     _last_matching_permission_action(_PROBE_PERMISSIONS, forbidden), "deny"
                 )
 
+    def test_production_probe_title_matches_literal_sprint_3_contract(self) -> None:
+        """The production title formatter retains the independently asserted V1 literal."""
+        from opencode_sprint_loop.invocations import probe_title
+
+        self.assertEqual(
+            probe_title("foundation", 1, 1),
+            "[foundation/1] auditor 0001 execution probe",
+        )
+
     def test_direct_and_full_probe_use_the_same_complete_request_contract(self) -> None:
         """The adapter and controller send identical captured Sprint 2 request bodies/routes."""
         from opencode_sprint_loop.agent_runner import InvocationRequest

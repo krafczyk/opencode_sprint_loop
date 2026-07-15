@@ -348,6 +348,33 @@ safety-bounded real procedure keeps S3-DOC-013 checked, but S3-DETACH-006,
 S3-MKCHAD-008, S3-DEMO-002 through S3-DEMO-010, S3-DONE-010, and the independent
 audit gates remain unchecked.
 
+### Repair-round-3 evidence (2026-07-15)
+
+Auditor pass-3 numbered findings 1 through 7 were repaired in pushed plugin
+commit `cb54112`, before this parent gitlink update, without accessing live
+mkchad state or closing an external demonstration gate. Status validation now rejects recognizable
+credentials in every rendered field and enforces the requested persisted V1
+shape constraints while retaining truthful interrupted active invocation
+evidence. Setup
+notifies from its validated first observation before watcher startup. Non-zero
+signals fail generically. Resolver timers are cancellable and lifecycle-owned,
+and stale watcher resolution cannot spawn. Detached survival uses and removes a
+unique test-owned directory. A separate controller assertion fixes the literal
+production title expectation.
+
+The complete plugin command passed with `239` assertions. The focused literal
+controller test passed (`1`), followed by the isolated complete controller suite
+(`211` tests, one opt-in real-server test skipped), compilation, Ruff lint and
+format checks, strict mypy, build, and a fresh disposable wheel-install
+help/version smoke. An earlier concurrent controller-suite/build invocation had
+one copy error while `build` temporarily created its sdist staging directory;
+the required suite was rerun without a concurrent source-tree build and passed.
+`git diff --check` passed in both repositories, and final status showed only the
+intended repair files plus the modified plugin submodule worktree. No Lua
+formatter or linter is configured or installed, so S3-TEST-016 remains
+unchecked. S3-MKCHAD-008, S3-DETACH-006, S3-DEMO-002 through S3-DEMO-010,
+S3-DONE-010, S3-REVIEW-011, and S3-DONE-011 remain unchecked.
+
 - [x] **S3-REVIEW-001** Audit implementation against `docs/threat_model.md`, `docs/audit_policy.md`, and Sprint 3's plugin-specific failure model.
 - [x] **S3-REVIEW-002** Prioritize ordinary malformed setup, process failure, malformed status, timer races, credential exposure, and live-environment mistakes.
 - [x] **S3-REVIEW-003** Confirm no shell interpolation path exists.
