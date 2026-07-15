@@ -8,8 +8,11 @@ from typing import Any
 from .errors import ControllerError
 
 
+_ASCII_CASE = re.ASCII | re.IGNORECASE
+_ASCII_WS = r"[ \t\n\r\f\v]"
+_ASCII_VALUE = r"[\x21-\x7e]"
 _SENSITIVE_FIELD = re.compile(
-    r"(?:credential|password|secret|token|api[_-]?key|authorization)", re.IGNORECASE
+    r"(?:credential|password|secret|token|api[_-]?key|authorization)", _ASCII_CASE
 )
 _PROVIDER_TOKEN = (
     r"(?:"
@@ -26,16 +29,22 @@ _PROVIDER_TOKEN = (
 # Anchor a scheme to its first valid character. This keeps credential scans of
 # arbitrary long non-URI text linear while accepting every valid URI scheme.
 _URI = r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*://"
-_URI_QUERY_OR_FRAGMENT = rf"{_URI}[^\s?#]+(?:\?[^#\s]+|#[^\s]+)"
+_URI_QUERY_OR_FRAGMENT = (
+    rf"{_URI}[\x21-\x22\x24-\x3e\x40-\x7e]+"
+    rf"(?:\?[\x21-\x22\x24-\x7e]+|#[\x21-\x7e]+)"
+)
 _CREDENTIAL_VALUE = re.compile(
-    r"(?:\b(?:authorization|proxy-authorization)\s*:\s*(?:basic|bearer)\s+\S+|"
-    rf"{_URI}[^/\s@]*@|"
+    rf"(?:\b(?:authorization|proxy-authorization){_ASCII_WS}*:{_ASCII_WS}*"
+    rf"(?:basic|bearer){_ASCII_WS}+{_ASCII_VALUE}+|"
+    rf"{_URI}[!-\.0-?A-~]*@|"
     rf"{_URI_QUERY_OR_FRAGMENT}|"
-    r"[?&#](?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)=[^&#\s]+|"
-    r"(?<![a-z0-9_-])(?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)\s*(?:=|:)\s*\S+|"
+    r"[?&#](?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)="
+    rf"[\x21-\x22\x24-\x25\x27-\x7e]+|"
+    r"(?<![a-z0-9_-])(?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)"
+    rf"{_ASCII_WS}*(?:=|:){_ASCII_WS}*{_ASCII_VALUE}+|"
     rf"{_PROVIDER_TOKEN}|"
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----)",
-    re.IGNORECASE,
+    _ASCII_CASE,
 )
 
 
@@ -106,23 +115,35 @@ def validate_safe_data(
 def redact_diagnostic(message: str) -> str:
     """Redact credentials plus all URI query values and fragments."""
     message = re.sub(
-        r"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*(?:basic|bearer)\s+)\S+",
+        rf"(?ai)(\b(?:authorization|proxy-authorization){_ASCII_WS}*:{_ASCII_WS}*"
+        rf"(?:basic|bearer){_ASCII_WS}+){_ASCII_VALUE}+",
         r"\1[REDACTED]",
         message,
     )
-    message = re.sub(rf"(?i)({_URI})[^/\s@]*@", r"\1[REDACTED]@", message)
+    message = re.sub(rf"(?ai)({_URI})[!-\.0-?A-~]*@", r"\1[REDACTED]@", message)
     # Query keys are not a reliable secret classifier, so no query value or
     # fragment may reach diagnostics even when it uses an unfamiliar name.
-    message = re.sub(rf"(?i)({_URI}[^\s?#]+)\?[^#\s]*", r"\1?[REDACTED]", message)
-    message = re.sub(rf"(?i)({_URI}[^\s#]+)#[^\s]*", r"\1#[REDACTED]", message)
     message = re.sub(
-        r"(?i)([?&#](?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)=)[^&#\s]+",
+        rf"(?ai)({_URI}[\x21-\x22\x24-\x3e\x40-\x7e]+)"
+        rf"\?[\x21-\x22\x24-\x7e]*",
+        r"\1?[REDACTED]",
+        message,
+    )
+    message = re.sub(
+        rf"(?ai)({_URI}[\x21-\x22\x24-\x7e]+)#[\x21-\x7e]*",
+        r"\1#[REDACTED]",
+        message,
+    )
+    message = re.sub(
+        r"(?ai)([?&#](?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)=)"
+        r"[\x21-\x22\x24-\x25\x27-\x7e]+",
         r"\1[REDACTED]",
         message,
     )
-    message = re.sub(rf"(?i){_PROVIDER_TOKEN}", "[REDACTED]", message)
+    message = re.sub(rf"(?ai){_PROVIDER_TOKEN}", "[REDACTED]", message)
     return re.sub(
-        r"(?i)((?<![a-z0-9_-])(?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)\s*(?:=|:)\s*)\S+",
+        rf"(?ai)((?<![a-z0-9_-])(?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)"
+        rf"{_ASCII_WS}*(?:=|:){_ASCII_WS}*){_ASCII_VALUE}+",
         r"\1[REDACTED]",
         message,
     )

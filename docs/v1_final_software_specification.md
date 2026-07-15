@@ -853,7 +853,7 @@ The plugin is developed in the separate `opencode_sprint_loop.lua` repository.
 
 ### 20.2 Setup and Lua API
 
-The plugin targets Neovim 0.12. `setup()` must be called before any plugin command or public action. It requires explicit sprint-root and server-URL values or callbacks, accepts an executable value or callback defaulting to `sprint-loop`, and accepts optional OpenCode web-URL and server-CA-certificate values or callbacks. URL callbacks may return synchronously or resolve through one completion callback so the generic plugin can consume mkchad without hard-coding it. A representative API is:
+The plugin targets Neovim 0.12. `setup()` must be called before any plugin command or public action. `sprint_root`, `executable`, and `server_ca_cert` accept strings or synchronous-return functions; `executable` defaults to `sprint-loop`. `server_url` and `web_url` accept strings or functions that either return synchronously or resolve through one `done(value, error)` completion callback so the generic plugin can consume mkchad without hard-coding it. Callback-style completion is not supported for the non-URL options. A representative API is:
 
 ```lua
 local function mkchad_url(done)
@@ -882,7 +882,7 @@ The exact mkchad adapter names are integration details, not assumptions the gene
 
 Resolving configuration must not start or replace an OpenCode server. When a server CA certificate is configured, the plugin supplies it only to controller child processes through an inherited environment override such as `SSL_CERT_FILE`; it does not place the path in argv or configure browser trust.
 
-The module also exposes asynchronous `start()`, `progress()`, `pause()`, `resume()`, `stop()`, and `open_session()` methods. They back the corresponding commands, resolve relevant callbacks when invoked, report through the same UI, and do not expose a stable process-handle return contract.
+The module also exposes asynchronous `start()`, `progress()`, `pause()`, `resume()`, `stop()`, and `open_session()` methods. They back the corresponding commands, re-resolve relevant options when invoked, report through the same UI, and do not expose a stable process-handle return contract. Setup resolves `sprint_root` and `executable` once for the mandatory initial status observation; this does not replace action-time re-resolution of those options.
 
 ### 20.3 Commands
 

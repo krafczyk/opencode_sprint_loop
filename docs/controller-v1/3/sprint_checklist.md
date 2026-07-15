@@ -57,7 +57,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S3-SETUP-002** Require explicit `sprint_root` and `server_url` setup fields.
 - [x] **S3-SETUP-003** Default `executable` to exact string `sprint-loop`.
 - [x] **S3-SETUP-004** Support optional `web_url` and `server_ca_cert` fields.
-- [x] **S3-SETUP-005** Accept documented string and resolver forms for each option.
+- [x] **S3-SETUP-005** Accept strings and synchronous-return functions for root/executable/CA, and strings or synchronous/callback functions for server/web URLs.
 - [x] **S3-SETUP-006** Reject unknown option names and unsupported primitive or collection values.
 - [x] **S3-SETUP-007** Validate setup shape without prematurely resolving callbacks or contacting external systems.
 - [x] **S3-SETUP-008** Make repeated setup replace configuration and invalidate prior watcher/timer callbacks without duplicate commands.
@@ -68,10 +68,10 @@ An item may be checked only when its implementation, tests, and required documen
 
 - [x] **S3-RESOLVE-001** Resolve only values needed by the current action.
 - [x] **S3-RESOLVE-002** Resolve action values at invocation time so roots and server URLs may change after setup.
-- [x] **S3-RESOLVE-003** Support synchronous URL resolvers that return one non-empty string.
+- [x] **S3-RESOLVE-003** Support synchronous-return functions for every option and callback style only for server/web URLs.
 - [x] **S3-RESOLVE-004** Support callback-style URL resolvers that call `done(value, error)` exactly once.
 - [x] **S3-RESOLVE-005** Enforce the documented five-second callback resolver timeout or update the specification before choosing another bound.
-- [x] **S3-RESOLVE-006** Reject dual return-and-callback completion and duplicate callbacks deterministically.
+- [x] **S3-RESOLVE-006** Reject URL dual return-and-callback completion and duplicate callbacks, and reject callback misuse for non-URL options without side effects.
 - [x] **S3-RESOLVE-007** Ignore late resolver completions from a replaced setup or watcher generation.
 - [x] **S3-RESOLVE-008** Catch resolver exceptions and return concise errors without ordinary Lua tracebacks.
 - [x] **S3-RESOLVE-009** Reject nil, empty, non-string, NUL-bearing, and control-character resolved values.
@@ -204,6 +204,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S3-WATCH-014** Emit at most one warning per continuous watcher failure episode and reset suppression after success.
 - [x] **S3-WATCH-015** Treat malformed status as an error, not no-run, stopped, or success.
 - [x] **S3-WATCH-016** Make no direct OpenCode, question reply/reject, workflow mutation, or persistence call.
+- [x] **S3-WATCH-017** Preserve serialized public progress/session reads across start, resume, and stop observation overlap; preserve stop observation until status confirms inactivity.
 
 ## 16. Active Session Browser URL
 
@@ -237,6 +238,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S3-CTRL-004** Preserve Sprint 2 `feature_not_implemented` behavior without simulated status changes.
 - [x] **S3-CTRL-005** Do not kill, abort, retry, or mutate the controller in response to a control-command failure.
 - [x] **S3-CTRL-006** Keep the real question lifecycle assigned to Sprint 4 and pause/resume/stop behavior at a waiting-for-user boundary assigned to Sprint 7.
+- [x] **S3-CTRL-007** Keep the current watcher active across stop resolver/spawn/command failure and success while observed status remains active.
 
 ## 19. Errors, Bounds, and Security
 
@@ -252,19 +254,20 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S3-SEC-004** Treat all status values as display text and never execute them as commands, mappings, format strings, or help tags.
 - [x] **S3-SEC-005** Use synthetic security-sensitive values in tests and examples.
 - [x] **S3-SEC-006** Confirm the plugin owns no persistent file and never writes controller workflow data.
+- [x] **S3-SEC-007** Keep controller and plugin recognizers semantically identical through an explicit ASCII credential grammar and exact positive/near-miss parity vectors.
 
 ## 20. Automated Verification
 
 - [x] **S3-TEST-001** Add a documented headless Neovim 0.12 test command.
 - [x] **S3-TEST-002** Keep default plugin tests independent of OpenCode, GitHub, network, model usage, browser availability, and credentials.
 - [x] **S3-TEST-003** Test command registration and every public Lua method.
-- [x] **S3-TEST-004** Test setup shape, repeated setup, synchronous resolvers, callback resolvers, timeout, duplicate completion, and stale completion.
+- [x] **S3-TEST-004** Test setup shape, independently missing root/server, per-option resolver contracts, malformed results, timeout, duplicate completion, and stale completion.
 - [x] **S3-TEST-005** Test exact argv and no shell interpolation with hostile-looking literal values.
 - [x] **S3-TEST-006** Test asynchronous behavior and bounded output using a fake executable.
 - [x] **S3-TEST-007** Test process-level detached survival after headless Neovim exits.
 - [x] **S3-TEST-008** Test every supported status state and malformed status category.
 - [x] **S3-TEST-009** Test progress buffer content, options, mappings, dimensions, and lifecycle.
-- [x] **S3-TEST-010** Test watcher activation, one-in-flight rule, deduplication, failure suppression, replacement, and shutdown.
+- [x] **S3-TEST-010** Test watcher activation, one-in-flight rule, deduplication, failure suppression, targeted replacement, public-action overlap, stop preservation, and shutdown.
 - [x] **S3-TEST-011** Test URL-safe root encoding, session encoding, web-base validation, and browser outcomes.
 - [x] **S3-TEST-012** Test CA path validation and exact child environment without capturing CA content.
 - [x] **S3-TEST-013** Test accurate pause/resume/stop error delegation.
@@ -280,7 +283,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S3-DOC-001** Expand the plugin README with installation, Neovim 0.12, setup, and command usage.
 - [x] **S3-DOC-002** Add a Neovim help file documenting every public option, method, command, and error path.
 - [x] **S3-DOC-003** Document required setup and explicit root/server configuration.
-- [x] **S3-DOC-004** Document synchronous and callback-style URL resolver contracts.
+- [x] **S3-DOC-004** Document synchronous-only non-URL functions, synchronous/callback URL functions, setup-time initial root/executable resolution, and action-time re-resolution.
 - [x] **S3-DOC-005** Provide generic and current mkchad adapter examples without hard-coding mkchad in plugin source.
 - [x] **S3-DOC-006** Document that URL resolution must not call mkchad server ensure/start behavior.
 - [x] **S3-DOC-007** Document optional `server_ca_cert`, child `SSL_CERT_FILE`, and separate browser CA trust.
@@ -329,7 +332,7 @@ Auditor pass-2 findings 1 through 9 were repaired in pushed plugin commit
 or closing an external demonstration gate. Controller coverage now proves that an interrupted
 durable active invocation projects `running` while `process_running` is false.
 The plugin accepts that truthful combination, enforces state-conditional reason
-semantics, arbitrates function resolvers for the complete five-second window,
+semantics, arbitrates URL function resolvers for the complete five-second window,
 rejects malformed web path prefixes, reports external command failures without
 stderr disclosure, distinguishes truncated status output, and requires a
 readable regular-file CA.
@@ -382,22 +385,23 @@ Auditor pass-4 findings 1 through 4 were repaired in pushed plugin commit
 Unknown setup fields now produce only fixed `invalid_setup` without retaining or
 displaying their names, with public-path tests for synthetic credential,
 credential-bearing URL, control-bearing, and oversized keys. All plugin status
-queries now share one serialized child slot. Setup and watcher replacement,
-start/resume observation replacement, repeated setup, stop, and `VimLeavePre`
-cancel only retained read-only status children and wait for their callbacks
-before replacement; tests prove the detached/controller process handles are
-never cancellation targets.
+queries gained one serialized child slot. The round-4 implementation cancelled
+retained read-only status children during setup, watcher, start/resume, stop, and
+`VimLeavePre` replacement and did not target detached/controller process
+handles. Auditor pass 5 later demonstrated that this wording hid two defects:
+stop could permanently remove observation after a failed delegation, and
+start/resume/stop could silently discard public progress/session requests.
+Those round-4 completion claims are withdrawn and replaced by repair-round-5
+targeted-cancellation evidence.
 
-The Lua status recognizer now follows the controller recognizer in
-`src/opencode_sprint_loop/security.py`, including each provider token family's
-exact suffix alphabet and minimum length. Every provider family has a rejecting
-synthetic token and an accepted unsupported near-miss control. The public setup
-matrix proves exact default executable `sprint-loop`, string and function forms
-for every option, callback-style server and web URLs, function-valued CA, and
-the resulting public status/action/session argv, browser route, and
-`SSL_CERT_FILE` wiring. The Auditor-requested setup/default, watcher/process,
-credential-safety, and test-matrix checklist reversions were re-evaluated and
-remain checked only on this coverage.
+The round-4 Lua status recognizer aligned the listed ASCII provider-token
+prefixes, suffix alphabets, and minimum lengths with
+`src/opencode_sprint_loop/security.py`, but it did not prove semantic parity:
+Python Unicode case folding and whitespace still diverged from Lua. Likewise,
+the public setup matrix exercised then-accepted generic callback behavior rather
+than the authoritative per-option resolver contract. Those broader round-4
+claims are withdrawn; repair round 5 supplies explicit ASCII parity vectors and
+public-path per-option resolver evidence.
 
 The focused development run passed with `302` assertions; after the final
 global public-status serialization assertion, the complete plugin command
@@ -412,6 +416,38 @@ linter is configured or installed, so S3-TEST-016 remains unchecked.
 S3-MKCHAD-008, S3-DETACH-006, S3-DEMO-002 through S3-DEMO-010, S3-DONE-010,
 S3-REVIEW-011, and S3-DONE-011 remain unchecked; no external mkchad private-CA,
 real probe, browser, independent-audit, or overall-completion gate was closed.
+
+### Repair-round-5 evidence (2026-07-15)
+
+Auditor pass-5 findings 1 through 5 were repaired in pushed plugin commit
+`ec83f4b`, before this parent gitlink update, without accessing live mkchad state
+or closing an external gate. Controller and plugin credential recognition now share explicit
+ASCII case folding, whitespace, and token syntax. Matching test vectors cover
+authorization/named/URI/private-key forms, every supported provider prefix,
+synthetic positives, short/alphabet near misses, NBSP, long-s, and Kelvin-sign
+controls. Conventional synthetic credentials still reject.
+
+Stop now leaves active observation intact across root resolution, process spawn,
+signal/non-zero completion, and successful-but-still-active outcomes. Start and
+resume replace only setup/watcher reads, while serialized public progress and
+session requests complete. The per-option resolver implementation now invokes
+root/executable/CA functions synchronously without `done`; only URL functions
+receive callback support and the five-second duplicate/dual-completion
+arbitration. Public tests cover independently missing root, synchronous URL
+returns, malformed/nil results, callback misuse without process/environment
+effects, and exact absence of a no-CA environment override.
+
+The focused controller credential tests passed (`2`). The final complete plugin
+command passed with `444` assertions. The successful isolated full controller
+rerun passed `212` tests with one opt-in real-server test skipped; an earlier
+120-second attempt timed out during its build/install integration test and is
+not claimed as verification. Compilation, Ruff lint and format checks, strict
+mypy, package build, and fresh disposable wheel-install help/version smokes
+passed. `git diff --check` passed in both repositories; final status contained
+only the intended controller/docs/tests and plugin gitlink update. No Lua formatter/linter
+configuration exists, so S3-TEST-016 remains unchecked. S3-MKCHAD-008,
+S3-DETACH-006, S3-DEMO-002 through S3-DEMO-010, S3-REVIEW-011,
+S3-DONE-001, S3-DONE-002, S3-DONE-005, S3-DONE-010, and S3-DONE-011 remain unchecked.
 
 - [x] **S3-REVIEW-001** Audit implementation against `docs/threat_model.md`, `docs/audit_policy.md`, and Sprint 3's plugin-specific failure model.
 - [x] **S3-REVIEW-002** Prioritize ordinary malformed setup, process failure, malformed status, timer races, credential exposure, and live-environment mistakes.
@@ -461,7 +497,7 @@ real probe, browser, independent-audit, or overall-completion gate was closed.
 - [ ] **S3-DONE-002** Every Sprint 3 acceptance criterion in `sprint_spec.md` is demonstrably satisfied.
 - [x] **S3-DONE-003** Focused plugin and controller tests pass during development.
 - [x] **S3-DONE-004** The complete default plugin and controller suites pass without external network or credentials.
-- [x] **S3-DONE-005** Required Lua and Python formatting, linting, typing, compilation, build, and clean-install checks pass.
+- [ ] **S3-DONE-005** Required Lua and Python formatting, linting, typing, compilation, build, and clean-install checks pass.
 - [x] **S3-DONE-006** `git diff --check` passes in both repositories.
 - [x] **S3-DONE-007** Final controller and plugin repository statuses contain only intended Sprint 3 changes.
 - [x] **S3-DONE-008** No credentials, generated runtime state, browser artifacts, live mkchad data, or temporary fixtures are tracked.

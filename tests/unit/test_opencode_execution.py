@@ -855,6 +855,90 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 self.assertIn("[REDACTED]", wrapper["content"])
                 self.assertNotIn(value, redact_diagnostic(f"external diagnostic: {value}"))
 
+    def test_ascii_credential_grammar_parity_vectors(self) -> None:
+        """The controller recognizes the exact ASCII vectors shared with the Lua client."""
+        provider_cases = (
+            ("ghs_", "A." * 18, "A" * 35),
+            ("gho_", "A" * 36, "A" * 35),
+            ("ghp_", "A" * 36, "A" * 35),
+            ("ghu_", "A" * 36, "A" * 35),
+            ("ghr_", "A" * 36, "A" * 35),
+            ("github_pat_", "A_" * 10, "A" * 19),
+            *(
+                (prefix, "A_" * 10, "A" * 19)
+                for prefix in (
+                    "glpat-",
+                    "glcbt-",
+                    "glptt-",
+                    "glrt-",
+                    "glimt-",
+                    "glsoat-",
+                    "gldt-",
+                    "glrtr-",
+                    "glft-",
+                    "glagent-",
+                    "glwt-",
+                    "glffct-",
+                    "gloas-",
+                )
+            ),
+            ("sk-proj-", "A" * 20, "." + "A" * 20),
+            ("sk-svcacct-", "A" * 20, "." + "A" * 20),
+            ("sk-admin-", "A" * 20, "." + "A" * 20),
+            ("sk-ant-api01-", "A" * 20, "." + "A" * 20),
+            ("sk-ant-oat99-", "A" * 20, "." + "A" * 20),
+            ("sk-or-v1-", "A" * 20, "." + "A" * 20),
+            ("sk-", "A_" * 10, "A" * 19),
+            ("AIza", "A_" * 15, "A" * 29),
+            ("hf_", "A" * 20, "_" + "A" * 20),
+            *(
+                (prefix, "A-" * 10, "_" + "A" * 20)
+                for prefix in (
+                    "xoxb-",
+                    "xoxa-",
+                    "xoxp-",
+                    "xoxr-",
+                    "xoxs-",
+                    "xapp-",
+                    "xwfp-",
+                )
+            ),
+            ("AKIA", "A" * 16, "_" + "A" * 16),
+            ("ASIA", "A" * 16, "_" + "A" * 16),
+        )
+        positives = (
+            "Authorization: Basic c3ludGhldGljOnBhc3N3b3Jk",
+            "proxy-authorization\t:\tBeArEr synthetic-token_123",
+            "password = synthetic-password",
+            "https://user:synthetic@example.invalid/path",
+            "https://example.invalid/path?opaque=synthetic",
+            "-----BEGIN SYNTHETIC PRIVATE KEY-----",
+            *(prefix + suffix for prefix, suffix, _ in provider_cases),
+        )
+        near_misses = (
+            "Authorization:\u00a0Bearer synthetic-token",
+            "Authorization: ſasic c3ludGhldGlj",
+            "paſsword=synthetic-password",
+            "toKen=synthetic-token",
+            "AKIA" + "A" * 16,
+            *(prefix + suffix for prefix, _, suffix in provider_cases),
+        )
+        completed = {
+            "schema_version": 1,
+            "status": "completed",
+            "summary": "ok",
+            "checks": [],
+            "blocking_reason": None,
+        }
+        for value in positives:
+            with self.subTest(positive=value[:24]):
+                self.assertTrue(contains_credential(value))
+                with self.assertRaises(ControllerError):
+                    validate_result({**completed, "summary": value})
+        for value in near_misses:
+            with self.subTest(near_miss=value[:24]):
+                self.assertFalse(contains_credential(value))
+
     def test_credential_scan_handles_bounded_non_uri_text(self) -> None:
         """A bounded artifact-sized benign string cannot trigger URI-pattern backtracking."""
         self.assertFalse(contains_credential("x" * (1024 * 1024)))

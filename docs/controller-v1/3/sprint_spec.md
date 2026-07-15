@@ -116,7 +116,7 @@ At Sprint 3 drafting time, the fresh remote `mkchad` branch was inspected at com
 Sprint 3 must handle ordinary, non-adversarial failures including:
 
 - Missing or invalid setup options.
-- Resolver callbacks that throw, return nil, or return empty or non-string values.
+- Resolver functions that throw, return nil, or return empty or non-string values, plus callback misuse on non-URL options.
 - Missing controller executables and process-spawn failures.
 - Paths and URLs containing spaces or shell metacharacters.
 - Non-zero controller exits and bounded diagnostics.
@@ -228,24 +228,25 @@ Setup fields:
 
 | Field | Required | Accepted value | Meaning |
 | --- | --- | --- | --- |
-| `sprint_root` | Yes | Non-empty string or resolver returning one | Sprint-history repository passed to `--root`. |
+| `sprint_root` | Yes | Non-empty string or synchronous-return function | Sprint-history repository passed to `--root`. |
 | `server_url` | Yes | Non-empty string or synchronous/callback resolver | Credential-free OpenCode server origin used by start and resume. |
-| `executable` | No | Non-empty string or resolver returning one | Controller executable; defaults to `sprint-loop`. |
+| `executable` | No | Non-empty string or synchronous-return function | Controller executable; defaults to `sprint-loop`. |
 | `web_url` | No | Non-empty string or synchronous/callback resolver | Browser-facing OpenCode web base used only to open sessions. |
-| `server_ca_cert` | No | Non-empty string or resolver returning one | CA certificate supplied to controller child processes for private HTTPS trust. |
+| `server_ca_cert` | No | Non-empty string or synchronous-return function | CA certificate supplied to controller child processes for private HTTPS trust. |
 
 Unknown setup fields and unsupported value types fail setup rather than being ignored. Setup validates option shape, not the current callback result or external resource.
 
-Calling setup again replaces the prior configuration, cancels prior plugin timers and in-flight watcher generation, avoids duplicate command registration, and performs a new initial status observation for the newly resolved sprint root.
+Calling setup again replaces the prior configuration, cancels prior plugin timers and in-flight watcher generation, avoids duplicate command registration, and performs a new initial status observation after resolving the new `sprint_root` and `executable`.
 
 ### 6.3 Resolver Semantics
 
 - Resolve only fields relevant to the requested action.
-- Resolve values when the action or watcher generation begins, not only during setup.
+- Setup resolves `sprint_root` and `executable` for the mandatory initial status observation. Resolve those options again when a later action or watcher generation needs them.
+- Permit `sprint_root`, `executable`, and `server_ca_cert` functions only to return a string synchronously. Invoke them without a completion callback and reject callback-style misuse before process or environment side effects.
 - Permit server and web URL resolvers either to return a string synchronously or to accept one completion callback and invoke it exactly once as `done(value, error)`.
 - Bound asynchronous URL resolution to a documented fixed timeout; Sprint 3 uses five seconds unless real integration evidence requires a different bounded value.
-- Reject a resolver that both returns a value and invokes its completion callback, invokes the callback more than once, or completes after its generation was replaced.
-- Hold a function resolver's candidate result through the five-second arbitration window before consuming it. This preserves synchronous return support while allowing a delayed callback-after-return or duplicate callback within the supported window to be rejected before an action launches.
+- Reject a URL resolver that both returns a value and invokes its completion callback, invokes the callback more than once, or completes after its generation was replaced.
+- Hold a URL function resolver's candidate result through the five-second arbitration window before consuming it. This preserves synchronous URL return support while allowing a delayed callback-after-return or duplicate callback within the supported window to be rejected before an action launches. Synchronous-only non-URL functions do not incur this arbitration delay.
 - Catch callback errors and render a concise diagnostic without a Lua traceback in normal use.
 - Require resolved values to be non-empty strings without NUL or control characters.
 - Never include the resolved server URL in routine notifications or progress buffers.
@@ -325,6 +326,8 @@ The detached-lifetime test must use a child process that survives the launching 
 Sprint 3 exposes pause, resume, and stop but does not implement their controller semantics. Against the Sprint 2 controller they return `feature_not_implemented` and make no state or Git mutation.
 
 The plugin reports that rejection accurately as a controller-command failure without copying external standard error into the notification. It must not alter status, kill the controller, retry the command, or claim that a pause, resume, or stop occurred.
+
+A stop attempt preserves the current watcher through resolver failure, spawn failure, signal or non-zero completion, and successful delegation while status still reports `process_running: true`. Only a status observation confirming `process_running: false` ends that active observation. Start/resume may replace setup- or watcher-owned reads after successful spawn, but they must not cancel queued or active public `progress()` or `open_session()` reads; those remain serialized and receive their normal completion.
 
 ## 9. Additive Controller Status Contract
 
@@ -466,6 +469,7 @@ The plugin maintains at most one watcher generation.
 - If the launched command exits before an active run is observed, the watcher performs one final status query and then stops rather than polling indefinitely.
 - Once an active run has been observed, the watcher stops after status reports no running controller.
 - Reconfiguration cancels the prior timer and invalidates callbacks from the prior generation.
+- Start/resume observation replacement targets only setup/watcher-owned reads. Public progress and session-opening reads remain serialized rather than being silently discarded.
 - Neovim exit closes plugin timers and handles without signalling the detached controller.
 
 Polling uses a fixed bounded non-busy interval selected and documented by the implementation. It allows at most one status process in flight per watcher generation and does not create a controller checkpoint, event, or network request.
@@ -587,6 +591,7 @@ Error rules:
 - Never invoke a shell with root paths, executable values, URLs, session IDs, or controller output.
 - Never persist plugin configuration, watcher state, status documents, or diagnostics.
 - Never include server credentials in argv, browser URLs, notifications, buffers, tests, or documentation.
+- Apply the same explicit ASCII case-folding and ASCII-whitespace credential grammar in controller and plugin recognizers. Non-ASCII lookalikes and separators are unsupported near misses, while conventional ASCII authorization, URI, named-value, private-key, and provider-token forms still reject.
 - Inherit OpenCode authentication through the controller process environment without inspecting or copying it.
 - Pass an explicitly configured private CA only through the controller child environment, never argv or browser URLs.
 - Bound process output and status JSON before decoding or display.
@@ -601,10 +606,10 @@ Error rules:
 
 - Neovim 0.12 succeeds and an older-version fixture fails clearly.
 - Setup requires `sprint_root` and `server_url` fields.
-- String and function values work for every supported option.
-- Synchronous and callback-style URL resolvers complete exactly once and enforce the resolver timeout.
+- String and contract-appropriate function values work for every supported option.
+- Synchronous-only root/executable/CA functions and synchronous or callback-style URL resolvers follow their distinct contracts; URL resolvers complete exactly once and enforce the resolver timeout.
 - The executable defaults to `sprint-loop`.
-- Missing, empty, wrong-type, control-character, and throwing resolver cases fail.
+- Independently missing root/server configuration and empty, nil, wrong-type, control-character, throwing, and non-URL callback-misuse resolver cases fail without unintended side effects.
 - Unknown setup keys fail.
 - Repeated setup replaces configuration, commands, timers, and watcher generation without duplication.
 - Every public method and command fails safely before setup.
@@ -656,6 +661,7 @@ Error rules:
 - Resolution, controller exit, reconfiguration, and Neovim exit stop or replace observation correctly.
 - Continuous status failures produce no notification storm and recover after success.
 - Stale callbacks from a prior generation cannot notify or replace current state.
+- Delayed overlap proves start, resume, and stop preserve queued/active public progress and session-opening requests; stop failure and success-while-active outcomes preserve observation.
 - The watcher never calls OpenCode, answers a question, or mutates workflow data.
 
 ### 16.6 Session Opening

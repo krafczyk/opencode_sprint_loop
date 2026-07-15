@@ -267,7 +267,7 @@ Primary implementation occurs in the `opencode_sprint_loop.lua` repository. The 
 ### 9.3 Deliverables
 
 - Conventional Lua plugin layout.
-- Required `setup()` for Neovim 0.12 with explicit sprint-root and server-URL values or resolvers, an optional controller executable defaulting to `sprint-loop`, optional web-URL and server-CA-certificate values or resolvers, and callback-style URL resolution for mkchad compatibility.
+- Required `setup()` for Neovim 0.12 with explicit sprint-root and server-URL configuration, an optional controller executable defaulting to `sprint-loop`, and optional web-URL and server-CA-certificate configuration. Sprint root, executable, and CA functions return synchronously; only server/web URL functions may use callback-style resolution for mkchad compatibility.
 - Public asynchronous Lua methods `start()`, `progress()`, `pause()`, `resume()`, `stop()`, and `open_session()`.
 - Asynchronous command execution and output capture.
 - Detached launch of `sprint-loop run`.
@@ -289,7 +289,7 @@ Primary implementation occurs in the `opencode_sprint_loop.lua` repository. The 
 
 ### 9.4 Required Behavior
 
-`setup()` must be called before any public Lua action or command is used. `sprint_root` and `server_url` must be configured explicitly. The plugin must resolve relevant callbacks at command execution time rather than only at setup, because server URLs and working directories can change.
+`setup()` must be called before any public Lua action or command is used. `sprint_root` and `server_url` must be configured explicitly. Setup resolves sprint root and executable for its mandatory initial status observation. Every later action re-resolves its relevant options, because server URLs, working directories, executable locations, and CA paths can change.
 
 `SprintLoopStart` must reject a missing server URL before launching the process. It passes the URL and sprint root explicitly.
 
