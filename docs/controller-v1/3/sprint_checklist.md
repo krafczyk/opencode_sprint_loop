@@ -486,6 +486,46 @@ configured, so S3-TEST-016 and S3-DONE-005 remain unchecked. S3-MKCHAD-008,
 S3-DETACH-006, S3-DEMO-002 through S3-DEMO-010, S3-REVIEW-011, S3-DONE-001,
 S3-DONE-002, S3-DONE-010, and S3-DONE-011 remain unchecked.
 
+### Repair-round-7 evidence (2026-07-15)
+
+Auditor pass-7 findings AUD-S3-P7-001 through AUD-S3-P7-005 were repaired in
+pushed plugin commit `009791a`, before this parent gitlink update, without
+accessing live mkchad state or closing an external gate. The findings
+temporarily reversed the prior evidence for S3-ARCH-007, S3-PROC-005,
+S3-CA-002, S3-JSON-002, S3-JSON-003, S3-JSON-008, S3-WEB-009,
+S3-TEST-003, S3-TEST-008, S3-TEST-011, S3-TEST-012, S3-DOC-001, and
+S3-DOC-002. Those checked items were rechecked only after the round-7 public
+paths and complete plugin suite passed.
+
+Browser SystemObj completion now uses only bounded `wait(0)` probes, continues
+polling when a closing handle has not retained its result yet, and closes its
+timer on success, failure, five-second timeout, setup replacement, or Neovim
+exit. CA validation asynchronously stats and rejects non-regular paths before
+open, then verifies regular descriptor readability and closes it; a real FIFO
+fixture reaches bounded `invalid_server_ca_cert` without launching a controller.
+Status decoding classifies the schema immediately after lexical/top-level-object
+validation, so a reduced future shape reports `unsupported_status_schema` while
+boolean and other non-number versions still reject. Public tests now exercise
+configured delegation for all six commands, a removed required V1 field,
+boolean schema and question count, and session opening for an inactive persisted
+run. Manual installation documents concrete help-tag generation, the dangling
+help link is removed, and a disposable `:helptags` smoke proves the
+`SprintLoop` tag is generated.
+
+The complete plugin command passed with `566` assertions. The complete
+controller suite passed `213` tests with one opt-in real-server test skipped.
+Compilation, Ruff lint/format checks, strict mypy, package build, and a fresh
+disposable wheel-install help/version smoke passed. `git diff --check` passed in
+both repositories, and final status contained only the intended plugin repair,
+checklist, and parent gitlink changes.
+AUD-S3-P7-006 and PASS6-013 remain P2 with disposition `defer`, assigned to
+Sprint 8; no URL-authority or other compatibility widening was implemented.
+S3-MKCHAD-008, S3-DETACH-006, S3-DEMO-002 through S3-DEMO-010,
+S3-TEST-016, S3-REVIEW-011, S3-DONE-001, S3-DONE-002, S3-DONE-005,
+S3-DONE-010, and S3-DONE-011 remain unchecked. No external OpenCode,
+private-CA mkchad, browser, Lua-tooling decision, independent-audit, or
+aggregate-completion gate was claimed.
+
 - [x] **S3-REVIEW-001** Audit implementation against `docs/threat_model.md`, `docs/audit_policy.md`, and Sprint 3's plugin-specific failure model.
 - [x] **S3-REVIEW-002** Prioritize ordinary malformed setup, process failure, malformed status, timer races, credential exposure, and live-environment mistakes.
 - [x] **S3-REVIEW-003** Confirm no shell interpolation path exists.
