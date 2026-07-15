@@ -19,14 +19,11 @@ The V1 final software specification is authoritative. If an implementation decis
 
 - Read `docs/threat_model.md` before assessing security, concurrency, recovery, or user-work risks.
 - Read `docs/audit_policy.md` before performing an audit or implementing audit findings.
-- The threat model calibrates likelihood and priority; it does not override explicit requirements in the authoritative specifications.
-- Separate impact severity, occurrence likelihood, confidence, priority, and disposition in audit findings.
-- Only P0 and P1 findings block sprint completion by default. The user has final authority to accept, defer, or promote any finding.
 - Do not treat hostile local filesystem races or deliberate repository forgery as current-sprint blockers when they are excluded by the threat model.
 
 ## Runtime Agent Contract
 
-- Project-local OpenCode roles in `.opencode/agents/` are runtime inputs required by the controller's V1 configuration contract. Do not remove or rename them without deliberately updating that contract and its fixtures.
+- The V1 project-local role requirements apply to sprint-history repositories created for controller runs and to their test fixtures. Global development agents do not replace or alter that runtime product contract.
 
 ## Architecture Boundaries
 
@@ -39,22 +36,15 @@ The V1 final software specification is authoritative. If an implementation decis
 
 ## Safety Rules
 
-- Never reset, discard, stash, broadly stage, force-push, or rewrite user work automatically.
 - Agents select and stage implementation changes and draft commit messages. The controller validates the handoff and performs commits and pushes.
 - Associate CI decisions with the exact pushed implementation SHA and all applicable checks.
 - Fail closed on ambiguous repository state, unknown CI conclusions, unsupported schemas, and interrupted dirty worktrees.
 - Persist state atomically and keep the event log append-only.
-- Do not store credentials in state, events, transcripts, prompts, process arguments, or committed fixtures.
-- Preserve partial agent work after interruption and report an actionable blocked state.
 
 ## Development Practices
 
-- Prefer the smallest implementation that satisfies the current sprint and V1 specification.
-- Keep external systems behind narrow interfaces so tests can use deterministic fakes.
-- Use machine-readable Git, GitHub, and OpenCode responses where available; do not parse presentation-oriented output.
+- Keep implementation within the current sprint and V1 specification.
 - Keep CLI JSON output stable and separate diagnostics from JSON standard output.
-- Add tests for success, failure, interruption, and recovery paths when changing stateful behavior.
-- Keep real OpenCode and GitHub integration tests opt-in. Default tests must not require credentials, model usage, or network access.
 - Avoid speculative support for multi-repository workflows, other CI providers, custom dashboards, or multiplexers in V1.
 
 ## Git Submodule Workflow
@@ -63,4 +53,4 @@ Changes under `opencode_sprint_loop.lua/` belong to the plugin repository. Commi
 
 ## Verification
 
-Run the narrowest relevant tests while developing, followed by the full available test suite before declaring work complete. Also inspect repository status in both the parent and plugin repositories when a change touches the submodule.
+Inspect repository status in both the parent and plugin repositories when a change touches the submodule.
