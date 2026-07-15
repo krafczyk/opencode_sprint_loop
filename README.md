@@ -31,9 +31,12 @@ The Sprint 3 plugin is implemented in the `opencode_sprint_loop.lua/` submodule.
 Its required `setup()` performs one asynchronous local status observation so a
 reopened Neovim can discover an existing controller. It polls every two seconds
 only while controller status confirms `process_running: true` (or while a newly
-launched command is still being discovered), permits one status child at a
+launched command for the watched root is still being discovered), permits one status child at a
 time, deduplicates pending-question notifications in memory, and stops when the
-controller is inactive. Durable interrupted status may still truthfully retain
+controller is inactive. Overlapping successful start/resume launches have
+independent same-root ownership, so a newer duplicate or rejected launch cannot
+end discovery while an older launch remains alive; other roots and replaced
+setup generations cannot mutate the current watcher. Durable interrupted status may still truthfully retain
 an active invocation with `status: "running"` while `process_running` is false;
 that evidence is displayable and openable but does not keep the watcher alive.
 
@@ -275,6 +278,11 @@ Sprint 3 does not persist real question state or permit probe questions. A
 durable active invocation continues to project `status: "running"` if the
 controller is interrupted and `process_running` becomes false. Status remains local and never exposes the server URL, prompt,
 result, transcript, or credentials.
+
+The plugin accepts terminal `stopped`, `failed`, and `finished` projections with
+`process_running` true while the controller finishes exiting or false afterward.
+Each terminal projection still has a null active invocation; stopped and failed
+still require a reason.
 
 When no run exists, `run_exists` is `false`, `process_running` is `false`, and every run-specific field from `run_id` through `updated_at` is `null`. No-run status does not create worktree or runtime files. For a placeholder run, `active` is an object containing null `role`, `invocation_id`, `session_id`, `status`, and `interaction` fields; `last_event` identifies the final `run.blocked` record.
 

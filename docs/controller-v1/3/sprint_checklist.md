@@ -583,6 +583,49 @@ S3-DONE-011 remain unchecked. No
 external OpenCode/private-CA mkchad demonstration, Lua-tooling decision,
 independent audit, or aggregate completion gate was claimed.
 
+### Repair-round-9 evidence (2026-07-15)
+
+Auditor pass-9 findings AUD-S3-P9-001 and AUD-S3-P9-002 were selected as
+P1/`fix_now` and repaired in pushed plugin commit `9a1f446`, before this parent
+gitlink update, without accessing live mkchad state or closing an
+external gate. They temporarily reversed the prior evidence for S3-SETUP-008,
+S3-RESOLVE-010, S3-JSON-010, S3-UI-002, S3-WATCH-001, S3-WATCH-003,
+S3-WATCH-004, S3-WATCH-004A, S3-WATCH-007 through S3-WATCH-012,
+S3-TEST-008 through S3-TEST-010, S3-DOC-001, and S3-DOC-002. Those checked
+items were rechecked only after the focused overlap/terminal paths and complete
+plugin suite passed.
+
+Start/resume discovery now records every successfully spawned launch by unique
+identity, setup generation, and resolved root. Same-root watcher replacement
+retains all live launch ownership, each process completion releases only its own
+identity even after replacement, and final no-run shutdown occurs only after no
+same-root launch remains. Tests cover two rapid launches with a rejected newer
+launch, later active and `waiting_for_user` status from the older launch, both
+completion orders, setup replacement, and independent roots/generations without
+stale mutation. Terminal `stopped`, `failed`, and `finished` status accepts
+`process_running` true and false through decode, render, and public progress;
+all six projections retain a null active invocation and state-appropriate reason
+semantics.
+
+The complete plugin command passed with `707` assertions. The first complete
+controller run had one five-second readiness timeout in
+`test_separate_process_ownership_lock_rejects_run`; that unchanged test passed
+immediately in a focused rerun, and the complete isolated rerun then passed all
+`213` tests with one opt-in real-server test skipped. Controller compilation,
+Ruff lint/format checks, strict mypy, package build, and a fresh no-index wheel
+install with help/version smokes passed. The plugin suite also exercised the
+repository fake, detached lifetime, and native help-tag generation. Final
+`git diff --check` and repository-status evidence is recorded by S3-DONE-006
+and S3-DONE-007.
+
+PASS6-013 remains P2 with disposition `defer` for Sprint 8; no URL-authority
+compatibility widening was implemented. No Lua formatter/linter is configured,
+so S3-TEST-016 and S3-DONE-005 remain unchecked. S3-MKCHAD-008,
+S3-DETACH-006, S3-DEMO-002 through S3-DEMO-010, S3-REVIEW-011,
+S3-DONE-001, S3-DONE-002, S3-DONE-010, and S3-DONE-011 remain unchecked. No
+external OpenCode/private-CA mkchad demonstration, Lua-tooling decision,
+independent audit, or aggregate completion gate was claimed.
+
 - [x] **S3-REVIEW-001** Audit implementation against `docs/threat_model.md`, `docs/audit_policy.md`, and Sprint 3's plugin-specific failure model.
 - [x] **S3-REVIEW-002** Prioritize ordinary malformed setup, process failure, malformed status, timer races, credential exposure, and live-environment mistakes.
 - [x] **S3-REVIEW-003** Confirm no shell interpolation path exists.

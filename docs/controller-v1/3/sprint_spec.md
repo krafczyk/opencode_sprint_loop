@@ -412,6 +412,7 @@ The plugin treats `status --json` as the sole source of workflow truth. It must:
 - Validate every required stable top-level field before rendering.
 - Validate conditional nested objects for no-run, inactive, running, and waiting projections.
 - Accept a durable active `running` invocation when `process_running` is false. This is truthful interrupted-run evidence projected by the controller; it does not mean the controller process is alive, and the watcher still stops on `process_running: false`.
+- Accept `stopped`, `failed`, and `finished` with `process_running` either true or false. A controller may persist a terminal state before its process exits; every terminal projection still requires a null active invocation, and `stopped` and `failed` still require valid reasons.
 - Require a reason for `blocked`, `failed`, and `stopped`; for other valid states the reason remains nullable as defined by the durable state contract.
 - Require `question_count` to be a positive integer and reject booleans.
 - Require `asked_at` to be a non-empty timestamp string suitable for display.
@@ -466,9 +467,11 @@ The plugin maintains at most one watcher generation.
 - If setup finds `process_running: true`, it starts periodic observation for that root.
 - A successful start or resume spawn activates a watcher generation bound to that action's resolved root.
 - During start or resume discovery, the watcher may continue while the launched command is alive even if durable status is not yet available.
+- Overlapping successful launches are tracked independently. Discovery for a root continues while any launch for that root and setup generation remains alive; a duplicate or rejected launch's final no-run observation cannot end discovery owned by an older live launch.
 - If the launched command exits before an active run is observed, the watcher performs one final status query and then stops rather than polling indefinitely.
 - Once an active run has been observed, the watcher stops after status reports no running controller.
 - Reconfiguration cancels the prior timer and invalidates callbacks from the prior generation.
+- Launch completion updates its own same-root ownership even after watcher replacement, but completion from another root or replaced setup generation cannot mutate the current watcher.
 - Start/resume observation replacement targets only setup/watcher-owned reads. Public progress and session-opening reads remain serialized rather than being silently discarded.
 - Neovim exit closes plugin timers and handles without signalling the detached controller.
 
