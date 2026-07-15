@@ -649,9 +649,15 @@ server, fixture, credentials, logs, virtual environment, provider output, and
 runtime records were removed after recording this summary. The compatibility
 change reopens the fresh-audit gate before Sprint 2 is reconfirmed complete.
 
+A fresh independent compatibility audit at `ee8e5a3` found no P0, P1, P2, or
+P3 findings. It verified identical canonical `1.17.x`/`1.18.x` validation at
+the live-server, state, and event boundaries; coherent persistence/status
+cross-validation; both compatibility fixture ranges; the reviewed OpenCode
+`1.18.1` API contract; and the sanitized installed-wheel demonstration above.
+
 ## 30. Completion Gate
 
-- [ ] **S2-DONE-001** Every applicable checklist item above is checked.
+- [x] **S2-DONE-001** Every applicable checklist item above is checked.
 - [x] **S2-DONE-002** Every Sprint 2 acceptance criterion in `sprint_spec.md` is demonstrably satisfied.
 - [x] **S2-DONE-003** Narrow unit, fake-runner, fake-server, persistence, and repository tests pass during development.
 - [x] **S2-DONE-004** The complete default test suite passes without external network or credentials.
@@ -662,4 +668,4 @@ change reopens the fresh-audit gate before Sprint 2 is reconfirmed complete.
 - [x] **S2-DONE-009** No credentials, generated demonstration state, build artifacts, temporary repositories, or real transcripts are tracked.
 - [x] **S2-DONE-010** Documentation describes actual Sprint 2 behavior and does not claim deferred features.
 - [x] **S2-DONE-011** The opt-in real-server exit demonstration has been performed against a supported server.
-- [ ] **S2-DONE-012** A fresh audit reports no unresolved P0 or P1 findings under the current threat model.
+- [x] **S2-DONE-012** A fresh audit reports no unresolved P0 or P1 findings under the current threat model.
