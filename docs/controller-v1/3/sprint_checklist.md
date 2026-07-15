@@ -518,13 +518,70 @@ Compilation, Ruff lint/format checks, strict mypy, package build, and a fresh
 disposable wheel-install help/version smoke passed. `git diff --check` passed in
 both repositories, and final status contained only the intended plugin repair,
 checklist, and parent gitlink changes.
-AUD-S3-P7-006 and PASS6-013 remain P2 with disposition `defer`, assigned to
-Sprint 8; no URL-authority or other compatibility widening was implemented.
+PASS6-013 remains P2 with disposition `defer`, assigned to Sprint 8; no
+URL-authority compatibility widening was implemented. The round-7 deferral of
+AUD-S3-P7-006 is superseded by the repair-round-8 resolution below.
 S3-MKCHAD-008, S3-DETACH-006, S3-DEMO-002 through S3-DEMO-010,
 S3-TEST-016, S3-REVIEW-011, S3-DONE-001, S3-DONE-002, S3-DONE-005,
 S3-DONE-010, and S3-DONE-011 remain unchecked. No external OpenCode,
 private-CA mkchad, browser, Lua-tooling decision, independent-audit, or
 aggregate-completion gate was claimed.
+
+### Repair-round-8 evidence (2026-07-15)
+
+Auditor pass-8 findings AUD-S3-P8-001 through AUD-S3-P8-005 were selected as
+P1/`fix_now` and repaired in pushed plugin commit `f9ab9ee`, before this parent gitlink update. They temporarily
+reversed the prior evidence for S3-ARCH-007, S3-PROC-001, S3-PROC-005 through
+S3-PROC-007, S3-DETACH-001 through S3-DETACH-005, S3-WEB-009,
+S3-WEB-010, S3-TEST-007, S3-TEST-008, S3-TEST-011, S3-DOC-001, and
+S3-DOC-002. Those checked items were rechecked only after the focused paths and
+complete plugin suite passed.
+
+Detached `run` now gates both the pending `/dev/null` open and scheduled spawn
+against the originating setup generation and `VimLeavePre`. Replacement closes
+the descriptor without a stale spawn, `on_spawn`, watcher mutation, or launch
+notice; a successfully spawned controller is not retained as a cancellation
+target and is never signalled. Deterministic delayed-`fs_open` tests cover setup
+replacement, exit, the queued-spawn boundary, resource closure, and the
+post-spawn no-signal invariant. This also resolves stale pre-spawn finding
+AUD-S3-P7-006: its prior P2/`defer` record is superseded by the user-selected
+`fix_now` repair, with status resolved by AUD-S3-P8-001 and the same tests.
+
+Neovim 0.12.0 and the installed 0.12.4 implementation were reviewed before
+replacing browser observation. `SystemObj:wait(timeout)` force-kills after any
+elapsed timeout, including zero, while `vim.ui.open()` returns that SystemObj
+without an exit callback. Production no longer calls `wait`; it polls the
+non-destructive result retained by Neovim after process exit and inherited pipe
+closure. Real SystemObj tests cover zero/non-zero completion, a descendant that
+retains output pipes after the handler exits, observation timeout, and setup
+cancellation. Timeout and cancellation leave the delayed handler to complete
+with code zero and signal zero rather than poisoning or signalling it.
+
+Manual native-package instructions now create the `pack/*/start` parent before
+clone and retain the concrete `:helptags` command. The help file defines exact
+tags for all six commands. Its smoke builds a tag set and checks every local
+`|SprintLoop*|` reference plus all six command tags by exact key, not substring.
+Status decode/render coverage is table-driven across all 15 accepted workflow
+states with valid process, active-invocation, interaction, and reason presence.
+
+The final complete plugin command passed with `654` assertions. The complete
+controller suite passed `213` tests with one opt-in real-server test skipped.
+Controller compilation, Ruff lint and format checks, strict mypy, package build,
+and a fresh no-index wheel-install help/version smoke passed. A disposable
+native-package copy generated help tags, loaded the package, and opened the base
+and all six command help tags successfully; the first smoke invocation exceeded
+Neovim's startup `+command` count and was corrected to one command chain before
+passing. Final diff/status checks are recorded by S3-DONE-006 and S3-DONE-007
+below. No Lua formatter/linter is configured, so S3-TEST-016 and S3-DONE-005
+remain unchecked.
+
+PASS6-013 remains P2 with disposition `defer` for Sprint 8 URL-authority
+compatibility; no compatibility widening was implemented. S3-MKCHAD-008,
+S3-DETACH-006, S3-DEMO-002 through S3-DEMO-010,
+S3-REVIEW-011, S3-DONE-001, S3-DONE-002, S3-DONE-005, S3-DONE-010,
+S3-DONE-011 remain unchecked. No
+external OpenCode/private-CA mkchad demonstration, Lua-tooling decision,
+independent audit, or aggregate completion gate was claimed.
 
 - [x] **S3-REVIEW-001** Audit implementation against `docs/threat_model.md`, `docs/audit_policy.md`, and Sprint 3's plugin-specific failure model.
 - [x] **S3-REVIEW-002** Prioritize ordinary malformed setup, process failure, malformed status, timer races, credential exposure, and live-environment mistakes.
