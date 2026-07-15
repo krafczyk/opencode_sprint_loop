@@ -28,6 +28,7 @@ The following boundaries should stabilize early:
 - CLI command names and JSON status contract.
 - Configuration and persisted-state schema versioning.
 - `AgentRunner` interface.
+- Active-invocation and user-interaction status fields.
 - Git service interface.
 - CI service interface.
 - Event record envelope.
@@ -85,7 +86,7 @@ The exact dependency choices should be recorded in Sprint 1. Dependencies must e
 
 ### 4.2 Neovim Plugin
 
-The plugin will be implemented in Lua using supported Neovim APIs. It will invoke the controller asynchronously and will not duplicate Python models or workflow logic beyond rendering the documented status JSON fields.
+The plugin will be implemented in Lua for Neovim 0.12 using supported Neovim APIs. It will invoke the controller asynchronously and will not duplicate Python models or workflow logic beyond rendering and observing the documented status JSON fields. A lightweight in-memory status watcher may notify the user when the controller reports that an agent is waiting for input; questions remain owned and rendered by ordinary OpenCode clients.
 
 ### 4.3 External Systems
 
@@ -226,6 +227,8 @@ Every invocation must create a new session. Reusing an old session ID is an erro
 
 Structured-output validation failure must be represented as an invocation failure, not interpreted from free-form prose.
 
+The Sprint 2 execution probe is deliberately non-interactive. Its exact session permissions deny the `question` tool along with every tool except the structured-output mechanism. Interactive questions begin with the real Builder lifecycle in Sprint 4 and do not alter the completed Sprint 2 contract.
+
 ### 8.4 Testing
 
 - URL parsing and unsupported scheme rejection.
@@ -248,6 +251,7 @@ Run a non-mutating test role against a real active OpenCode server rooted at an 
 - Product implementation prompts.
 - Agent staging and commits.
 - Audit rounds.
+- Interactive agent questions.
 - Server-loss resume behavior beyond recording the invocation failure.
 
 ## 9. Sprint 3: Neovim Client V1
@@ -258,12 +262,13 @@ Provide a thin Neovim interface that launches the controller independently of Ne
 
 ### 9.2 Repository
 
-Implementation occurs in the `opencode_sprint_loop.lua` repository. After plugin commits are pushed, the controller repository updates its submodule gitlink in a separate parent commit.
+Primary implementation occurs in the `opencode_sprint_loop.lua` repository. The controller repository adds the backward-compatible active-invocation status fields consumed by the plugin and formalizes the session-title contract. After plugin commits are pushed, the controller repository updates its submodule gitlink in a separate parent commit.
 
 ### 9.3 Deliverables
 
 - Conventional Lua plugin layout.
-- `setup()` with configurable controller executable, sprint-root resolver, server-URL resolver, and optional web-URL resolver.
+- Required `setup()` for Neovim 0.12 with explicit sprint-root and server-URL values or resolvers, an optional controller executable defaulting to `sprint-loop`, and an optional web-URL value or resolver.
+- Public asynchronous Lua methods `start()`, `progress()`, `pause()`, `resume()`, `stop()`, and `open_session()`.
 - Asynchronous command execution and output capture.
 - Detached launch of `sprint-loop run`.
 - Commands:
@@ -273,39 +278,49 @@ Implementation occurs in the `opencode_sprint_loop.lua` repository. After plugin
   - `SprintLoopResume`
   - `SprintLoopStop`
   - `SprintLoopOpenSession`
-- Progress floating window or split.
+- Disposable read-only progress buffer in a centered floating window.
+- Additive active-invocation status fields for `running` and `waiting_for_user`, with bounded pending-interaction metadata.
+- An ephemeral background status watcher that emits one deduplicated notification for each pending question request.
+- Active-session URL construction from the configured OpenCode web base, canonical sprint root, and session ID.
+- Formal controller session-title convention `[<multisprint>/<sprint>] <role> <sequence> <purpose>`.
 - Clear command-level notifications and error rendering.
 - Minimal plugin help/documentation.
 - Lua tests using the project's selected Neovim test approach.
 
 ### 9.4 Required Behavior
 
-The plugin must resolve all callbacks at command execution time rather than only at setup, because server URLs and working directories can change.
+`setup()` must be called before any public Lua action or command is used. `sprint_root` and `server_url` must be configured explicitly. The plugin must resolve relevant callbacks at command execution time rather than only at setup, because server URLs and working directories can change.
 
 `SprintLoopStart` must reject a missing server URL before launching the process. It passes the URL and sprint root explicitly.
 
-`SprintLoopProgress` must call `status --json` asynchronously and render state, reason, active role/session, commits, audit round, CI state, checklist counts, and last event when present. Unknown additional JSON fields must be ignored for forward compatibility.
+`SprintLoopProgress` must call `status --json` asynchronously and render state, reason, active role/session, active invocation status, pending-interaction metadata, commits, audit round, CI state, checklist counts, and last event when present. It uses a temporary read-only floating buffer, displays blocked, failed, and `waiting_for_user` conditions prominently, and ignores unknown additional JSON fields for forward compatibility.
+
+After setup, and after plugin start or resume actions, the plugin performs asynchronous status observation at a bounded non-busy interval while a controller process is active. A transition to `waiting_for_user` emits one notification per question request and directs the user to `SprintLoopOpenSession`. The watcher keeps only ephemeral deduplication state, does not retrieve question text, does not answer or reject questions, and stops when no controller process is active. Setup performs an initial status query so reopening Neovim can discover an already-running controller.
+
+`SprintLoopOpenSession` first reads current status and requires an active session ID. It constructs the supported OpenCode browser route as `<web-base>/<base64url(canonical-sprint-root)>/session/<encoded-session-id>` and opens it through Neovim. The plugin never places server credentials in this URL.
 
 Closing Neovim must not terminate the launched controller process. The plugin does not claim that the process survived until it confirms through later status.
 
 ### 9.5 Testing
 
-- Setup defaults and callback validation.
+- Required setup, option defaults, and callback validation.
 - Correct argv construction without shell interpolation.
 - Missing executable, sprint root, and server URL errors.
 - Non-blocking command execution.
-- Status JSON rendering for running, blocked, failed, and finished states.
+- Status JSON rendering for no-run, running, waiting-for-user, paused, blocked, failed, stopped, and finished states.
+- Initial and active-run status watching, question-request deduplication, watcher shutdown, and non-spamming error behavior.
 - Malformed JSON and non-zero CLI exit handling.
 - Detached job option behavior.
-- Web URL absence and browser-open failures.
+- Active-session URL encoding, web URL absence, missing active session, and browser-open failures.
 
 ### 9.6 Exit Demonstration
 
-Start the Sprint 2 test invocation from Neovim, view progress, close Neovim, reopen it, and confirm that status can still be read. Open the active OpenCode session through the configured web URL.
+Start the Sprint 2 test invocation from Neovim, view progress in the temporary floating buffer, close Neovim, reopen it, and confirm that status can still be read. Open the active OpenCode session through the configured web URL and verify its title follows the formal session-title convention. Use a controlled status fixture to demonstrate a deduplicated waiting-for-user notification without changing the non-interactive Sprint 2 probe.
 
 ### 9.7 Explicit Deferrals
 
 - Embedded OpenCode webviews.
+- Rendering, answering, or rejecting OpenCode questions inside Neovim.
 - A server multiplexer.
 - Editing configuration or findings from the progress window.
 - Plugin-owned persistence.
@@ -332,6 +347,11 @@ Run a real Builder against the sprint specification and safely turn its staged h
 - Sprint repository gitlink update.
 - Targeted sprint-history staging and local checkpoint commits.
 - Failure handling for incomplete or inconsistent agent handoff.
+- Interaction-aware production invocation monitoring through OpenCode's documented pending-question API or events.
+- Explicit `question` permission for the real Builder session and prompt policy limiting questions to necessary user decisions.
+- Durable `agent.question_asked` and `agent.question_resolved` observations for the exact active session.
+- Active invocation transitions between `running` and `waiting_for_user` without changing the surrounding workflow phase.
+- Invocation timeout accounting that excludes all time spent waiting for user input.
 - Git adapter fake for state-machine tests.
 
 ### 10.3 Required Behavior
@@ -349,10 +369,14 @@ The controller rejects:
 
 When handoff is valid, the controller commits exactly the staged tree and records the resulting SHA. It then records the changed submodule gitlink in a local sprint checkpoint without pushing either repository.
 
+When the Builder asks a question, the controller verifies that the pending request belongs to the exact active session, records only bounded request identity, count, and timing metadata, and waits indefinitely while the healthy OpenCode server retains the request. The user answers or rejects it through an ordinary OpenCode client. The controller never supplies an answer, and the same session and invocation continue after resolution. User-wait intervals do not consume `limits.invocation_timeout_seconds`; model execution before and after those intervals remains bounded. The indefinite logical wait must use bounded server operations or event observation rather than one unbounded HTTP read. Full question and answer content stays in OpenCode and the sanitized transcript rather than state, events, status, or Neovim notifications.
+
 ### 10.4 Testing
 
 - Prompt input completeness and deterministic ordering.
 - Agent result status handling for completed, blocked, and failed.
+- Necessary Builder question -> waiting status -> OpenCode answer -> same-session continuation.
+- Question rejection, malformed or foreign-session pending requests, repeated observation deduplication, and interaction-aware timeout accounting.
 - Added, modified, renamed, and deleted staged files.
 - Empty index and mixed staged/unstaged rejection.
 - Untracked file rejection.
@@ -364,7 +388,7 @@ When handoff is valid, the controller commits exactly the staged tree and record
 
 ### 10.5 Exit Demonstration
 
-Run a small example sprint through the Builder. Show the visible OpenCode session, staged handoff, controller-authored local implementation commit using the agent's message, updated commit set, and local sprint checkpoint. Confirm that no remote push or CI run occurred.
+Run a small example sprint through the Builder. Have the Builder ask one necessary question, observe the durable waiting state and Neovim notification, answer it in the named OpenCode session, and show that the same invocation resumes. Then show the staged handoff, controller-authored local implementation commit using the agent's message, updated commit set, and local sprint checkpoint. Confirm that no remote push or CI run occurred.
 
 ### 10.6 Explicit Deferrals
 
@@ -382,6 +406,7 @@ Add evidence-based Auditor sessions and complete the local Builder/audit batchin
 ### 11.2 Deliverables
 
 - Auditor role prompt assembly.
+- Auditor adoption of the interaction lifecycle established for the Builder, while retaining read-only repository permissions.
 - Audit structured-result schema.
 - Actionable finding validation.
 - Checklist assessment validation.
@@ -398,6 +423,8 @@ Add evidence-based Auditor sessions and complete the local Builder/audit batchin
 
 Every Auditor invocation reviews a clean implementation commit and has no edit permission. It performs a fresh review; prior reports are historical inputs only when useful for recognizing unresolved issues.
 
+An Auditor may ask only when a user decision is necessary to interpret an otherwise ambiguous sprint requirement. The question uses the same controller-observed, OpenCode-answered, indefinite waiting lifecycle as the Builder and does not grant edit permission.
+
 The controller must validate that every finding contains a requirement, concrete problem, expected outcome, and location when applicable. An empty findings list means the local gate is clean.
 
 The controller must not run a second audit merely to consume the configured maximum when the first audit is clean. It must not publish known findings when the maximum is exhausted.
@@ -412,6 +439,7 @@ The controller must not run a second audit merely to consume the configured maxi
 - Stable retention of prior audit reports.
 - Equivalent repeated-finding detection.
 - Auditor repository mutation detection.
+- Auditor question and same-session continuation without repository mutation.
 - Status checklist counts and stale-assessment labeling while implementation resumes.
 - Plugin rendering of completion evidence.
 
@@ -444,6 +472,7 @@ Publish an audit-clean local commit batch, evaluate all GitHub checks for the ex
 - CI polling with bounded intervals and meaningful-change events.
 - CI evidence and focused failure-log persistence.
 - CI Fixer prompt assembly and mutating-agent handoff.
+- CI Fixer adoption of the established user-interaction lifecycle.
 - CI Fixer commit and immediate republish path.
 - CI fix attempt limit.
 - Fake CI service and deterministic conclusion fixtures.
@@ -456,6 +485,8 @@ CI remains pending while any applicable check is non-terminal. One unacceptable 
 
 On failure, the CI Fixer receives focused evidence and is constrained to the smallest relevant repair. A successful Fixer handoff is locally committed and pushed without a full pre-CI audit. The new SHA receives an entirely new CI evaluation.
 
+A CI Fixer may ask only when the available failure evidence requires a user decision. It otherwise follows the same controller-observed and OpenCode-answered interaction lifecycle without weakening CI fix limits or exact-SHA requirements.
+
 ### 12.4 Testing
 
 - Push success, rejection, authentication failure, and remote divergence.
@@ -467,6 +498,7 @@ On failure, the CI Fixer receives focused evidence and is constrained to the sma
 - Polling without duplicate no-change events or checkpoint commits.
 - Focused failure evidence size limits.
 - CI Fixer staged handoff and commit.
+- CI Fixer question and same-session continuation.
 - CI fix attempt exhaustion.
 - GitHub credentials absent from artifacts.
 
@@ -492,9 +524,10 @@ Connect green CI to the final audit, complete terminal behavior, and make pause,
 - Clean final-audit transition to `finished`.
 - Final findings transition to a new local Builder batch.
 - Re-push, complete CI, and re-audit behavior after final findings.
-- Pause handling that completes an active invocation handoff, checkpoints `paused`, and exits at a documented safe boundary.
+- Pause handling that completes an active invocation handoff, including waiting for any pending user question to be answered or rejected, checkpoints `paused`, and exits at a documented safe boundary.
 - Resume revalidation for all resumable states.
 - Controlled stop behavior that checkpoints `stopped` and exits without discarding completed work.
+- Stop behavior that rejects a pending question, aborts the active session at that interaction boundary, preserves partial work, and then checkpoints `stopped`.
 - Periodic OpenCode server liveness checks, including during CI wait.
 - Server-unavailable grace period.
 - `blocked/server_unavailable` checkpoint and exit.
@@ -515,13 +548,17 @@ Server loss must never cause the controller to launch a replacement server. Afte
 
 Partial work from an interrupted active invocation must never be automatically reset, stashed, staged, or committed in V1.
 
+A pause request during `waiting_for_user` remains pending indefinitely until the user answers or rejects the question and the invocation reaches its normal handoff boundary. A stop request at the same boundary rejects the question, requests one bounded session abort, records the interrupted invocation truthfully, preserves any staged, unstaged, or untracked work exactly, and then enters `stopped`. Server loss while waiting follows the ordinary server-loss policy and never assumes that the pending question survived.
+
 ### 13.4 Testing
 
 - Green CI -> clean final audit -> finished.
 - Green CI -> findings -> Builder -> local audit -> push -> CI -> final audit.
 - Pause requests in every non-terminal state.
+- Pause while waiting for user input, including answer and rejection paths.
 - Resume from each supported paused or blocked state.
 - Stop during idle, agent, and CI phases according to documented boundaries.
+- Stop while waiting for user input, including question rejection, bounded abort, and partial-work preservation.
 - Server loss during agent execution, local audit, and CI wait.
 - Resume with unchanged URL and changed valid URL.
 - Clean interrupted invocation rerun.
@@ -532,7 +569,7 @@ Partial work from an interrupted active invocation must never be automatically r
 
 ### 13.5 Exit Demonstration
 
-Run an end-to-end example sprint to completion. During a second run, close Neovim and confirm continuation. Then terminate the OpenCode server, observe the blocked checkpoint and controller exit, restart OpenCode on a different port, and resume through the plugin. Finally demonstrate that partial dirty work is preserved and blocks automatic recovery.
+Run an end-to-end example sprint to completion. During a second run, close Neovim and confirm continuation, including discovery of an outstanding question after reopening Neovim. Demonstrate pending pause until that question is resolved and immediate controlled stop at a separate question boundary. Then terminate the OpenCode server, observe the blocked checkpoint and controller exit, restart OpenCode on a different port, and resume through the plugin. Finally demonstrate that partial dirty work is preserved and blocks automatic recovery.
 
 ### 13.6 Explicit Deferrals
 
@@ -552,6 +589,7 @@ Validate the complete system under realistic failure conditions, stabilize user-
 - End-to-end test harness with fake OpenCode and GitHub services.
 - Real integration smoke tests gated by environment configuration.
 - Crash/restart fault-injection tests around state writes, Git commits, pushes, and invocation completion.
+- Interaction fault injection around question observation, answer/rejection, server loss, and stop.
 - Transcript and CI-output redaction review.
 - Artifact size-limit tests.
 - CLI help, installation, configuration, and troubleshooting documentation.
@@ -582,6 +620,7 @@ Documentation must clearly distinguish:
 - Malformed and oversized OpenCode responses.
 - Malformed and oversized GitHub logs.
 - Authentication and credential-redaction checks.
+- Long-running user-question wait with stable model timeout accounting, state, event history, and plugin notification behavior.
 - Long-running CI wait with stable state-file and Git history size.
 - Plugin operation after controller restart and Neovim restart.
 - Installation in a clean mkchad image.
@@ -611,7 +650,9 @@ V1 may be tagged only when:
 | Fresh visible agent sessions | 2 | 8 |
 | Structured agent results and transcripts | 2 | 8 |
 | Neovim launch and status | 3 | 8 |
+| Interactive user-question visibility | 3 | 8 |
 | Builder role and staged handoff | 4 | 8 |
+| Controller question lifecycle | 4 | 8 |
 | Controller-owned implementation commits | 4 | 8 |
 | Sprint checkpoint commits | 4 | 8 |
 | Pre-CI audit batching | 5 | 8 |
@@ -632,6 +673,7 @@ Unit tests should cover:
 
 - Data-model validation.
 - State transition guards.
+- Active-invocation interaction transitions and timeout accounting.
 - Audit and CI aggregation rules.
 - Prompt input construction.
 - Status projection.
@@ -655,6 +697,7 @@ These tests must configure repository-local Git identity rather than depend on a
 Fake OpenCode and GitHub HTTP/CLI adapters should provide deterministic fixtures for:
 
 - Session lifecycle and event sequences.
+- Pending question, answer, rejection, and foreign-session sequences.
 - Structured outputs and errors.
 - Server loss and timeout.
 - Check discovery and conclusion transitions.
@@ -666,7 +709,7 @@ Real OpenCode and GitHub tests should be opt-in because they consume credentials
 
 ### 16.5 Neovim Tests
 
-Plugin tests should verify command registration, callback resolution, argv construction, async behavior, JSON rendering, and detached process options. A small end-to-end test may use a fake `sprint-loop` executable that emits controlled status documents.
+Plugin tests should verify command registration, callback resolution, argv construction, async behavior, JSON rendering, detached process options, active-run status watching, and deduplicated waiting-for-user notifications. A small end-to-end test may use a fake `sprint-loop` executable that emits controlled status documents.
 
 ## 17. Documentation Strategy
 
@@ -674,8 +717,8 @@ Documentation evolves with implementation:
 
 - Sprint 1 establishes configuration, CLI, and state references.
 - Sprint 2 documents server requirements and authentication.
-- Sprint 3 documents Neovim installation and setup.
-- Sprint 4 documents repository and agent Git contracts.
+- Sprint 3 documents Neovim installation, setup, progress, active-session opening, and interaction notifications.
+- Sprint 4 documents repository and agent Git contracts plus the user-question lifecycle.
 - Sprint 5 documents audit findings and completion assessment.
 - Sprint 6 documents GitHub permissions and CI semantics.
 - Sprint 7 documents controls and recovery runbooks.
@@ -733,6 +776,12 @@ Risk: The plugin expects status fields or commands unavailable in the installed 
 
 Mitigation: Version the status envelope, ignore unknown fields, validate required fields, document compatibility, and release the parent submodule pointer deliberately.
 
+### 18.9 Unattended User Questions
+
+Risk: An agent asks an unnecessary question and holds controller ownership indefinitely while the user is absent.
+
+Mitigation: Permit questions only for necessary user decisions, expose a durable `waiting_for_user` state, notify through the Neovim status watcher, keep the exact session easy to open, allow rejection through OpenCode, and make stop abort safely without altering partial work.
+
 ## 19. Scope Change Policy
 
 A proposed change belongs in V1 only if it is required to satisfy an existing acceptance criterion, correct a safety defect, or make a required workflow operable. Other improvements should be recorded as future work.
@@ -750,9 +799,10 @@ At the end of this plan, a user can:
 3. Launch the sprint loop from Neovim.
 4. Observe every fresh agent session through OpenCode Web.
 5. Query evidence-based progress from Neovim.
-6. Allow local Builder and Auditor rounds to converge before publication.
-7. Run all GitHub CI for the exact published commit.
-8. Automatically repair bounded CI failures.
-9. Require green CI and a clean final audit before completion.
-10. Pause, resume, stop, or recover from server loss without silently losing or overwriting work.
-11. Inspect a coherent Git-backed history of specifications, state transitions, invocations, audits, CI evidence, and implementation commit references.
+6. Receive a Neovim notification when an agent needs input, open the exact named session, answer through OpenCode, and continue the same invocation.
+7. Allow local Builder and Auditor rounds to converge before publication.
+8. Run all GitHub CI for the exact published commit.
+9. Automatically repair bounded CI failures.
+10. Require green CI and a clean final audit before completion.
+11. Pause, resume, stop, or recover from server loss without silently losing or overwriting work.
+12. Inspect a coherent Git-backed history of specifications, state transitions, invocations, audits, CI evidence, and implementation commit references.

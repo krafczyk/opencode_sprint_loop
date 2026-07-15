@@ -240,6 +240,7 @@ The following illustrates the required concepts. The implementation may add sche
 - Every configured document must exist and be a regular file.
 - Agent and model identifiers must be explicit.
 - All limits must be positive integers.
+- `limits.invocation_timeout_seconds` bounds model execution and controller observation time but excludes intervals durably recorded as waiting for user input. User-question waits have no V1 timeout while the configured OpenCode server remains healthy.
 - Unknown schema versions must fail validation.
 - Invalid configuration must fail before any agent or Git mutation occurs.
 
@@ -272,7 +273,7 @@ Status must work while the controller is running and after it exits. JSON output
 sprint-loop pause --root <sprint-repository>
 ```
 
-Pause requests a safe stop at the next transition boundary. It must not interrupt an active Git commit or leave a partially written state file. If an OpenCode invocation is active, V1 allows it to finish, validates and persists its result, and completes any required implementation commit before pausing. It does not launch the next invocation or publish new work. After checkpointing `paused`, the controller exits so `resume` can acquire ownership. The resulting state must be resumable.
+Pause requests a safe stop at the next transition boundary. It must not interrupt an active Git commit or leave a partially written state file. If an OpenCode invocation is active, V1 allows it to finish, validates and persists its result, and completes any required implementation commit before pausing. If that invocation is waiting for user input, the pause request remains pending until the user answers or rejects the question and the invocation reaches the same normal handoff boundary. It does not launch the next invocation or publish new work. After checkpointing `paused`, the controller exits so `resume` can acquire ownership. The resulting state must be resumable.
 
 ### 8.4 Resume
 
@@ -288,7 +289,7 @@ Resume requires a newly supplied and validated server URL, even if it is unchang
 sprint-loop stop --root <sprint-repository>
 ```
 
-Stop requests a controlled terminal state. Like pause, it waits for an active invocation or indivisible Git operation to reach a safe durable boundary rather than aborting it. It then checkpoints `stopped` and exits. It must preserve all completed work and records. Stop does not reset, discard, or rewrite implementation commits.
+Stop requests a controlled terminal state. It waits for an indivisible Git operation or an ordinarily executing invocation to reach a safe durable boundary. If an invocation is waiting for user input, that interaction is a V1 stop boundary: the controller rejects the pending question, requests one bounded abort of the active session, records the interrupted invocation truthfully, preserves all partial repository work, and then checkpoints `stopped`. It must preserve all completed work and records. Stop does not reset, discard, stash, stage, commit, or rewrite implementation work.
 
 ### 8.6 Exit Behavior
 
@@ -382,11 +383,12 @@ The controller must not create commits merely because a CI polling interval elap
 
 Each Builder, Auditor, and CI Fixer invocation receives a newly created OpenCode session on the supplied server. Sessions are not continued across workflow invocations.
 
-Session titles should be recognizable in OpenCode clients, for example:
+Session titles must use the recognizable format `[<multisprint>/<sprint>] <role> <sequence> <purpose>`. The sequence is zero-padded to at least four decimal digits, and the purpose is a concise phase-specific description. For example:
 
 ```text
-[authentication/3] builder 0004
-[authentication/3] auditor 0005
+[authentication/3] builder 0004 implementation
+[authentication/3] auditor 0005 pre-CI audit round 2
+[authentication/3] ci-fixer 0006 CI fix attempt 1
 ```
 
 ### 11.2 Invocation Inputs
@@ -410,9 +412,26 @@ The controller must explicitly supply or reference required instructions. It mus
 
 ### 11.3 Invocation Monitoring
 
-The controller may use OpenCode server events, session status polling, or both. It must enforce invocation timeout and cancellation behavior and persist the server session ID as soon as it is created.
+The controller may use OpenCode server events, session status polling, or both. It must enforce invocation timeout and cancellation behavior and persist the server session ID as soon as it is created. Production Builder, Auditor, and CI Fixer monitoring must also detect pending OpenCode questions for the exact active session. The Sprint 2 execution probe remains non-interactive and denies the question tool.
 
-### 11.4 Invocation Records
+### 11.4 User Questions
+
+Builder, Auditor, and CI Fixer sessions may ask the user a question only when a decision is necessary and cannot be inferred safely from the supplied specifications, findings, CI evidence, or repository instructions. They must not ask for routine confirmation, optional improvements, or preferences that do not block the assigned work.
+
+When an allowed role asks a question:
+
+1. The controller verifies through documented OpenCode events or pending-question APIs that the request belongs to the exact active session.
+2. It records the active invocation as `waiting_for_user` without changing the surrounding workflow phase.
+3. It persists bounded request identity, question count, and observation timestamp through `agent.question_asked`; full question text is not copied into state, events, status, or notifications.
+4. It waits indefinitely while the supplied OpenCode server remains healthy. This interval does not consume `limits.invocation_timeout_seconds`.
+5. The user answers or rejects the request through an ordinary OpenCode client. The controller never selects or submits an answer.
+6. The controller records `agent.question_resolved`, clears the pending interaction, resumes model timeout accounting, and continues the same invocation and session.
+
+Question and answer content may appear only in OpenCode's session records and the controller's bounded sanitized terminal transcript. A malformed request, a request associated with another session, contradictory question events, or ambiguous resolution must fail closed without being treated as user approval. The controller must ignore questions belonging to unrelated OpenCode sessions.
+
+The indefinite logical wait must be implemented through bounded documented server operations or event observation, not one unbounded HTTP read. Server liveness checks and controlled cancellation remain active while waiting.
+
+### 11.5 Invocation Records
 
 Each invocation directory must record:
 
@@ -435,6 +454,7 @@ The Builder:
 - Runs appropriate local checks.
 - Stages intended changes and writes the commit message.
 - Reports blocked conditions rather than inventing requirements.
+- Uses the question lifecycle only for a necessary user decision that prevents safe implementation.
 
 ### 12.2 CI Fixer
 
@@ -446,6 +466,7 @@ The CI Fixer:
 - Avoids unrelated refactoring or sprint expansion.
 - Runs relevant local checks when possible.
 - Stages intended changes and writes the commit message.
+- Uses the question lifecycle only when the available CI evidence requires a user decision.
 
 ### 12.3 Auditor
 
@@ -459,6 +480,7 @@ The Auditor:
 - Assesses each checklist item with evidence.
 - Makes no repository changes.
 - Returns an empty findings list when the sprint may advance.
+- Uses the question lifecycle only when a user decision is necessary to interpret an otherwise ambiguous requirement.
 
 ## 13. Structured Results
 
@@ -564,6 +586,8 @@ Initialize
        -> Clean: Finished
 ```
 
+Any Builder, Auditor, or CI Fixer invocation in this flow may temporarily enter the active-invocation substate `waiting_for_user`. Resolving the question resumes the same workflow state, invocation, and session; it does not consume an implementation cycle, audit round, or CI fix attempt by itself.
+
 ### 14.2 Durable States
 
 V1 must represent at least:
@@ -663,7 +687,7 @@ The CI Fixer should receive focused failure evidence rather than an unbounded du
 - Current state and reason.
 - Controller process identity while active.
 - OpenCode server URL and validated version.
-- Active invocation and session ID, if any.
+- Active invocation, session ID, execution status, and bounded pending-question metadata, if any.
 - Local and last-pushed commit sets.
 - Current audit phase and round counts.
 - CI attempt count and active check identifiers.
@@ -694,6 +718,8 @@ run.started
 state.entered
 server.validated
 agent.started
+agent.question_asked
+agent.question_resolved
 agent.completed
 agent.interrupted
 git.committed
@@ -708,6 +734,8 @@ run.finished
 ```
 
 Events are written immediately but need not each create a Git commit. Poll observations with no meaningful external change should not be recorded repeatedly.
+
+Question events contain bounded request/session identity, question count, timestamps, and resolution category only. They must not contain question text, answer text, option labels, or other transcript content.
 
 ### 16.3 Checkpoint Commits
 
@@ -743,11 +771,11 @@ Status may read state without acquiring exclusive ownership. Mutating control co
 
 ### 18.1 Pause
 
-Pause is resumable. The controller records the prior state, reaches a safe boundary, checkpoints `paused`, and exits. Resume revalidates all external assumptions before acquiring a new active process lifetime.
+Pause is resumable. The controller records the prior state, reaches a safe boundary, checkpoints `paused`, and exits. A pause requested while an invocation is `waiting_for_user` remains pending until that question is answered or rejected and the invocation completes its normal handoff. Resume revalidates all external assumptions before acquiring a new active process lifetime.
 
 ### 18.2 Stop
 
-Stop is user-requested termination. It preserves commits, transcripts, state, and events. Resuming a stopped run is not required in V1; a deliberate override may be added later.
+Stop is user-requested termination. It preserves commits, transcripts, state, events, and partial implementation work. At a `waiting_for_user` boundary, stop rejects the pending question, requests one bounded session abort, records the interruption, and checkpoints `stopped` without altering the managed worktree. Resuming a stopped run is not required in V1; a deliberate override may be added later.
 
 ### 18.3 Server Loss
 
@@ -766,6 +794,8 @@ If an agent was active when the server was lost:
 - If any staged, unstaged, or untracked implementation change remains, resume enters or preserves `blocked` with reason `interrupted_dirty_worktree`.
 - V1 must not discard, stash, stage, or commit those partial changes automatically.
 
+If the agent was waiting for user input, the controller must not assume that the in-memory OpenCode question survived server loss. It records the invocation as interrupted and follows the same clean- or dirty-worktree recovery rules.
+
 ### 18.4 External Repository Changes
 
 If repository HEAD, branch, index, worktree, remote tracking state, or submodule gitlink changes unexpectedly, the controller must stop mutation and enter a blocked state. It must not reset or overwrite concurrent user work.
@@ -781,6 +811,7 @@ Status must report at least:
 - Sprint identity.
 - Current state and reason.
 - Active role, invocation ID, and OpenCode session ID.
+- Active invocation status (`running` or `waiting_for_user`) and bounded pending-question identity, count, and timestamp.
 - Local implementation commit and last pushed commit.
 - Pre-CI audit round and configured maximum.
 - CI status and attempt count.
@@ -789,6 +820,26 @@ Status must report at least:
 - Latest audit remaining-effort band.
 - Last meaningful event and timestamp.
 - Whether the process is running, paused, blocked, or terminal.
+
+When an invocation is waiting, the additive status projection is equivalent to:
+
+```json
+{
+  "active": {
+    "role": "builder",
+    "invocation_id": "0004-builder",
+    "session_id": "ses_example",
+    "status": "waiting_for_user",
+    "interaction": {
+      "request_id": "que_example",
+      "question_count": 1,
+      "asked_at": "2026-07-15T12:00:00Z"
+    }
+  }
+}
+```
+
+`active.status` is `running` or `waiting_for_user` while an invocation exists. `active.interaction` is null while running and contains exactly the bounded fields above while waiting. For a persisted run with no active invocation, the active object retains null role, invocation, session, status, and interaction fields. The existing no-run projection continues to use `active: null`.
 
 The controller computes completion from the latest Auditor checklist assessment. It should favor counts such as `14 satisfied, 2 partial, 1 unsatisfied` over an unsupported exact percentage.
 
@@ -800,9 +851,9 @@ If a percentage is exposed, it must be derived deterministically from documented
 
 The plugin is developed in the separate `opencode_sprint_loop.lua` repository.
 
-### 20.2 Setup
+### 20.2 Setup and Lua API
 
-The plugin must accept callbacks or values for controller executable, sprint root, server URL, and optional OpenCode web URL. A representative API is:
+The plugin targets Neovim 0.12. `setup()` must be called before any plugin command or public action. It requires explicit sprint-root and server-URL values or callbacks, accepts an executable value or callback defaulting to `sprint-loop`, and accepts an optional OpenCode web-URL value or callback. A representative API is:
 
 ```lua
 require("opencode_sprint_loop").setup({
@@ -820,6 +871,8 @@ require("opencode_sprint_loop").setup({
 ```
 
 The exact mkchad function names are integration details, not assumptions the generic plugin may hard-code.
+
+The module also exposes asynchronous `start()`, `progress()`, `pause()`, `resume()`, `stop()`, and `open_session()` methods. They back the corresponding commands, resolve relevant callbacks when invoked, report through the same UI, and do not expose a stable process-handle return contract.
 
 ### 20.3 Commands
 
@@ -840,11 +893,13 @@ Start launches `sprint-loop run` as a detached Neovim job. Neovim exit must not 
 
 ### 20.5 Progress UI
 
-Progress calls `sprint-loop status --json` and renders a concise floating window or split. It must display blocked and failure reasons prominently and include the active OpenCode session identifier.
+Progress calls `sprint-loop status --json` and renders a disposable read-only buffer in a centered floating window. It must display blocked, failure, and `waiting_for_user` conditions prominently and include the active OpenCode session identifier and pending-question count when present.
+
+The plugin maintains an ephemeral asynchronous status watcher at a bounded non-busy interval while a controller process is active. Setup performs an initial status query so a reopened Neovim instance can discover an existing run; plugin start and resume actions also activate observation. For each new pending question request, it emits one deduplicated notification directing the user to `SprintLoopOpenSession`. The watcher does not fetch question text, submit answers, reject requests, persist authoritative state, or continue after no controller process is active.
 
 ### 20.6 Session Opening
 
-When a web URL can be resolved, `SprintLoopOpenSession` opens the active session in the user's configured browser. Absence of a web URL must produce an actionable message and must not affect the loop.
+When a web URL can be resolved, `SprintLoopOpenSession` reads current status, requires an active session ID, and opens the active session in the user's configured browser. It constructs the supported route as `<web-base>/<base64url(canonical-sprint-root)>/session/<encoded-session-id>`. Absence of a web URL or active session must produce an actionable message and must not affect the loop.
 
 ## 21. Security and Data Handling
 
@@ -852,6 +907,7 @@ When a web URL can be resolved, `SprintLoopOpenSession` opens the active session
 - Server passwords and tokens must not be persisted in state, events, prompts, transcripts, process arguments, or Git commits.
 - GitHub authentication should use existing `gh` or environment-based credentials without copying tokens into controller files.
 - Transcript capture must use sanitized export support when available.
+- Pending question and answer text must not be copied into state, events, status, Neovim notifications, or process arguments; terminal transcript handling applies the normal sanitization and size bounds.
 - The controller should redact common credential patterns from logs and stored error payloads.
 - Invocation and CI output must have configurable or safe hard-coded size bounds in V1.
 - Sprint repositories containing transcripts should be treated as sensitive and private by default.
@@ -878,7 +934,7 @@ The controller may use OpenCode's documented HTTP/OpenAPI interface directly. It
 
 Git and the GitHub CLI may be used for repository and CI operations. External command output must be parsed from stable machine-readable formats where available rather than human-oriented text.
 
-The plugin targets a currently supported Neovim release and uses Lua APIs available in that release.
+The plugin targets Neovim 0.12 and uses Lua APIs available in that release.
 
 ## 24. V1 Acceptance Criteria
 
@@ -896,14 +952,16 @@ V1 is accepted when all of the following are demonstrated:
 10. Green CI launches a fresh final Auditor.
 11. Final findings begin another local implementation batch; no findings finish the sprint.
 12. `SprintLoopProgress` displays current phase, session, commits, CI state, and checklist assessment without blocking Neovim.
-13. Closing Neovim does not terminate an active controller.
-14. Losing the OpenCode server produces a resumable blocked checkpoint and process exit.
-15. Resume with a new valid server URL continues safely when the worktree is clean.
-16. Interrupted dirty work is preserved and reported rather than automatically altered.
-17. Sprint state, events, invocation records, audit reports, CI evidence, and checkpoint commits provide a coherent history.
-18. Configured loop limits block safely instead of publishing known audit failures or looping indefinitely.
-19. No test fixture or recorded artifact contains real credentials.
-20. Automated tests cover state transitions, persistence recovery, Git handoff validation, CI conclusion aggregation, and CLI JSON contracts.
+13. A necessary agent question produces durable `waiting_for_user` status and one Neovim notification, can be answered in the exact named OpenCode session, excludes user-wait time from the model timeout, and resumes the same invocation.
+14. Closing Neovim does not terminate an active controller, including one waiting for user input.
+15. Losing the OpenCode server produces a resumable blocked checkpoint and process exit.
+16. Resume with a new valid server URL continues safely when the worktree is clean.
+17. Interrupted dirty work is preserved and reported rather than automatically altered.
+18. Pause waits for a pending question to resolve, while stop rejects and aborts at that interaction boundary without altering partial work.
+19. Sprint state, events, invocation records, audit reports, CI evidence, and checkpoint commits provide a coherent history.
+20. Configured loop limits block safely instead of publishing known audit failures or looping indefinitely.
+21. No test fixture or recorded artifact contains real credentials.
+22. Automated tests cover state transitions, persistence recovery, Git handoff validation, user-question interaction, CI conclusion aggregation, and CLI JSON contracts.
 
 ## 25. Future Extensions
 
