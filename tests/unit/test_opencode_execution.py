@@ -4172,6 +4172,8 @@ class OpenCodeExecutionTests(unittest.TestCase):
                             "role": "auditor",
                             "invocation_id": "0001-auditor",
                             "session_id": "ses_local",
+                            "status": "running",
+                            "interaction": None,
                         },
                     )
                     process.send_signal(signal_number)

@@ -1199,7 +1199,13 @@ class FoundationTests(unittest.TestCase):
                     "code": "execution_not_implemented",
                     "message": "OpenCode execution probe completed; Builder workflow begins in Sprint 4.",
                 },
-                "active": {"role": None, "invocation_id": None, "session_id": None},
+                "active": {
+                    "role": None,
+                    "invocation_id": None,
+                    "session_id": None,
+                    "status": None,
+                    "interaction": None,
+                },
                 "commits": {"local": {"managed": None}, "pushed": {"managed": None}},
                 "audit": {
                     "phase": None,

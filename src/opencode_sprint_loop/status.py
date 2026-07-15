@@ -107,6 +107,11 @@ def project_status(
             "session_id": None
             if state["active_invocation"] is None
             else state["active_invocation"]["session_id"],
+            # These are deliberately projection-only additions in Sprint 3.
+            # Sprint 2 has no durable interaction lifecycle; an active probe is
+            # therefore always running and has no pending interaction.
+            "status": None if state["active_invocation"] is None else "running",
+            "interaction": None,
         },
         "commits": state["commits"],
         "audit": {
@@ -262,6 +267,7 @@ def format_status(status: dict[str, Any]) -> str:
             f"{status['active']['role']} {status['active']['invocation_id']} "
             f"({status['active']['session_id']})"
         )
+        lines.append(f"Active status: {status['active']['status']}")
     if status["last_event"] is not None:
         lines.append(
             f"Last event: {status['last_event']['type']} ({status['last_event']['timestamp']})"

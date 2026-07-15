@@ -4,7 +4,7 @@ The OpenCode Sprint Loop Controller is a Python workflow controller for durable 
 
 ## Current Sprint
 
-Sprint 2, [OpenCode Execution Layer](docs/controller-v1/2/sprint_spec.md), is the current implementation sprint. Its [checklist](docs/controller-v1/2/sprint_checklist.md) tracks the planned server validation, fresh-session execution probe, durable invocation records, and interruption behavior.
+Sprint 3, [Neovim Client V1](docs/controller-v1/3/sprint_spec.md), is the current implementation sprint. Its [checklist](docs/controller-v1/3/sprint_checklist.md) tracks the thin Neovim launcher and progress client alongside its backward-compatible controller status additions.
 
 ## Implemented Status
 
@@ -22,8 +22,9 @@ OpenCode execution probe:
   controller-validated JSON output, and bounded sanitized invocation evidence.
 
 It does **not** yet run a product Builder, accept a staged handoff, make commits
-or pushes, run audit rounds or CI, provide functional controls/recovery, or
-implement Neovim commands. A successful probe intentionally ends with
+or pushes, run audit rounds or CI, or provide functional controls/recovery. The
+separate Neovim plugin provides asynchronous command delegation and status
+presentation only; it does not implement workflow decisions. A successful probe intentionally ends with
 `blocked / execution_not_implemented` and a non-zero exit status.
 
 ## Requirements
@@ -252,11 +253,14 @@ the prefix to success.
 Use `status --json` for integrations. It emits one JSON object and writes diagnostics only to standard error. Its stable top-level fields are `schema_version`, `controller_version`, `sprint_root`, `run_exists`, `process_running`, `run_id`, `sprint`, `state`, `reason`, `active`, `commits`, `audit`, `ci`, `counters`, `checklist`, `last_event`, and `updated_at`. The complete V1 Sprint 1 JSON schema is defined in [the status contract](docs/controller-v1/1/sprint_spec.md#12-status-json-contract).
 
 `sprint` contains `multisprint` and `index`; `reason` contains safe `code` and
-`message`; `active` contains `role`, `invocation_id`, and `session_id` while the
-probe runs. Status remains local and never exposes the server URL, prompt,
+`message`; `active` contains `role`, `invocation_id`, `session_id`, `status`,
+and `interaction`. For an inactive persisted run, `status` and `interaction`
+are null. The Sprint 2 probe projects `status: "running"` and
+`interaction: null`. These are backward-compatible, read-only status additions:
+Sprint 3 does not persist real question state or permit probe questions. Status remains local and never exposes the server URL, prompt,
 result, transcript, or credentials.
 
-When no run exists, `run_exists` is `false`, `process_running` is `false`, and every run-specific field from `run_id` through `updated_at` is `null`. No-run status does not create worktree or runtime files. For a placeholder run, `active` is an object containing null `role`, `invocation_id`, and `session_id` fields; `last_event` identifies the final `run.blocked` record.
+When no run exists, `run_exists` is `false`, `process_running` is `false`, and every run-specific field from `run_id` through `updated_at` is `null`. No-run status does not create worktree or runtime files. For a placeholder run, `active` is an object containing null `role`, `invocation_id`, `session_id`, `status`, and `interaction` fields; `last_event` identifies the final `run.blocked` record.
 
 ## Verification
 

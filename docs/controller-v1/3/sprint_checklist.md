@@ -8,18 +8,18 @@ An item may be checked only when its implementation, tests, and required documen
 
 ## 1. Scope and Inputs
 
-- [ ] **S3-SCOPE-001** Read the nearest `AGENTS.md`, both authoritative V1 documents, `docs/threat_model.md`, `docs/audit_policy.md`, and the complete Sprint 3 specification before implementation.
-- [ ] **S3-SCOPE-002** Confirm Sprint 2 remains complete and Sprint 3 is the active implementation sprint.
-- [ ] **S3-SCOPE-003** Inspect status in both the controller and plugin repositories and preserve unrelated work.
-- [ ] **S3-SCOPE-004** Keep Builder execution, durable question monitoring, Git handoff, audit rounds, publication, CI, functional controls, and recovery out of Sprint 3.
-- [ ] **S3-SCOPE-005** Preserve the controller as workflow authority and the plugin as a launcher, status observer, and presentation client only.
-- [ ] **S3-SCOPE-006** Apply the trusted-user prototype threat model without expanding Sprint 3 for excluded hostile local races.
-- [ ] **S3-SCOPE-007** Treat waiting-for-user status as a presentation compatibility contract; do not claim a real Sprint 3 agent can ask a question.
-- [ ] **S3-SCOPE-008** Record every accepted limitation and later-sprint dependency without presenting it as implemented behavior.
+- [x] **S3-SCOPE-001** Read the nearest `AGENTS.md`, both authoritative V1 documents, `docs/threat_model.md`, `docs/audit_policy.md`, and the complete Sprint 3 specification before implementation.
+- [x] **S3-SCOPE-002** Confirm Sprint 2 remains complete and Sprint 3 is the active implementation sprint.
+- [x] **S3-SCOPE-003** Inspect status in both the controller and plugin repositories and preserve unrelated work.
+- [x] **S3-SCOPE-004** Keep Builder execution, durable question monitoring, Git handoff, audit rounds, publication, CI, functional controls, and recovery out of Sprint 3.
+- [x] **S3-SCOPE-005** Preserve the controller as workflow authority and the plugin as a launcher, status observer, and presentation client only.
+- [x] **S3-SCOPE-006** Apply the trusted-user prototype threat model without expanding Sprint 3 for excluded hostile local races.
+- [x] **S3-SCOPE-007** Treat waiting-for-user status as a presentation compatibility contract; do not claim a real Sprint 3 agent can ask a question.
+- [x] **S3-SCOPE-008** Record every accepted limitation and later-sprint dependency without presenting it as implemented behavior.
 
 ## 2. Live mkchad Safety
 
-- [ ] **S3-MKCHAD-001** Treat `~/.config/mkchad` as a live user environment and do not edit any file beneath it.
+- [x] **S3-MKCHAD-001** Treat `~/.config/mkchad` as a live user environment and do not edit any file beneath it.
 - [ ] **S3-MKCHAD-002** Record live checkout status before integration work without staging, cleaning, or modifying its untracked files.
 - [ ] **S3-MKCHAD-003** Clone the current remote `mkchad` branch into a disposable directory outside the live configuration.
 - [ ] **S3-MKCHAD-004** Record the remote clone commit used for integration evidence and refresh the clone if the remote branch changes.
@@ -32,10 +32,10 @@ An item may be checked only when its implementation, tests, and required documen
 
 ## 3. Repository and Submodule Workflow
 
-- [ ] **S3-REPO-001** Implement plugin code in the `opencode_sprint_loop.lua` repository, not as Python-embedded Lua.
-- [ ] **S3-REPO-002** Keep controller changes limited to additive status projection, tests, documentation, and the eventual plugin gitlink update.
-- [ ] **S3-REPO-003** Use a conventional Lua plugin layout with clear configuration, process, status, and UI boundaries.
-- [ ] **S3-REPO-004** Add no generated test output, status document, runtime state, browser artifact, credential, or transcript to either repository.
+- [x] **S3-REPO-001** Implement plugin code in the `opencode_sprint_loop.lua` repository, not as Python-embedded Lua.
+- [x] **S3-REPO-002** Keep controller changes limited to additive status projection, tests, documentation, and the eventual plugin gitlink update.
+- [x] **S3-REPO-003** Use a conventional Lua plugin layout with clear configuration, process, status, and UI boundaries.
+- [x] **S3-REPO-004** Add no generated test output, status document, runtime state, browser artifact, credential, or transcript to either repository.
 - [ ] **S3-REPO-005** Commit and push verified plugin changes from inside the plugin repository before updating the parent gitlink.
 - [ ] **S3-REPO-006** Update the parent gitlink in a separate parent commit without mixing unrelated controller or plugin work.
 - [ ] **S3-REPO-007** Inspect final status and diff in both repositories before Sprint 3 completion.
@@ -142,16 +142,16 @@ An item may be checked only when its implementation, tests, and required documen
 
 ## 12. Additive Controller Status Projection
 
-- [ ] **S3-STATUS-001** Preserve every stable Sprint 1 and Sprint 2 JSON status field and meaning.
-- [ ] **S3-STATUS-002** Keep no-run `active` exactly null.
-- [ ] **S3-STATUS-003** Add null `active.status` and `active.interaction` for an inactive persisted run.
-- [ ] **S3-STATUS-004** Project active Sprint 2 invocation status as exact `running`.
-- [ ] **S3-STATUS-005** Project active Sprint 2 interaction as null.
-- [ ] **S3-STATUS-006** Keep status schema version `1` and document the fields as backward-compatible additions.
-- [ ] **S3-STATUS-007** Update human status only as needed to remain accurate and credential-free.
-- [ ] **S3-STATUS-008** Make no state-schema, event-schema, invocation-record, Git, or OpenCode lifecycle change for the additive fields.
-- [ ] **S3-STATUS-009** Add controller tests for no-run, inactive, and active projections.
-- [ ] **S3-STATUS-010** Keep status read-only, local, and independent of server availability.
+- [x] **S3-STATUS-001** Preserve every stable Sprint 1 and Sprint 2 JSON status field and meaning.
+- [x] **S3-STATUS-002** Keep no-run `active` exactly null.
+- [x] **S3-STATUS-003** Add null `active.status` and `active.interaction` for an inactive persisted run.
+- [x] **S3-STATUS-004** Project active Sprint 2 invocation status as exact `running`.
+- [x] **S3-STATUS-005** Project active Sprint 2 interaction as null.
+- [x] **S3-STATUS-006** Keep status schema version `1` and document the fields as backward-compatible additions.
+- [x] **S3-STATUS-007** Update human status only as needed to remain accurate and credential-free.
+- [x] **S3-STATUS-008** Make no state-schema, event-schema, invocation-record, Git, or OpenCode lifecycle change for the additive fields.
+- [x] **S3-STATUS-009** Add controller tests for no-run, inactive, and active projections.
+- [x] **S3-STATUS-010** Keep status read-only, local, and independent of server availability.
 
 ## 13. Plugin Status Validation
 
@@ -222,12 +222,12 @@ An item may be checked only when its implementation, tests, and required documen
 
 ## 17. Session Title Convention
 
-- [ ] **S3-TITLE-001** Enforce/document `[<multisprint>/<sprint>] <role> <sequence> <purpose>` as the normative controller title format.
-- [ ] **S3-TITLE-002** Require sequence padding to at least four decimal digits.
-- [ ] **S3-TITLE-003** Use canonical workflow role and concise phase purpose.
-- [ ] **S3-TITLE-004** Keep titles descriptive only and never use them as identity evidence.
-- [ ] **S3-TITLE-005** Verify the Sprint 2 probe title matches `[<multisprint>/<sprint>] auditor 0001 execution probe`.
-- [ ] **S3-TITLE-006** Add no extra Sprint 3 session and do not rename an existing remote session.
+- [x] **S3-TITLE-001** Enforce/document `[<multisprint>/<sprint>] <role> <sequence> <purpose>` as the normative controller title format.
+- [x] **S3-TITLE-002** Require sequence padding to at least four decimal digits.
+- [x] **S3-TITLE-003** Use canonical workflow role and concise phase purpose.
+- [x] **S3-TITLE-004** Keep titles descriptive only and never use them as identity evidence.
+- [x] **S3-TITLE-005** Verify the Sprint 2 probe title matches `[<multisprint>/<sprint>] auditor 0001 execution probe`.
+- [x] **S3-TITLE-006** Add no extra Sprint 3 session and do not rename an existing remote session.
 
 ## 18. Control Delegation
 
@@ -255,8 +255,8 @@ An item may be checked only when its implementation, tests, and required documen
 
 ## 20. Automated Verification
 
-- [ ] **S3-TEST-001** Add a documented headless Neovim 0.12 test command.
-- [ ] **S3-TEST-002** Keep default plugin tests independent of OpenCode, GitHub, network, model usage, browser availability, and credentials.
+- [x] **S3-TEST-001** Add a documented headless Neovim 0.12 test command.
+- [x] **S3-TEST-002** Keep default plugin tests independent of OpenCode, GitHub, network, model usage, browser availability, and credentials.
 - [ ] **S3-TEST-003** Test command registration and every public Lua method.
 - [ ] **S3-TEST-004** Test setup shape, repeated setup, synchronous resolvers, callback resolvers, timeout, duplicate completion, and stale completion.
 - [ ] **S3-TEST-005** Test exact argv and no shell interpolation with hostile-looking literal values.
@@ -268,33 +268,51 @@ An item may be checked only when its implementation, tests, and required documen
 - [ ] **S3-TEST-011** Test URL-safe root encoding, session encoding, web-base validation, and browser outcomes.
 - [ ] **S3-TEST-012** Test CA path validation and exact child environment without capturing CA content.
 - [ ] **S3-TEST-013** Test accurate pause/resume/stop error delegation.
-- [ ] **S3-TEST-014** Add focused controller tests for additive status fields and unchanged state/event behavior.
-- [ ] **S3-TEST-015** Keep all existing controller tests green after intentional status snapshot updates.
+- [x] **S3-TEST-014** Add focused controller tests for additive status fields and unchanged state/event behavior.
+- [x] **S3-TEST-015** Keep all existing controller tests green after intentional status snapshot updates.
 - [ ] **S3-TEST-016** Run selected Lua formatting/linting checks documented by the plugin repository.
-- [ ] **S3-TEST-017** Run Python formatting, linting, strict typing, compilation, build, and clean-install checks required by the controller repository.
-- [ ] **S3-TEST-018** Run `git diff --check` in both repositories.
+- [x] **S3-TEST-017** Run Python formatting, linting, strict typing, compilation, build, and clean-install checks required by the controller repository.
+- [x] **S3-TEST-018** Run `git diff --check` in both repositories.
 - [ ] **S3-TEST-019** Test the Neovim minimum-version gate with a controlled older-version fixture without requiring an installed older Neovim.
 
 ## 21. Documentation
 
-- [ ] **S3-DOC-001** Expand the plugin README with installation, Neovim 0.12, setup, and command usage.
-- [ ] **S3-DOC-002** Add a Neovim help file documenting every public option, method, command, and error path.
-- [ ] **S3-DOC-003** Document required setup and explicit root/server configuration.
-- [ ] **S3-DOC-004** Document synchronous and callback-style URL resolver contracts.
+- [x] **S3-DOC-001** Expand the plugin README with installation, Neovim 0.12, setup, and command usage.
+- [x] **S3-DOC-002** Add a Neovim help file documenting every public option, method, command, and error path.
+- [x] **S3-DOC-003** Document required setup and explicit root/server configuration.
+- [x] **S3-DOC-004** Document synchronous and callback-style URL resolver contracts.
 - [ ] **S3-DOC-005** Provide generic and current mkchad adapter examples without hard-coding mkchad in plugin source.
-- [ ] **S3-DOC-006** Document that URL resolution must not call mkchad server ensure/start behavior.
-- [ ] **S3-DOC-007** Document optional `server_ca_cert`, child `SSL_CERT_FILE`, and separate browser CA trust.
-- [ ] **S3-DOC-008** Document detached launch and the distinction between spawn success and confirmed controller activity.
-- [ ] **S3-DOC-009** Document progress fields, close mappings, and no-run presentation.
-- [ ] **S3-DOC-010** Document watcher lifetime, deduplicated question notification, and lack of plugin question answering.
-- [ ] **S3-DOC-011** Document active-session URL construction and missing-session/browser failures.
-- [ ] **S3-DOC-012** Document current `feature_not_implemented` pause/resume/stop behavior.
-- [ ] **S3-DOC-013** Document default fake/headless tests and opt-in real OpenCode demonstration.
-- [ ] **S3-DOC-014** Warn that `~/.config/mkchad` is live and all development integration uses a disposable remote clone plus isolated XDG roots.
-- [ ] **S3-DOC-015** Update the parent README to identify Sprint 3 and its exact implemented limitations.
-- [ ] **S3-DOC-016** Keep Builder, real pending-question monitoring, commits, audit, CI, and recovery clearly unimplemented.
+- [x] **S3-DOC-006** Document that URL resolution must not call mkchad server ensure/start behavior.
+- [x] **S3-DOC-007** Document optional `server_ca_cert`, child `SSL_CERT_FILE`, and separate browser CA trust.
+- [x] **S3-DOC-008** Document detached launch and the distinction between spawn success and confirmed controller activity.
+- [x] **S3-DOC-009** Document progress fields, close mappings, and no-run presentation.
+- [x] **S3-DOC-010** Document watcher lifetime, deduplicated question notification, and lack of plugin question answering.
+- [x] **S3-DOC-011** Document active-session URL construction and missing-session/browser failures.
+- [x] **S3-DOC-012** Document current `feature_not_implemented` pause/resume/stop behavior.
+- [x] **S3-DOC-013** Document default fake/headless tests and opt-in real OpenCode demonstration.
+- [x] **S3-DOC-014** Warn that `~/.config/mkchad` is live and all development integration uses a disposable remote clone plus isolated XDG roots.
+- [x] **S3-DOC-015** Update the parent README to identify Sprint 3 and its exact implemented limitations.
+- [x] **S3-DOC-016** Keep Builder, real pending-question monitoring, commits, audit, CI, and recovery clearly unimplemented.
 
 ## 22. Threat and Security Review
+
+### Development-pass evidence (2026-07-15)
+
+The plugin implementation and documentation were committed locally as
+`opencode_sprint_loop.lua` commit `aae1d48`. The deterministic offline command
+`nvim --headless --noplugin -u tests/minimal_init.lua -l tests/run.lua` passed.
+Focused controller status tests passed, followed by the complete offline Python
+suite (`210` passing, one opt-in real-server test skipped), Ruff, formatting,
+strict mypy, compilation, and a disposable build/clean-wheel-install smoke.
+`git diff --check` passed in both repositories.
+
+No live OpenCode, browser, network, credentials, or mkchad integration was run.
+In particular, this development pass did not inspect, clone, source, or modify
+the live `~/.config/mkchad` environment. The plugin commit is intentionally not
+pushed, so the required parent gitlink commit remains prohibited by the Sprint
+3 repository workflow. The unchecked mkchad, exhaustive plugin-test,
+demonstration, independent-audit, push, gitlink, and completion-gate items
+remain outstanding.
 
 - [ ] **S3-REVIEW-001** Audit implementation against `docs/threat_model.md`, `docs/audit_policy.md`, and Sprint 3's plugin-specific failure model.
 - [ ] **S3-REVIEW-002** Prioritize ordinary malformed setup, process failure, malformed status, timer races, credential exposure, and live-environment mistakes.
