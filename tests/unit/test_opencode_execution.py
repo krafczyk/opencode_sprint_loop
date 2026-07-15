@@ -53,6 +53,7 @@ from opencode_sprint_loop.opencode_runner import (
     parse_server_url,
 )
 from opencode_sprint_loop.security import contains_credential, redact_diagnostic
+from opencode_sprint_loop.status import format_status
 
 _PROBE_PERMISSIONS = [
     {"permission": "*", "pattern": "*", "action": "deny"},
@@ -327,6 +328,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
             "http://bad_host",
             "http://host:0",
             "http://host..invalid",
+            "http://glpat-" + "A" * 20 + ".example.invalid",
         ):
             with self.subTest(value=value):
                 with self.assertRaises(ControllerError) as context:
@@ -912,6 +914,8 @@ class OpenCodeExecutionTests(unittest.TestCase):
             "password = synthetic-password",
             "https://user:synthetic@example.invalid/path",
             "https://example.invalid/path?opaque=synthetic",
+            "https://example.invalid/path?#synthetic-fragment",
+            "xAuthorization: Bearer safe Authorization: Bearer synthetic-nested",
             "-----BEGIN SYNTHETIC PRIVATE KEY-----",
             *(prefix + suffix for prefix, suffix, _ in provider_cases),
         )
@@ -921,6 +925,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
             "paſsword=synthetic-password",
             "toKen=synthetic-token",
             "AKIA" + "A" * 16,
+            "https://example.invalid/path?#",
             *(prefix + suffix for prefix, _, suffix in provider_cases),
         )
         completed = {
@@ -938,6 +943,29 @@ class OpenCodeExecutionTests(unittest.TestCase):
         for value in near_misses:
             with self.subTest(near_miss=value[:24]):
                 self.assertFalse(contains_credential(value))
+
+    def test_human_status_prevents_cross_field_credential_composition(self) -> None:
+        """Individually safe fields cannot join into a printed authorization value."""
+        projected = {
+            "run_exists": True,
+            "sprint_root": "/tmp/synthetic",
+            "sprint": {"multisprint": "foundation", "index": 3},
+            "state": "blocked",
+            "run_id": "run-synthetic",
+            "process_running": False,
+            "reason": {"code": "Authorization", "message": "Bearer synthetic-composed-secret"},
+            "active": {
+                "role": "Authorization:",
+                "invocation_id": "Bearer synthetic-active-secret",
+                "session_id": "ses-safe",
+                "status": "running",
+            },
+            "last_event": None,
+        }
+        rendered = format_status(projected)
+        self.assertIn("Status detail withheld: unsafe composed text", rendered)
+        self.assertNotIn("synthetic-composed-secret", rendered)
+        self.assertNotIn("synthetic-active-secret", rendered)
 
     def test_credential_scan_handles_bounded_non_uri_text(self) -> None:
         """A bounded artifact-sized benign string cannot trigger URI-pattern backtracking."""

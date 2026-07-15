@@ -333,6 +333,7 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
         or not isinstance(audit["pre_ci_max_rounds"], int)
         or isinstance(audit["pre_ci_max_rounds"], bool)
         or audit["pre_ci_max_rounds"] <= 0
+        or audit["pre_ci_round"] > audit["pre_ci_max_rounds"]
     ):
         raise ControllerError("corrupt_state", "State audit counters are invalid")
     if audit["pre_ci_round"] != 0 or any(

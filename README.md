@@ -84,7 +84,9 @@ sprint-loop stop --root <sprint-repository>
 In Sprint 2, `run` requires an already-running OpenCode server rooted at the
 sprint repository. The URL must be a credential-free absolute HTTP(S) origin,
 such as `http://127.0.0.1:4096`; paths, query strings, fragments, and user-info
-are rejected. A trailing port separator without a port, such as
+are rejected. The complete supplied URL is also scanned for conventional ASCII
+named-value and provider-token credentials before normalization. A trailing port
+separator without a port, such as
 `http://127.0.0.1:`, is also invalid rather than selecting the default port.
 HTTP is only appropriate on the trusted local mkchad transport;
 use HTTPS and server authentication outside that boundary. Supported OpenCode
@@ -241,6 +243,8 @@ controller writes a concise sanitized diagnostic that the session may remain
 active.
 
 Runtime readers and writers use descriptor-anchored paths and distinct controller-owned Git-metadata lock directories. Git-managed files such as `HEAD` and `config` are never lock anchors because ordinary Git operations can replace them. State/event payloads reject credential-bearing keys, provider tokens (including variable-length stateless GitHub App installation tokens shaped `ghs_<APPID>_<JWT>`), and every conventionally serialized ASCII URI query value or fragment regardless of its key. CLI diagnostics redact those values along with URI user-info and HTTP authorization values. The controller and Sprint 3 plugin use the same explicit ASCII case-folding and ASCII-whitespace credential grammar: conventional ASCII credentials reject, while Unicode lookalike letters and separators are unsupported near misses rather than locale-dependent matches. GitLab forms include `glpat-`, `glcbt-`, `glptt-`, `glrt-`, `glimt-`, `glsoat-`, `gldt-`, `glrtr-`, `glft-`, `glagent-`, `glwt-`, `glffct-`, and `gloas-`. URI user-info is recognized for every URI scheme, including database and SSH URLs.
+Human status scans each final composed line as well as retained fields so safe
+fragments cannot join into a printed authorization or named-value credential.
 
 Transcript sanitization applies the same recognizable-credential checks to
 opaque object keys and values. A collision introduced by safe key redaction is

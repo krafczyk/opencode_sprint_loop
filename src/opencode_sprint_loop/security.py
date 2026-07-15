@@ -31,7 +31,7 @@ _PROVIDER_TOKEN = (
 _URI = r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*://"
 _URI_QUERY_OR_FRAGMENT = (
     rf"{_URI}[\x21-\x22\x24-\x3e\x40-\x7e]+"
-    rf"(?:\?[\x21-\x22\x24-\x7e]+|#[\x21-\x7e]+)"
+    rf"(?:\?#[\x21-\x7e]+|\?[\x21-\x22\x24-\x7e]+|#[\x21-\x7e]+)"
 )
 _CREDENTIAL_VALUE = re.compile(
     rf"(?:\b(?:authorization|proxy-authorization){_ASCII_WS}*:{_ASCII_WS}*"

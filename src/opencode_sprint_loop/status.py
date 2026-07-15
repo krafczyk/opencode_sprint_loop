@@ -14,6 +14,7 @@ from .invocations import validate_invocation_records
 from .locking import exclusive_lock_pid
 from .paths import RuntimePaths
 from .safeio import open_directory, path_exists, require_current_directory
+from .security import contains_credential
 from .state import load_state_at, process_start_identity
 
 
@@ -248,8 +249,21 @@ def validate_persistence(
 
 def format_status(status: dict[str, Any]) -> str:
     """Render concise human-readable status."""
+
+    def safe_line(line: str) -> str:
+        return "Status detail withheld: unsafe composed text" if contains_credential(line) else line
+
     if not status["run_exists"]:
-        return f"Sprint root: {status['sprint_root']}\nState: no run\n"
+        return (
+            "\n".join(
+                safe_line(line)
+                for line in (
+                    f"Sprint root: {status['sprint_root']}",
+                    "State: no run",
+                )
+            )
+            + "\n"
+        )
     sprint = status["sprint"]
     reason = status["reason"]
     lines = [
@@ -272,4 +286,4 @@ def format_status(status: dict[str, Any]) -> str:
         lines.append(
             f"Last event: {status['last_event']['type']} ({status['last_event']['timestamp']})"
         )
-    return "\n".join(lines) + "\n"
+    return "\n".join(safe_line(line) for line in lines) + "\n"

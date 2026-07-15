@@ -449,6 +449,43 @@ configuration exists, so S3-TEST-016 remains unchecked. S3-MKCHAD-008,
 S3-DETACH-006, S3-DEMO-002 through S3-DEMO-010, S3-REVIEW-011,
 S3-DONE-001, S3-DONE-002, S3-DONE-005, S3-DONE-010, and S3-DONE-011 remain unchecked.
 
+### Repair-round-6 evidence (2026-07-15)
+
+Auditor pass-6 findings PASS6-001 through PASS6-012 were repaired in pushed
+plugin commit `b5036ee`, before this parent gitlink update, without accessing
+live mkchad state or closing an external gate. Detached `run` now uses an unreferenced luv
+process with stdout/stderr connected to `/dev/null`; the process-level child
+writes both streams after Neovim exits before recording completion. Complete
+resolved server/web URLs use the shared ASCII recognizer before argv/browser use.
+Credential parity now covers nested authorization candidates and `?#fragment`.
+Final plugin and controller human lines cannot compose split credential fields.
+
+Resolver deliveries remain cancellable through scheduled consumption, every
+plugin predicate fails during exit, browser handler completion is observed
+asynchronously, CA readability/type checks use asynchronous libuv
+open/fstat/close callbacks, and public status tests cover resolver and
+start/resume/stop overlap lifecycles independently. No-run renders process and
+controller-version evidence, pre-CI rounds cannot exceed their maximum, and
+zero `run`/`resume` process exit has a distinct bounded notice that makes no
+workflow-terminal claim. PASS6-013 URL-authority compatibility remains P2 with
+disposition `defer`, assigned to Sprint 8 hardening; no compatibility widening
+was implemented.
+
+Focused controller tests passed (`3`). The final complete plugin command passed
+with `534` assertions. The successful isolated controller rerun passed `213`
+tests with one opt-in real-server test skipped. An earlier 300-second full-suite
+attempt timed out after partial output that included one failure marker but no
+final report; it is not claimed as verification.
+Compilation, Ruff lint/format checks, strict mypy, package build, and a fresh
+disposable wheel-install help/version smoke passed. The first install smoke
+completed its checks but hit a zsh read-only bookkeeping variable afterward; a
+fresh corrected invocation passed and removed its disposable root.
+`git diff --check` passed in both repositories. No synchronous `fs_stat` or
+`filereadable` call remains under plugin Lua. No Lua formatter/linter is
+configured, so S3-TEST-016 and S3-DONE-005 remain unchecked. S3-MKCHAD-008,
+S3-DETACH-006, S3-DEMO-002 through S3-DEMO-010, S3-REVIEW-011, S3-DONE-001,
+S3-DONE-002, S3-DONE-010, and S3-DONE-011 remain unchecked.
+
 - [x] **S3-REVIEW-001** Audit implementation against `docs/threat_model.md`, `docs/audit_policy.md`, and Sprint 3's plugin-specific failure model.
 - [x] **S3-REVIEW-002** Prioritize ordinary malformed setup, process failure, malformed status, timer races, credential exposure, and live-environment mistakes.
 - [x] **S3-REVIEW-003** Confirm no shell interpolation path exists.

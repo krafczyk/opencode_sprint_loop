@@ -31,7 +31,7 @@ from .invocations import (
     reconcile_part_tool,
     validate_part_association,
 )
-from .security import external_utf8_bytes
+from .security import contains_credential, external_utf8_bytes
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 10
@@ -91,6 +91,7 @@ def parse_server_url(value: str) -> str:
         or not value
         or _CONTROL.search(value)
         or re.search(r"%(?![0-9A-Fa-f]{2})", value)
+        or contains_credential(value)
     ):
         raise ControllerError(
             "invalid_server_url", "Server URL must be a valid credential-free origin"
