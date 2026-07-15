@@ -853,24 +853,34 @@ The plugin is developed in the separate `opencode_sprint_loop.lua` repository.
 
 ### 20.2 Setup and Lua API
 
-The plugin targets Neovim 0.12. `setup()` must be called before any plugin command or public action. It requires explicit sprint-root and server-URL values or callbacks, accepts an executable value or callback defaulting to `sprint-loop`, and accepts an optional OpenCode web-URL value or callback. A representative API is:
+The plugin targets Neovim 0.12. `setup()` must be called before any plugin command or public action. It requires explicit sprint-root and server-URL values or callbacks, accepts an executable value or callback defaulting to `sprint-loop`, and accepts optional OpenCode web-URL and server-CA-certificate values or callbacks. URL callbacks may return synchronously or resolve through one completion callback so the generic plugin can consume mkchad without hard-coding it. A representative API is:
 
 ```lua
+local function mkchad_url(done)
+  local server = vim.g.opencode_opts and vim.g.opencode_opts.server
+  if not server or type(server.url) ~= "function" then
+    done(nil, "mkchad OpenCode URL resolver is unavailable")
+    return
+  end
+  server.url(done)
+end
+
 require("opencode_sprint_loop").setup({
   executable = "sprint-loop",
   sprint_root = function()
     return vim.fn.getcwd()
   end,
-  server_url = function()
-    return require("mkchad").opencode_server_url()
-  end,
-  web_url = function()
-    return require("mkchad").opencode_web_url()
+  server_url = mkchad_url,
+  web_url = mkchad_url,
+  server_ca_cert = function()
+    return vim.g.opencode_opts.server.ca_cert()
   end,
 })
 ```
 
-The exact mkchad function names are integration details, not assumptions the generic plugin may hard-code.
+The exact mkchad adapter names are integration details, not assumptions the generic plugin may hard-code. This example reads existing server information only; it does not call mkchad's server ensure/start operation.
+
+Resolving configuration must not start or replace an OpenCode server. When a server CA certificate is configured, the plugin supplies it only to controller child processes through an inherited environment override such as `SSL_CERT_FILE`; it does not place the path in argv or configure browser trust.
 
 The module also exposes asynchronous `start()`, `progress()`, `pause()`, `resume()`, `stop()`, and `open_session()` methods. They back the corresponding commands, resolve relevant callbacks when invoked, report through the same UI, and do not expose a stable process-handle return contract.
 

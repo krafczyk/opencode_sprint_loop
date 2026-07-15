@@ -267,7 +267,7 @@ Primary implementation occurs in the `opencode_sprint_loop.lua` repository. The 
 ### 9.3 Deliverables
 
 - Conventional Lua plugin layout.
-- Required `setup()` for Neovim 0.12 with explicit sprint-root and server-URL values or resolvers, an optional controller executable defaulting to `sprint-loop`, and an optional web-URL value or resolver.
+- Required `setup()` for Neovim 0.12 with explicit sprint-root and server-URL values or resolvers, an optional controller executable defaulting to `sprint-loop`, optional web-URL and server-CA-certificate values or resolvers, and callback-style URL resolution for mkchad compatibility.
 - Public asynchronous Lua methods `start()`, `progress()`, `pause()`, `resume()`, `stop()`, and `open_session()`.
 - Asynchronous command execution and output capture.
 - Detached launch of `sprint-loop run`.
@@ -292,6 +292,8 @@ Primary implementation occurs in the `opencode_sprint_loop.lua` repository. The 
 `setup()` must be called before any public Lua action or command is used. `sprint_root` and `server_url` must be configured explicitly. The plugin must resolve relevant callbacks at command execution time rather than only at setup, because server URLs and working directories can change.
 
 `SprintLoopStart` must reject a missing server URL before launching the process. It passes the URL and sprint root explicitly.
+
+The plugin must support mkchad's callback-style existing-server URL resolver without calling a server-start or ensure operation. When a server CA certificate is configured, the plugin supplies it to the controller subprocess through a protected child environment such as `SSL_CERT_FILE`; browser trust remains an operator concern.
 
 `SprintLoopProgress` must call `status --json` asynchronously and render state, reason, active role/session, active invocation status, pending-interaction metadata, commits, audit round, CI state, checklist counts, and last event when present. It uses a temporary read-only floating buffer, displays blocked, failed, and `waiting_for_user` conditions prominently, and ignores unknown additional JSON fields for forward compatibility.
 

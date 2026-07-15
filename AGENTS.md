@@ -47,6 +47,11 @@ The V1 final software specification is authoritative. If an implementation decis
 - Keep CLI JSON output stable and separate diagnostics from JSON standard output.
 - Avoid speculative support for multi-repository workflows, other CI providers, custom dashboards, or multiplexers in V1.
 
+## mkchad Reference Safety
+
+- `~/.config/mkchad` is a live user environment. Never edit it or run Sprint Loop development tests against its configuration, state, server processes, or credentials.
+- For mkchad integration work, clone the current remote `mkchad` branch into a disposable directory outside the live configuration and use isolated XDG config, state, data, and cache paths for tests.
+
 ## Git Submodule Workflow
 
 Changes under `opencode_sprint_loop.lua/` belong to the plugin repository. Commit and push plugin changes from inside that repository first, then update the parent repository's submodule pointer in a separate parent commit. Do not mix unrelated controller and plugin changes.
