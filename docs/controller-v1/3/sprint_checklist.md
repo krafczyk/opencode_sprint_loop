@@ -322,6 +322,32 @@ mkchad CA accessor demonstration remains unchecked. No live server, TLS state,
 credentials, browser, provider, model, or real OpenCode execution probe was
 discovered or reused.
 
+### Repair-round-2 evidence (2026-07-15)
+
+Auditor pass-2 findings 1 through 9 were repaired in pushed plugin commit
+`4c9361b`, before this parent gitlink update, without accessing live mkchad state
+or closing an external demonstration gate. Controller coverage now proves that an interrupted
+durable active invocation projects `running` while `process_running` is false.
+The plugin accepts that truthful combination, enforces state-conditional reason
+semantics, arbitrates function resolvers for the complete five-second window,
+rejects malformed web path prefixes, reports external command failures without
+stderr disclosure, distinguishes truncated status output, and requires a
+readable regular-file CA.
+
+The repository fake and production `vim.system` adapter drive status success,
+malformed output, non-zero credential/control-bearing stderr, oversized output,
+delayed watcher activation/shutdown, interrupted-active session retrieval, and
+real child observation of `SSL_CERT_FILE` without printing its path or content.
+The complete plugin command passed with `184` assertions. The focused
+interrupted-active controller test passed, followed by the complete controller
+suite (`210` passing, one opt-in real-server test skipped), compilation, Ruff
+lint and format checks, strict mypy, build, and a disposable clean-wheel-install
+smoke. `git diff --check` passed in both repositories. No Lua formatter or
+linter is configured, so S3-TEST-016 remains unchecked. The documented
+safety-bounded real procedure keeps S3-DOC-013 checked, but S3-DETACH-006,
+S3-MKCHAD-008, S3-DEMO-002 through S3-DEMO-010, S3-DONE-010, and the independent
+audit gates remain unchecked.
+
 - [x] **S3-REVIEW-001** Audit implementation against `docs/threat_model.md`, `docs/audit_policy.md`, and Sprint 3's plugin-specific failure model.
 - [x] **S3-REVIEW-002** Prioritize ordinary malformed setup, process failure, malformed status, timer races, credential exposure, and live-environment mistakes.
 - [x] **S3-REVIEW-003** Confirm no shell interpolation path exists.

@@ -245,6 +245,7 @@ Calling setup again replaces the prior configuration, cancels prior plugin timer
 - Permit server and web URL resolvers either to return a string synchronously or to accept one completion callback and invoke it exactly once as `done(value, error)`.
 - Bound asynchronous URL resolution to a documented fixed timeout; Sprint 3 uses five seconds unless real integration evidence requires a different bounded value.
 - Reject a resolver that both returns a value and invokes its completion callback, invokes the callback more than once, or completes after its generation was replaced.
+- Hold a function resolver's candidate result through the five-second arbitration window before consuming it. This preserves synchronous return support while allowing a delayed callback-after-return or duplicate callback within the supported window to be rejected before an action launches.
 - Catch callback errors and render a concise diagnostic without a Lua traceback in normal use.
 - Require resolved values to be non-empty strings without NUL or control characters.
 - Never include the resolved server URL in routine notifications or progress buffers.
@@ -323,7 +324,7 @@ The detached-lifetime test must use a child process that survives the launching 
 
 Sprint 3 exposes pause, resume, and stop but does not implement their controller semantics. Against the Sprint 2 controller they return `feature_not_implemented` and make no state or Git mutation.
 
-The plugin displays that response accurately. It must not alter status, kill the controller, retry the command, or claim that a pause, resume, or stop occurred.
+The plugin reports that rejection accurately as a controller-command failure without copying external standard error into the notification. It must not alter status, kill the controller, retry the command, or claim that a pause, resume, or stop occurred.
 
 ## 9. Additive Controller Status Contract
 
@@ -407,6 +408,8 @@ The plugin treats `status --json` as the sole source of workflow truth. It must:
 - Require status schema version `1` and a non-empty controller version.
 - Validate every required stable top-level field before rendering.
 - Validate conditional nested objects for no-run, inactive, running, and waiting projections.
+- Accept a durable active `running` invocation when `process_running` is false. This is truthful interrupted-run evidence projected by the controller; it does not mean the controller process is alive, and the watcher still stops on `process_running: false`.
+- Require a reason for `blocked`, `failed`, and `stopped`; for other valid states the reason remains nullable as defined by the durable state contract.
 - Require `question_count` to be a positive integer and reject booleans.
 - Require `asked_at` to be a non-empty timestamp string suitable for display.
 - Bound status output before JSON decoding and bound individual displayed strings.
@@ -573,6 +576,7 @@ Error rules:
 - Keep messages concise and actionable.
 - Bound captured output before retaining or displaying it.
 - Prefer the controller's bounded standard-error diagnostic on non-zero exit, but do not parse it into workflow state.
+- Do not copy external standard error into a notification when credential and control-character sanitization cannot be proven complete; a concise generic command-failure diagnostic directing the user to progress is acceptable.
 - Avoid normal Lua tracebacks for expected setup, process, JSON, or browser failures.
 - Never echo a rejected server or web URL verbatim when it may contain user-info, query data, or fragments.
 - Do not open the progress buffer with partial or unvalidated status.

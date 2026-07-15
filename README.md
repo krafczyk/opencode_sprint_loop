@@ -27,6 +27,16 @@ separate Neovim plugin provides asynchronous command delegation and status
 presentation only; it does not implement workflow decisions. A successful probe intentionally ends with
 `blocked / execution_not_implemented` and a non-zero exit status.
 
+The Sprint 3 plugin is implemented in the `opencode_sprint_loop.lua/` submodule.
+Its required `setup()` performs one asynchronous local status observation so a
+reopened Neovim can discover an existing controller. It polls every two seconds
+only while controller status confirms `process_running: true` (or while a newly
+launched command is still being discovered), permits one status child at a
+time, deduplicates pending-question notifications in memory, and stops when the
+controller is inactive. Durable interrupted status may still truthfully retain
+an active invocation with `status: "running"` while `process_running` is false;
+that evidence is displayable and openable but does not keep the watcher alive.
+
 ## Requirements
 
 - Linux mkchad container environment.
@@ -257,7 +267,9 @@ Use `status --json` for integrations. It emits one JSON object and writes diagno
 and `interaction`. For an inactive persisted run, `status` and `interaction`
 are null. The Sprint 2 probe projects `status: "running"` and
 `interaction: null`. These are backward-compatible, read-only status additions:
-Sprint 3 does not persist real question state or permit probe questions. Status remains local and never exposes the server URL, prompt,
+Sprint 3 does not persist real question state or permit probe questions. A
+durable active invocation continues to project `status: "running"` if the
+controller is interrupted and `process_running` becomes false. Status remains local and never exposes the server URL, prompt,
 result, transcript, or credentials.
 
 When no run exists, `run_exists` is `false`, `process_running` is `false`, and every run-specific field from `run_id` through `updated_at` is `null`. No-run status does not create worktree or runtime files. For a placeholder run, `active` is an object containing null `role`, `invocation_id`, `session_id`, `status`, and `interaction` fields; `last_event` identifies the final `run.blocked` record.
@@ -314,8 +326,9 @@ accepted only if it completed strictly before the deadline and any cancellation
 timestamp. A response completed before a later cancellation is retained, while
 late results are ignored. Timeout or signal cancellation sends one abort and checks only session status, at most
 once per second; it never retries the non-idempotent prompt.
-Builder handoff, commits, audits, CI, functional controls/recovery, and Neovim
-remain deliberately unimplemented.
+Builder handoff, commits, audits, CI, and functional controls/recovery remain
+deliberately unimplemented. The Sprint 3 Neovim launcher/status client is
+implemented, but it does not supply any of those workflow behaviors.
 
 ### Repeatable sanitized real-server demonstration
 

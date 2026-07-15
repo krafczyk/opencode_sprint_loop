@@ -2255,6 +2255,21 @@ class OpenCodeExecutionTests(unittest.TestCase):
         state, _ = validate_persistence(runtime_paths(root, "foundation", 1), config)
         self.assertEqual(state["state"], "validating")
         self.assertIsNotNone(state["active_invocation"])
+        status_output = StringIO()
+        with redirect_stdout(status_output):
+            self.assertEqual(cli._status(str(root), True), 0)
+        projected = json.loads(status_output.getvalue())
+        self.assertFalse(projected["process_running"])
+        self.assertEqual(
+            projected["active"],
+            {
+                "role": "auditor",
+                "invocation_id": "0001-auditor",
+                "session_id": "ses_fake_0001",
+                "status": "running",
+                "interaction": None,
+            },
+        )
 
     def test_each_terminal_write_boundary_preserves_only_coherent_prefixes(self) -> None:
         """Result, transcript, agent-event, and run-block faults never imply false success."""
