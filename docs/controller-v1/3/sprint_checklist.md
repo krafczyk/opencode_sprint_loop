@@ -375,6 +375,44 @@ formatter or linter is configured or installed, so S3-TEST-016 remains
 unchecked. S3-MKCHAD-008, S3-DETACH-006, S3-DEMO-002 through S3-DEMO-010,
 S3-DONE-010, S3-REVIEW-011, and S3-DONE-011 remain unchecked.
 
+### Repair-round-4 evidence (2026-07-15)
+
+Auditor pass-4 findings 1 through 4 were repaired in pushed plugin commit
+`82bcde8`, before this parent gitlink update.
+Unknown setup fields now produce only fixed `invalid_setup` without retaining or
+displaying their names, with public-path tests for synthetic credential,
+credential-bearing URL, control-bearing, and oversized keys. All plugin status
+queries now share one serialized child slot. Setup and watcher replacement,
+start/resume observation replacement, repeated setup, stop, and `VimLeavePre`
+cancel only retained read-only status children and wait for their callbacks
+before replacement; tests prove the detached/controller process handles are
+never cancellation targets.
+
+The Lua status recognizer now follows the controller recognizer in
+`src/opencode_sprint_loop/security.py`, including each provider token family's
+exact suffix alphabet and minimum length. Every provider family has a rejecting
+synthetic token and an accepted unsupported near-miss control. The public setup
+matrix proves exact default executable `sprint-loop`, string and function forms
+for every option, callback-style server and web URLs, function-valued CA, and
+the resulting public status/action/session argv, browser route, and
+`SSL_CERT_FILE` wiring. The Auditor-requested setup/default, watcher/process,
+credential-safety, and test-matrix checklist reversions were re-evaluated and
+remain checked only on this coverage.
+
+The focused development run passed with `302` assertions; after the final
+global public-status serialization assertion, the complete plugin command
+passed with `303` assertions. Two focused controller credential-recognizer tests
+also passed.
+The complete controller suite passed (`211` tests, one opt-in real-server test
+skipped), followed by compilation, Ruff lint and format checks, strict mypy,
+package build, and a fresh disposable wheel-install help/version smoke.
+`git diff --check` passed in the plugin repository before this evidence update;
+final checks in both repositories are recorded below. No Lua formatter or
+linter is configured or installed, so S3-TEST-016 remains unchecked.
+S3-MKCHAD-008, S3-DETACH-006, S3-DEMO-002 through S3-DEMO-010, S3-DONE-010,
+S3-REVIEW-011, and S3-DONE-011 remain unchecked; no external mkchad private-CA,
+real probe, browser, independent-audit, or overall-completion gate was closed.
+
 - [x] **S3-REVIEW-001** Audit implementation against `docs/threat_model.md`, `docs/audit_policy.md`, and Sprint 3's plugin-specific failure model.
 - [x] **S3-REVIEW-002** Prioritize ordinary malformed setup, process failure, malformed status, timer races, credential exposure, and live-environment mistakes.
 - [x] **S3-REVIEW-003** Confirm no shell interpolation path exists.
