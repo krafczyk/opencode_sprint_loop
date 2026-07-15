@@ -45,7 +45,7 @@ _SPRINT_ONE_TRANSITIONS = {
 }
 
 _EVENT_FIELDS = {"schema_version", "sequence", "timestamp", "run_id", "type", "state", "payload"}
-_SUPPORTED_SERVER_VERSION = re.compile(r"^1\.17\.\d+$")
+_SUPPORTED_SERVER_VERSION = re.compile(r"^1\.(?:17|18)\.(?:0|[1-9]\d*)$")
 
 
 def _bounded_event_string(value: Any) -> bool:

@@ -72,7 +72,7 @@ An item may be checked only when its implementation, tests, and required documen
 
 - [x] **S2-HEALTH-001** Call `GET /global/health` against the supplied server.
 - [x] **S2-HEALTH-002** Require an object with `healthy: true` and a non-empty version string.
-- [x] **S2-HEALTH-003** Accept supported release versions `>=1.17.0` and `<1.18.0`.
+- [x] **S2-HEALTH-003** Accept supported release versions `>=1.17.0` and `<1.19.0`.
 - [x] **S2-HEALTH-004** Reject malformed, pre-release, older, and newer-minor versions with `unsupported_server_version`.
 - [x] **S2-HEALTH-005** Distinguish unavailable, unauthenticated, unhealthy, malformed, oversized, and incompatible server responses.
 - [x] **S2-HEALTH-006** Persist only the validated version after durable run creation.
@@ -99,8 +99,8 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S2-CAP-008** Treat provider/model presence as preflight evidence rather than proof of quota, billing, or inference success.
 - [x] **S2-CAP-009** Use only the configured Auditor agent and model for the Sprint 2 probe.
 
-Real-server verification on 2026-07-13 confirmed that supported OpenCode
-`1.17.18` reports configured provider records through
+Real-server verification confirmed that supported OpenCode `1.17.18` and
+`1.18.1` report configured provider records through
 `/config/providers.providers`, catalog records through `/provider.all`, and
 connection state through `/provider.connected`; the adapter and deterministic
 fixtures use those documented shapes.
@@ -122,7 +122,7 @@ fixtures use those documented shapes.
 - [x] **S2-PROBE-001** Use the configured Auditor as the non-mutating Sprint 2 probe role.
 - [x] **S2-PROBE-002** Build a deterministic title `[<multisprint>/<sprint>] auditor <sequence> execution probe`.
 - [x] **S2-PROBE-003** Create a deterministic prompt prohibiting repository, shell, web, task, MCP, and mutation tools while permitting only the required built-in structured-output mechanism.
-- [x] **S2-PROBE-003A** Create the probe session with the exact ordered OpenCode 1.17.18 wildcard-deny then `StructuredOutput`-allow permission ruleset that overrides configured Auditor tool permissions.
+- [x] **S2-PROBE-003A** Create the probe session with the exact ordered reviewed OpenCode 1.17.x/1.18.x wildcard-deny then `StructuredOutput`-allow permission ruleset that overrides configured Auditor tool permissions.
 - [x] **S2-PROBE-004** Exclude irrelevant product specifications, source content, findings, and commit-message paths from the probe prompt.
 - [x] **S2-PROBE-005** Keep server URL, credentials, and environment data out of the prompt.
 - [x] **S2-RESULT-001** Request `json_schema` structured output with exact fields and no additional properties.
@@ -346,7 +346,7 @@ fixtures use those documented shapes.
 - [x] **S2-TEST-008A** Cover real process delivery of `SIGINT` and `SIGTERM`, orderly abort, durable interruption, and exit statuses `130`/`143`.
 - [x] **S2-TEST-008B** Cover ambiguous prompt submission and status/message transport failures attempting one bounded abort.
 - [x] **S2-TEST-009** Cover every structured-result validation rule.
-- [x] **S2-TEST-009A** Cover the exact ordered OpenCode 1.17.18 permission request/response, deny-only fake rejection, last-match `StructuredOutput` allowance, representative shell/repository/web/task/MCP/external denials, and rejection of non-`StructuredOutput` tool evidence.
+- [x] **S2-TEST-009A** Cover the exact ordered reviewed OpenCode 1.17.x/1.18.x permission request/response, deny-only fake rejection, last-match `StructuredOutput` allowance, representative shell/repository/web/task/MCP/external denials, and rejection of non-`StructuredOutput` tool evidence.
 - [x] **S2-TEST-010** Cover invocation artifact schemas, atomic persistence, and fault injection.
 - [x] **S2-TEST-010A** Inject failure after each terminal write boundary and verify documented prefixes never become success.
 - [x] **S2-TEST-010B** Reject every cross-record identity, status, availability, truncation, and path mismatch.
@@ -364,7 +364,7 @@ fixtures use those documented shapes.
 ## 26. Documentation
 
 - [x] **S2-DOC-001** Update README Sprint status to describe implemented OpenCode execution behavior accurately.
-- [x] **S2-DOC-002** Document the supported OpenCode `1.17.x` compatibility range.
+- [x] **S2-DOC-002** Document the supported OpenCode `1.17.x` and `1.18.x` compatibility range.
 - [x] **S2-DOC-003** Document the requirement for an already-running server rooted at the sprint repository.
 - [x] **S2-DOC-004** Document accepted URL syntax and the trusted-local HTTP limitation.
 - [x] **S2-DOC-005** Document inherited Basic authentication without real credential examples.
@@ -631,9 +631,27 @@ bodies, exact schema and prompt, provider/model route, permission order, and no
 `retryCount`. No raw provider response, transcript, credential, fixture, log,
 virtual environment, build runtime data, or server remained after the demo.
 
+On 2026-07-15, the compatibility window was deliberately extended to
+`>=1.17.0, <1.19.0` after review of the documented and live OpenCode `1.18.1`
+API. Canonical `1.18.0` and `1.18.1` release fixtures pass health and durable
+state/event validation, while `1.19.0`, prereleases, and leading-zero patches
+fail closed. A freshly built wheel then completed the full authenticated
+external-server demonstration against installed OpenCode `1.18.1` in a clean
+disposable real-submodule fixture. Status exposed active `auditor` and
+`0001-auditor`; the session had the expected title, null parent, and ordered
+`[* deny, StructuredOutput allow]` permissions. Sanitized result, transcript,
+and metadata records completed; events were ordered `run.started`,
+`state.entered`, `server.validated`, `agent.started`, `agent.completed`, and
+`run.blocked`; state persisted server version `1.18.1` and ended at
+`blocked/execution_not_implemented`. The managed repository remained clean and
+the sprint repository contained only expected uncommitted runtime records. The
+server, fixture, credentials, logs, virtual environment, provider output, and
+runtime records were removed after recording this summary. The compatibility
+change reopens the fresh-audit gate before Sprint 2 is reconfirmed complete.
+
 ## 30. Completion Gate
 
-- [x] **S2-DONE-001** Every applicable checklist item above is checked.
+- [ ] **S2-DONE-001** Every applicable checklist item above is checked.
 - [x] **S2-DONE-002** Every Sprint 2 acceptance criterion in `sprint_spec.md` is demonstrably satisfied.
 - [x] **S2-DONE-003** Narrow unit, fake-runner, fake-server, persistence, and repository tests pass during development.
 - [x] **S2-DONE-004** The complete default test suite passes without external network or credentials.
@@ -644,4 +662,4 @@ virtual environment, build runtime data, or server remained after the demo.
 - [x] **S2-DONE-009** No credentials, generated demonstration state, build artifacts, temporary repositories, or real transcripts are tracked.
 - [x] **S2-DONE-010** Documentation describes actual Sprint 2 behavior and does not claim deferred features.
 - [x] **S2-DONE-011** The opt-in real-server exit demonstration has been performed against a supported server.
-- [x] **S2-DONE-012** A fresh audit reports no unresolved P0 or P1 findings under the current threat model.
+- [ ] **S2-DONE-012** A fresh audit reports no unresolved P0 or P1 findings under the current threat model.

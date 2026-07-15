@@ -7,7 +7,7 @@ import unittest
 from opencode_sprint_loop.errors import ControllerError
 from opencode_sprint_loop.events import validate_event
 from opencode_sprint_loop.security import validate_safe_data
-from opencode_sprint_loop.state import is_rfc3339_utc
+from opencode_sprint_loop.state import SUPPORTED_SERVER_VERSION, is_rfc3339_utc
 
 
 class StateContractTests(unittest.TestCase):
@@ -35,6 +35,15 @@ class StateContractTests(unittest.TestCase):
                     "payload": {},
                 }
                 self.assertEqual(validate_event(event), event)
+
+    def test_supported_server_version_window_is_canonical(self) -> None:
+        """Durable state accepts reviewed 1.17/1.18 releases and rejects other forms."""
+        for version in ("1.17.0", "1.17.18", "1.18.0", "1.18.1", "1.18.999"):
+            with self.subTest(version=version):
+                self.assertIsNotNone(SUPPORTED_SERVER_VERSION.fullmatch(version))
+        for version in ("1.16.99", "1.19.0", "1.18.01", "1.18.1-beta.1", "not-a-version"):
+            with self.subTest(version=version):
+                self.assertIsNone(SUPPORTED_SERVER_VERSION.fullmatch(version))
 
     def test_controller_error_retains_machine_reason_code(self) -> None:
         """Structured expected errors preserve their public machine code."""

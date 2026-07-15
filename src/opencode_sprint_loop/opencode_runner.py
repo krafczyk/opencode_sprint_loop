@@ -35,12 +35,13 @@ from .security import external_utf8_bytes
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 10
-# Sprint 2 supports only SemVer release versions in the documented 1.17.x
-# compatibility window.  In particular, leading-zero numeric components are
-# malformed rather than an alternate spelling of a supported release.
-_VERSION = re.compile(r"^1\.17\.(?:0|[1-9]\d*)$")
+# Sprint 2 supports only SemVer release versions in the documented 1.17.x and
+# 1.18.x compatibility window. Leading-zero numeric components are malformed
+# rather than an alternate spelling of a supported release.
+_VERSION = re.compile(r"^1\.(?:17|18)\.(?:0|[1-9]\d*)$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
-# OpenCode 1.17.18 applies matching rules in order and the final matching rule
+# Supported OpenCode 1.17.x and 1.18.x releases apply matching rules in order
+# and the final matching rule
 # wins.  Keep the narrow StructuredOutput exception after the wildcard deny.
 _PERMISSIONS = (
     {"permission": "*", "pattern": "*", "action": "deny"},

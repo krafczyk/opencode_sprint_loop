@@ -92,9 +92,10 @@ These exclusions do not permit controller-authored credential exposure, destruct
 - `SIGKILL`, container loss, or host loss may prevent a final abort or metadata update. The session ID must already be durable before prompt submission so later diagnosis is possible.
 - The controller validates configured model presence, not provider billing, quota, credential expiry, or successful inference before the probe.
 - Transcript sanitization recognizes conventional credential patterns. Protection against secrets encoded specifically to evade those rules is outside the current trusted-user threat model.
-- OpenCode `1.17.18` may reject its stored structured prompt through the
-  message-list endpoint. Sprint 2 deliberately does not use that endpoint:
-  the documented synchronous message response is the terminal evidence source.
+- Exercised OpenCode `1.17.18` and `1.18.1` builds reject their stored structured
+  prompt through the message-list endpoint. Sprint 2 deliberately does not use
+  that endpoint: the documented synchronous message response is the terminal
+  evidence source.
 
 ## 4. Scope
 
@@ -268,11 +269,15 @@ The response must be an object containing:
 ```json
 {
   "healthy": true,
-  "version": "1.17.18"
+  "version": "1.18.1"
 }
 ```
 
-Sprint 2 initially supports release versions `>=1.17.0` and `<1.18.0`. Pre-release, malformed, older, and newer minor versions fail with `unsupported_server_version` until their documented API is reviewed and fixtures are updated deliberately.
+Sprint 2 supports release versions `>=1.17.0` and `<1.19.0`. The `1.18.x`
+extension was reviewed against the documented and live `1.18.1` API before the
+compatibility policy and fixtures were updated. Pre-release, malformed, older,
+and newer minor versions fail with `unsupported_server_version` until their API
+is reviewed and fixtures are updated deliberately.
 
 The version range is an adapter compatibility policy, not a claim that the OpenCode health endpoint negotiates an API version.
 
@@ -307,12 +312,12 @@ GET /provider
 
 Each configured `provider/model` value is split at the first `/` into OpenCode `providerID` and `modelID`. The provider must be connected/configured and the model must appear in its model map. A malformed or unavailable capability response fails closed.
 
-For supported OpenCode `1.17.x`, `GET /config/providers` supplies configured
-provider records under `providers`, while `GET /provider` supplies catalog
-records under `all` and connected provider IDs under `connected`. Provider
-records advertise models as object maps. The controller validates these
-documented collection shapes and requires every configured provider/model in
-both advertised record sets and the connected-ID collection.
+For supported OpenCode `1.17.x` and `1.18.x`, `GET /config/providers` supplies
+configured provider records under `providers`, while `GET /provider` supplies
+catalog records under `all` and connected provider IDs under `connected`.
+Provider records advertise models as object maps. The controller validates
+these documented collection shapes and requires every configured
+provider/model in both advertised record sets and the connected-ID collection.
 
 This check proves only advertised configuration. The real probe is the evidence that the selected Auditor model accepted and completed the request.
 
@@ -368,7 +373,7 @@ The probe uses:
 - Model: configured `models.auditor`.
 - A fresh top-level session with no parent or fork.
 
-The Auditor is selected because Sprint 2 requires a non-mutating invocation. The prompt explicitly prohibits repository, shell, web, task, MCP, and external-mutation tools. OpenCode `1.17.18` applies matching session permissions in order with the last match winning. The create request and returned effective permissions must therefore be exactly this ordered two-rule set:
+The Auditor is selected because Sprint 2 requires a non-mutating invocation. The prompt explicitly prohibits repository, shell, web, task, MCP, and external-mutation tools. Reviewed OpenCode `1.17.x` and `1.18.x` releases apply matching session permissions in order with the last match winning. The create request and returned effective permissions must therefore be exactly this ordered two-rule set:
 
 ```json
 [
@@ -893,7 +898,7 @@ The last event may be `server.validated`, `agent.started`, `agent.completed`, `a
 
 - Healthy supported server succeeds.
 - Connection refusal, timeout, TLS error, `401`, `403`, `404`, `500`, redirect, unhealthy response, malformed JSON, duplicate key, oversized body, and invalid field type fail distinctly.
-- Versions below `1.17.0`, at or above `1.18.0`, pre-release, and malformed versions fail.
+- Versions below `1.17.0`, at or above `1.19.0`, pre-release, and malformed versions fail.
 - Wrong `directory`, wrong `worktree`, and path aliases that do not canonicalize correctly fail.
 - Missing, duplicate, or malformed configured agents fail.
 - Missing connected provider or model fails.
@@ -916,8 +921,8 @@ The last event may be `server.validated`, `agent.started`, `agent.completed`, `a
   only the exact ordered two-rule request. It captures the complete session body
   and complete message body, including the agent, provider/model route, exact
   persisted prompt, complete JSON schema, and absence of `retryCount`.
-- Deterministic permission selection coverage models OpenCode `1.17.18`
-  last-match semantics: `StructuredOutput` is allowed by the final exception and
+- Deterministic permission selection coverage models reviewed OpenCode
+  `1.17.x`/`1.18.x` last-match semantics: `StructuredOutput` is allowed by the final exception and
   representative shell, repository, web, task, MCP, and external permissions
   remain denied. Direct-adapter and full-controller captures use the same fixture,
   route sequence, and request bodies.

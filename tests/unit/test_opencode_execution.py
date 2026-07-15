@@ -550,7 +550,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
             ServerValidationRequest(root, dict(config.agents), dict(config.models))
         )
         self.assertEqual(validated.url, parse_server_url(os.environ["SPRINT_LOOP_REAL_SERVER_URL"]))
-        self.assertRegex(validated.version, r"^1\.17\.\d+$")
+        self.assertRegex(validated.version, r"^1\.(?:17|18)\.\d+$")
 
     def test_server_preflight_capability_failures_are_specific(self) -> None:
         """Health, workspace, agent, and model validation fail in their owned categories."""
@@ -566,7 +566,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 },
             )
             valid = {
-                "/global/health": {"healthy": True, "version": "1.17.18"},
+                "/global/health": {"healthy": True, "version": "1.18.1"},
                 "/path": {"directory": str(root), "worktree": str(root)},
                 "/agent": [
                     {"name": "builder"},
@@ -590,7 +590,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 ),
                 (
                     "/global/health",
-                    {"healthy": True, "version": "1.18.0"},
+                    {"healthy": True, "version": "1.19.0"},
                     "unsupported_server_version",
                 ),
                 (
@@ -606,6 +606,11 @@ class OpenCodeExecutionTests(unittest.TestCase):
                 (
                     "/global/health",
                     {"healthy": True, "version": "1.17.018"},
+                    "unsupported_server_version",
+                ),
+                (
+                    "/global/health",
+                    {"healthy": True, "version": "1.18.01"},
                     "unsupported_server_version",
                 ),
                 (
@@ -1067,7 +1072,7 @@ class OpenCodeExecutionTests(unittest.TestCase):
             "blocking_reason": None,
         }
         fake = FakeAgentRunner(
-            ValidatedServer("http://127.0.0.1:4096", "1.17.18"),
+            ValidatedServer("http://127.0.0.1:4096", "1.18.1"),
             observations=[
                 InvocationObservation(
                     "idle", self._terminal_messages(completed), completed, False, False, True

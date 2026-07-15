@@ -77,7 +77,7 @@ are rejected. A trailing port separator without a port, such as
 `http://127.0.0.1:`, is also invalid rather than selecting the default port.
 HTTP is only appropriate on the trusted local mkchad transport;
 use HTTPS and server authentication outside that boundary. Supported OpenCode
-release versions are `>=1.17.0, <1.18.0`.
+release versions are `>=1.17.0, <1.19.0`.
 
 Basic authentication is inherited only from `OPENCODE_SERVER_PASSWORD` and,
 optionally, `OPENCODE_SERVER_USERNAME` (default `opencode` with a password).
@@ -199,7 +199,8 @@ sanitized bounded `transcript.json`. The event log records `run.started`,
 `run.blocked`; state ends at `blocked` with `execution_not_implemented`. No
 checkpoint commit is made until Sprint 4.
 
-The fresh Auditor probe uses OpenCode `1.17.18` last-match permission semantics:
+The fresh Auditor probe uses the reviewed OpenCode `1.17.x` and `1.18.x`
+last-match permission semantics:
 its complete ordered session permission set is first
 `{"permission":"*","pattern":"*","action":"deny"}`, then
 `{"permission":"StructuredOutput","pattern":"*","action":"allow"}`.
@@ -214,8 +215,9 @@ session. Every retained part must carry exact documented `sessionID` and
 `messageID` associations; the reconstructed prompt record retains the exact
 parent linkage. Every `tool` part requires a bounded documented `tool` string;
 a compatible `name` may only agree, never substitute, and only exact
-`StructuredOutput` is permitted. A present session-status entry must use the documented
-`1.17.x` object with a string `type`; only an absent entry means missing status.
+`StructuredOutput` is permitted. A present session-status entry must use the
+documented `1.17.x`/`1.18.x` object with a string `type`; only an absent entry
+means missing status.
 On timeout, uncertain terminal evidence, or cooperative `SIGINT`/`SIGTERM`, the
 controller sends exactly one best-effort abort, uses one monotonic ten-second
 confirmation deadline for every status-only follow-up observation, and records
