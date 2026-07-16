@@ -6,6 +6,28 @@ This repository contains the Python Sprint Loop Controller and its implementatio
 
 Do not confuse this source repository with a sprint-history repository created for running product sprints.
 
+## Parent Sprint Coordination
+
+When this checkout is used under `/data0/matthew/Projects/mkchad`, the parent
+workspace owns development-sprint selection. Read `../AGENTS.md` before sprint
+work. Do not independently choose the first incomplete sprint or infer a
+current sprint from tracker rows.
+
+This repository currently participates in the parent selector
+`controller-v1/3`, resolved by:
+
+- `../docs/sprints/controller-v1/sprint_plan.md`
+- `../docs/sprints/controller-v1/3/sprint_spec.md`
+- `../docs/sprints/controller-v1/3/sprint_checklist.md`
+- `docs/v1_final_software_specification.md`
+- `docs/threat_model.md`
+- `docs/audit_policy.md`
+
+If sprint work is requested from this child without an explicit parent-resolved
+selector, return to the coordination root or ask the user to select one. Keep
+the resolved selector and exact document paths fixed for all Builder, Auditor,
+and closeout handoffs. Normal controller work does not require sprint selection.
+
 ## Authoritative Documents
 
 Read these before changing behavior:
@@ -43,14 +65,16 @@ The V1 final software specification is authoritative. If an implementation decis
 
 ## Development Practices
 
-- Keep implementation within the current sprint and V1 specification.
+- Keep sprint implementation within the parent-resolved sprint and V1
+  specification.
 - Keep CLI JSON output stable and separate diagnostics from JSON standard output.
 - Avoid speculative support for multi-repository workflows, other CI providers, custom dashboards, or multiplexers in V1.
 
 ## mkchad Reference Safety
 
 - `~/.config/mkchad` is a live user environment. Never edit it or run Sprint Loop development tests against its configuration, state, server processes, or credentials.
-- For mkchad integration work, clone the current remote `mkchad` branch into a disposable directory outside the live configuration and use isolated XDG config, state, data, and cache paths for tests.
+- For isolated mkchad integration fixtures, use a task-specific directory under
+  `/tmp/opencode-mkchad` and isolated XDG config, state, data, and cache paths.
 
 ## Git Submodule Workflow
 
