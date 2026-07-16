@@ -2891,9 +2891,8 @@ class FoundationTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
         for document in (
             "docs/v1_final_software_specification.md",
-            "docs/multi_sprint_plan.md",
-            "docs/controller-v1/1/sprint_spec.md",
-            "docs/controller-v1/1/sprint_checklist.md",
+            "docs/threat_model.md",
+            "docs/audit_policy.md",
         ):
             self.assertTrue(any(name.endswith(f"/{document}") for name in names), document)
 

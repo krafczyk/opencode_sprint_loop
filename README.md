@@ -4,7 +4,7 @@ The OpenCode Sprint Loop Controller is a Python workflow controller for durable 
 
 ## Current Sprint
 
-Sprint 3, [Neovim Client V1](docs/controller-v1/3/sprint_spec.md), is the current implementation sprint. Its [checklist](docs/controller-v1/3/sprint_checklist.md) tracks the thin Neovim launcher and progress client alongside its backward-compatible controller status additions.
+Sprint 3, [Neovim Client V1](https://github.com/krafczyk/mkchad_dev/blob/main/docs/sprints/controller-v1/3/sprint_spec.md), is the current implementation sprint. Its [checklist](https://github.com/krafczyk/mkchad_dev/blob/main/docs/sprints/controller-v1/3/sprint_checklist.md) tracks the thin Neovim launcher and progress client alongside its backward-compatible controller status additions.
 
 ## Implemented Status
 
@@ -267,7 +267,7 @@ nonterminal evidence. Status reports it as `invocation_record_prefix` and tells
 the operator to inspect it. Readers never remove the temporary name or promote
 the prefix to success.
 
-Use `status --json` for integrations. It emits one JSON object and writes diagnostics only to standard error. Its stable top-level fields are `schema_version`, `controller_version`, `sprint_root`, `run_exists`, `process_running`, `run_id`, `sprint`, `state`, `reason`, `active`, `commits`, `audit`, `ci`, `counters`, `checklist`, `last_event`, and `updated_at`. The complete V1 Sprint 1 JSON schema is defined in [the status contract](docs/controller-v1/1/sprint_spec.md#12-status-json-contract).
+Use `status --json` for integrations. It emits one JSON object and writes diagnostics only to standard error. Its stable top-level fields are `schema_version`, `controller_version`, `sprint_root`, `run_exists`, `process_running`, `run_id`, `sprint`, `state`, `reason`, `active`, `commits`, `audit`, `ci`, `counters`, `checklist`, `last_event`, and `updated_at`. The complete V1 Sprint 1 JSON schema is defined in [the status contract](https://github.com/krafczyk/mkchad_dev/blob/main/docs/sprints/controller-v1/1/sprint_spec.md#12-status-json-contract).
 
 `sprint` contains `multisprint` and `index`; `reason` contains safe `code` and
 `message`; `active` contains `role`, `invocation_id`, `session_id`, `status`,

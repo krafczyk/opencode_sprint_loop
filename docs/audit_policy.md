@@ -10,7 +10,7 @@ Before auditing, read:
 
 - `AGENTS.md`.
 - `docs/v1_final_software_specification.md`.
-- `docs/multi_sprint_plan.md`.
+- `../docs/sprints/controller-v1/sprint_plan.md`.
 - `docs/threat_model.md`.
 - The audited scope's applicable specification and checklist, when present.
 

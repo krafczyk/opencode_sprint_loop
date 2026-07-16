@@ -11,7 +11,7 @@ Do not confuse this source repository with a sprint-history repository created f
 Read these before changing behavior:
 
 - `docs/v1_final_software_specification.md`
-- `docs/multi_sprint_plan.md`
+- `../docs/sprints/controller-v1/sprint_plan.md`
 
 The V1 final software specification is authoritative. If an implementation decision changes a durable schema, CLI contract, Git ownership rule, CI success rule, or terminal-state rule, update the specification deliberately rather than allowing code and documentation to diverge.
 
