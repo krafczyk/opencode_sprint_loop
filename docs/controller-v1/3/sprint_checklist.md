@@ -640,6 +640,29 @@ live checkout, TLS material, credential, browser, or OpenCode session was
 accessed. This closes S3-MKCHAD-008 only; it does not close the separately
 required real-server or browser demonstration items.
 
+### Independent-audit and closeout evidence (2026-07-16)
+
+Independent Auditor pass 1 reviewed the Sprint 3 implementation at parent
+`dc2f2f0` and plugin `9a1f446`. It found no policy-reportable P0/P1 finding,
+no `fix_now` finding, and no checked implementation, test, or documentation
+item that was falsely claimed. The parent and plugin trees were clean and the
+parent gitlink matched the plugin. `PASS6-013` remains P2/`defer`, assigned to
+Sprint 8 URL-authority compatibility; no compatibility widening was claimed.
+
+The closeout Builder reran the safe offline verification in documented order:
+the plugin command `nvim --headless --noplugin -u tests/minimal_init.lua -l
+tests/run.lua` passed with 707 assertions; `python3 -m unittest discover -s
+tests -v` passed 213 tests with one opt-in real-server test skipped; and
+`python3 -m compileall -q src`, `python3 -m ruff check src tests`, `python3
+-m ruff format --check src tests scripts`, `python3 -m mypy`, and `python3 -m
+build --no-isolation` passed. A fresh disposable no-index wheel installation
+also passed `sprint-loop --help` and `sprint-loop --version` checks. Lua
+formatter/linter checks remain unavailable because the plugin repository has
+no configured or installed Lua formatter/linter. External real
+OpenCode/browser/close-reopen demonstrations were not attempted because they
+require an externally managed disposable server and browser environment; they
+remain unproven.
+
 - [x] **S3-REVIEW-001** Audit implementation against `docs/threat_model.md`, `docs/audit_policy.md`, and Sprint 3's plugin-specific failure model.
 - [x] **S3-REVIEW-002** Prioritize ordinary malformed setup, process failure, malformed status, timer races, credential exposure, and live-environment mistakes.
 - [x] **S3-REVIEW-003** Confirm no shell interpolation path exists.
@@ -650,7 +673,7 @@ required real-server or browser demonstration items.
 - [x] **S3-REVIEW-008** Confirm closing Neovim cannot terminate the detached controller through plugin-owned teardown.
 - [x] **S3-REVIEW-009** Confirm the live mkchad checkout and runtime environment were untouched.
 - [x] **S3-REVIEW-010** Record residual browser trust, desktop-notification, detached-process, and plugin/controller skew limitations.
-- [ ] **S3-REVIEW-011** Obtain a fresh independent audit with no unresolved P0/P1 findings under the current threat model.
+- [x] **S3-REVIEW-011** Obtain a fresh independent audit with no unresolved P0/P1 findings under the current threat model.
 
 ## 23. Scope Review
 
@@ -694,6 +717,6 @@ required real-server or browser demonstration items.
 - [x] **S3-DONE-008** No credentials, generated runtime state, browser artifacts, live mkchad data, or temporary fixtures are tracked.
 - [x] **S3-DONE-009** Documentation describes actual Sprint 3 behavior and does not claim Sprint 4 or Sprint 7 functionality.
 - [ ] **S3-DONE-010** The exit demonstration has been performed and its commands are reproducible from documentation.
-- [ ] **S3-DONE-011** A fresh independent audit reports no unresolved P0/P1 findings under the current threat model.
+- [x] **S3-DONE-011** A fresh independent audit reports no unresolved P0/P1 findings under the current threat model.
 - [x] **S3-DONE-012** Plugin changes are committed and pushed before the parent submodule pointer commit.
 - [x] **S3-DONE-013** The live `~/.config/mkchad` environment remains unchanged and development used only a disposable current-remote clone with isolated XDG roots.
