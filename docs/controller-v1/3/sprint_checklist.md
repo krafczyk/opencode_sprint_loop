@@ -26,7 +26,7 @@ An item may be checked only when its implementation, tests, and required documen
 - [x] **S3-MKCHAD-005** Use isolated `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME` for every test that sources mkchad code.
 - [x] **S3-MKCHAD-006** Use only mkchad's explicit test seams and disposable state; never discover or reuse the live managed server, TLS files, logs, locks, or credentials.
 - [x] **S3-MKCHAD-007** Verify integration with callback-style `vim.g.opencode_opts.server.url(callback)` from the disposable clone.
-- [ ] **S3-MKCHAD-008** Verify private-CA integration with the disposable clone's `vim.g.opencode_opts.server.ca_cert()` accessor.
+- [x] **S3-MKCHAD-008** Verify private-CA integration with the disposable clone's `vim.g.opencode_opts.server.ca_cert()` accessor.
 - [x] **S3-MKCHAD-009** Prove the Sprint Loop plugin never calls mkchad's `server.ensure` or another server-start operation.
 - [x] **S3-MKCHAD-010** Recheck live checkout Git status after testing and confirm it is unchanged, without inspecting live runtime state.
 
@@ -625,6 +625,20 @@ S3-DETACH-006, S3-DEMO-002 through S3-DEMO-010, S3-REVIEW-011,
 S3-DONE-001, S3-DONE-002, S3-DONE-010, and S3-DONE-011 remain unchecked. No
 external OpenCode/private-CA mkchad demonstration, Lua-tooling decision,
 independent audit, or aggregate completion gate was claimed.
+
+### Builder private-CA evidence (2026-07-16)
+
+Using the existing disposable current-remote `mkchad` clone at
+`938c325`, an isolated-XDG headless Neovim script constructed only a synthetic
+schema-2 mkchad state and regular synthetic CA file beneath its disposable state
+root. It sourced the clone's actual `lua/configs/opencode.lua`, confirmed that
+`vim.g.opencode_opts.server.ca_cert()` returned that state-owned CA path, and
+configured the Sprint Loop plugin with that accessor. The plugin's fake
+controller runner observed the exact CA path only in its `SSL_CERT_FILE` child
+environment for `run`; it was absent from argv and output. No mkchad server,
+live checkout, TLS material, credential, browser, or OpenCode session was
+accessed. This closes S3-MKCHAD-008 only; it does not close the separately
+required real-server or browser demonstration items.
 
 - [x] **S3-REVIEW-001** Audit implementation against `docs/threat_model.md`, `docs/audit_policy.md`, and Sprint 3's plugin-specific failure model.
 - [x] **S3-REVIEW-002** Prioritize ordinary malformed setup, process failure, malformed status, timer races, credential exposure, and live-environment mistakes.
