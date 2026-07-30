@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "component_id": "sprint-loop-controller",
+  "component_version": "0.1.0",
+  "relationships": [
+    {
+      "id": "supports-opencode",
+      "type": "supports",
+      "target_component": "opencode",
+      "contract": {
+        "kind": "range",
+        "clauses": [
+          {
+            "min_inclusive": "1.17.0",
+            "max_exclusive": "1.19.0"
+          }
+        ],
+        "suffix_policy": "literal"
+      }
+    }
+  ]
+}

@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .config import SprintConfig
+from .component import is_supported_opencode_version
 from .errors import ControllerError
 from .jsonio import dump_json, load_json_object_handle
 from .safeio import open_directory, open_regular_at
@@ -42,7 +43,6 @@ STATE_NAMES = frozenset(
 )
 TERMINAL_STATES = frozenset({"stopped", "failed", "finished"})
 RFC3339_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$")
-SUPPORTED_SERVER_VERSION = re.compile(r"^1\.(?:17|18)\.(?:0|[1-9]\d*)$")
 
 
 def utc_now() -> str:
@@ -283,7 +283,7 @@ def validate_state(data: dict[str, Any]) -> dict[str, Any]:
     if server["url"] is not None and (
         not _is_normalized_server_origin(server["url"])
         or not isinstance(server["version"], str)
-        or not SUPPORTED_SERVER_VERSION.fullmatch(server["version"])
+        or not is_supported_opencode_version(server["version"])
     ):
         raise ControllerError("corrupt_state", "State server identity is invalid")
     active = data["active_invocation"]

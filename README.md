@@ -79,6 +79,7 @@ python3 -m opencode_sprint_loop.cli --help
 sprint-loop run --root <sprint-repository> --server-url <url>
 sprint-loop status --root <sprint-repository>
 sprint-loop status --root <sprint-repository> --json
+sprint-loop component-info --json
 sprint-loop pause --root <sprint-repository>
 sprint-loop resume --root <sprint-repository> --server-url <url>
 sprint-loop stop --root <sprint-repository>
@@ -92,8 +93,19 @@ named-value and provider-token credentials before normalization. A trailing port
 separator without a port, such as
 `http://127.0.0.1:`, is also invalid rather than selecting the default port.
 HTTP is only appropriate on the trusted local mkchad transport;
-use HTTPS and server authentication outside that boundary. Supported OpenCode
-release versions are `>=1.17.0, <1.19.0`.
+use HTTPS and server authentication outside that boundary. The package-owned
+`src/opencode_sprint_loop/component.json` is the compatibility authority: its
+`supports-opencode` range accepts 1.17.x and 1.18.x release versions only, with
+a literal suffix policy. Preflight and persisted server validation consume that
+same artifact, so prerelease and distribution-suffixed versions are not silently
+treated as equivalent.
+
+`sprint-loop component-info --json` requires no sprint root and reads only the
+packaged owner metadata. It emits exactly one schema-1 JSON document containing
+the controller identity and supported OpenCode contract, creates no runtime
+files, and never reads state, events, repository data, credentials, caches, or
+the network. It is intended for status collectors; `status --json` retains its
+existing root-required lifecycle contract.
 
 Basic authentication is inherited only from `OPENCODE_SERVER_PASSWORD` and,
 optionally, `OPENCODE_SERVER_USERNAME` (default `opencode` with a password).
@@ -298,6 +310,7 @@ python3 -m ruff check src tests
 python3 -m ruff format --check src tests scripts
 python3 -m mypy
 python3 -m build --no-isolation
+python3 scripts/wheel_smoke.py --task-root /tmp/opencode-mkchad/wheel-smoke
 git diff --check
 ```
 

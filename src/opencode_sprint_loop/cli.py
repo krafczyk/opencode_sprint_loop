@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, NoReturn, Sequence
 
 from . import __version__
+from .component import component_info
 from .config import SprintConfig, load_config
 from .errors import ControllerError
 from .agent_runner import AgentRunner, CreatedSession, InvocationRequest, ServerValidationRequest
@@ -133,6 +134,8 @@ def _parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status")
     status.add_argument("--root", required=True)
     status.add_argument("--json", action="store_true")
+    component_info_parser = commands.add_parser("component-info")
+    component_info_parser.add_argument("--json", action="store_true", required=True)
     pause = commands.add_parser("pause")
     pause.add_argument("--root", required=True)
     resume = commands.add_parser("resume")
@@ -1057,6 +1060,12 @@ def _status(root_value: str, as_json: bool) -> int:
     return 0
 
 
+def _component_info() -> int:
+    """Print package identity without loading any sprint or runtime context."""
+    sys.stdout.write(json.dumps(component_info(), sort_keys=True) + "\n")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI and convert expected controller failures to safe diagnostics."""
     parser = _parser()
@@ -1070,6 +1079,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return error.exit_status
         if arguments.command == "status":
             return _status(arguments.root, arguments.json)
+        if arguments.command == "component-info":
+            return _component_info()
         if arguments.command == "resume":
             parse_server_url(arguments.server_url)
         # Reserved controls still validate their root and configuration before

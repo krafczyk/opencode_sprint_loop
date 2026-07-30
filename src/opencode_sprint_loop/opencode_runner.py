@@ -25,6 +25,7 @@ from .agent_runner import (
     ValidatedServer,
 )
 from .errors import ControllerError
+from .component import is_supported_opencode_version
 from .invocations import (
     reconcile_message_aliases,
     reconcile_part_output,
@@ -38,7 +39,6 @@ REQUEST_TIMEOUT_SECONDS = 10
 # Sprint 2 supports only SemVer release versions in the documented 1.17.x and
 # 1.18.x compatibility window. Leading-zero numeric components are malformed
 # rather than an alternate spelling of a supported release.
-_VERSION = re.compile(r"^1\.(?:17|18)\.(?:0|[1-9]\d*)$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # Supported OpenCode 1.17.x and 1.18.x releases apply matching rules in order
 # and the final matching rule
@@ -307,7 +307,7 @@ class OpenCodeServerRunner:
             )
         if health["healthy"] is not True:
             raise ControllerError("server_unhealthy", "OpenCode server health is not healthy")
-        if not _VERSION.fullmatch(version):
+        if not is_supported_opencode_version(version):
             raise ControllerError(
                 "unsupported_server_version", "OpenCode server version is not supported"
             )

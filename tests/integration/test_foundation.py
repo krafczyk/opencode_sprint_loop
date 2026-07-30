@@ -540,7 +540,7 @@ class FoundationTests(unittest.TestCase):
     def test_help_and_version_are_successful(self) -> None:
         """The public CLI help and version paths exit successfully with stable content."""
         for arguments, expected in (
-            (["--help"], "{run,status,pause,resume,stop}"),
+            (["--help"], "{run,status,component-info,pause,resume,stop}"),
             (["--version"], "0.1.0"),
         ):
             with self.subTest(arguments=arguments):

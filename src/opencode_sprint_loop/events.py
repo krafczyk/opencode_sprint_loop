@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import stat
 import uuid
 from datetime import datetime
@@ -12,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ControllerError
+from .component import is_supported_opencode_version
 from .jsonio import MAX_JSON_BYTES
 from .safeio import open_directory, open_regular_at
 from .security import validate_safe_data
@@ -45,7 +45,6 @@ _SPRINT_ONE_TRANSITIONS = {
 }
 
 _EVENT_FIELDS = {"schema_version", "sequence", "timestamp", "run_id", "type", "state", "payload"}
-_SUPPORTED_SERVER_VERSION = re.compile(r"^1\.(?:17|18)\.(?:0|[1-9]\d*)$")
 
 
 def _bounded_event_string(value: Any) -> bool:
@@ -219,7 +218,7 @@ def validate_event_history(events: list[dict[str, Any]]) -> None:
                     or probe_terminal is not None
                     or set(payload) != {"previous_state", "server_version"}
                     or not isinstance(payload["server_version"], str)
-                    or not _SUPPORTED_SERVER_VERSION.fullmatch(payload["server_version"])
+                    or not is_supported_opencode_version(payload["server_version"])
                 ):
                     raise ControllerError(
                         "corrupt_event_log", "Server validation event payload is invalid"

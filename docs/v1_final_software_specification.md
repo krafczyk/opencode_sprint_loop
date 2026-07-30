@@ -267,6 +267,25 @@ sprint-loop status --root <sprint-repository> --json
 
 Status must work while the controller is running and after it exits. JSON output is a stable integration interface for the Neovim plugin.
 
+### 8.2.1 Component Info
+
+```bash
+sprint-loop component-info --json
+```
+
+Component info is a credential-free, root-free package identity command. It
+reads only packaged schema-1 owner metadata and emits exactly one JSON document
+with `schema`, `component_id`, `controller_version`, `supported_opencode`, and
+an optional declared `identity_profile`. It must not read or create sprint,
+state, event, repository, cache, credential, or network context. Missing,
+duplicate, oversized, malformed, or unsupported metadata fails nonzero with no
+partial standard output and a bounded redacted standard-error diagnostic.
+
+The packaged `component.json` is the single compatibility source for OpenCode
+recognizers, preflight, persistence validation, and owner documentation. The
+current `supports` relationship is the literal-suffix structured range covering
+only 1.17.x and 1.18.x release versions.
+
 ### 8.3 Pause
 
 ```bash
